@@ -374,6 +374,29 @@ Audio quality, TTS 3-tier architecture, latency masking, STT accuracy (mlx-whisp
 
 ---
 
+## Phase 14.13: Rebrand `brainchild` → `operator` ← BLOCKS LAUNCH
+
+*Naming decision landed session 170 (Apr 28). After ~25 candidate names researched against PyPI / npm / GitHub / USPTO / domains / AI-product mindshare, settled on `operator` as the product name with `1-800-operator.com` as the canonical domain. The 1-800 prefix solves the "operator.com is a premium broker, every short TLD is taken" problem with a comedic-recognizable wordmark — the curl one-liner reads like a phone number you'd actually call, which matches the switchboard-operator metaphor cleanly. CLI binary is `operator` (clean on PATH, no shell collisions; the only competing entity for the bare name is OpenAI's deprecated Operator product + the K8s Operator pattern, neither of which blocks usage).*
+
+***Already done this session:***
+- *Domain `1-800-operator.com` purchased.*
+- *GitHub org `1-800-operator` created (web flow).*
+- *PyPI placeholder `1-800-operator` v0.0.1 published — stub package whose `operator` console script prints "install via `curl -sSf https://1-800-operator.com/install | sh`" and exits 2. Source preserved in `pypi-stub/` for future version bumps. Reserves the PyPI name so an unrelated project can't claim it; pip is **not** the install path (browser/profile/symlink work belongs in the install script).*
+
+***Still ahead — the actual rename:***
+
+| Step | Description | Status | Est. |
+|------|-------------|--------|------|
+| 14.13.1 | **GitHub repo creation + initial push.** `gh repo create 1-800-operator/operator --public` from inside the repo. Push current `main` (which is still under the `brainchild` codename) so the new home exists before the rename starts; subsequent commits do the rename in-place. | ⬜ | ~10m |
+| 14.13.2 | **Codebase rename — `brainchild` → `operator` everywhere.** `src/brainchild/` → `src/operator/`, `import brainchild` → `import operator`, `brainchild` CLI wrapper → `operator`, `~/.brainchild/` → `~/.operator/`, `BRAINCHILD_BOT` env var → `OPERATOR_BOT`, every docstring + log message + comment + README mention. One-shot migration in `__main__.py:_migrate_legacy_user_artifacts` (extend the existing function) to relocate `~/.brainchild/` → `~/.operator/` on first run after upgrade. **Note:** `operator` is a Python stdlib module name — confirm `import operator` (the user's package) doesn't collide with stdlib imports inside the code (likely fine since we'd `from operator import …` for the user's modules vs `import operator` for stdlib, but verify). The `pyproject.toml` distribution name on the local repo is the open question — `operator` is reserved on PyPI so it'd be `1-800-operator` (matching the placeholder we already published) or a different distribution name with `console_scripts` mapping to `operator`. | ⬜ | ~3–4h |
+| 14.13.3 | **Phase 16 references updated.** `brainchild.build` → `1-800-operator.com` throughout 16.1, 16.3, etc. Install one-liner becomes `curl -sSf https://1-800-operator.com/install \| sh`. The 14.6 DNS work (Cloudflare nameservers) needs to happen on the new domain — `1-800-operator.com` is on whatever registrar the user bought it from; move to Cloudflare or set up Pages-equivalent on that registrar. | ⬜ | ~30m + 14.6 redo |
+| 14.13.4 | **GitHub org for `brainchild`** — set the old `brainchild` GitHub remote to either redirect to the new repo (GitHub auto-redirects when you rename) or archive it. If the repo is being renamed in-place under the existing user account, GitHub handles the redirect automatically. If migrating between orgs (current `shapirojojo/operator` → new `1-800-operator/operator`), use GitHub's transfer-repo flow which preserves redirects. | ⬜ | ~15m |
+| 14.13.5 | **CLAUDE.md + agent-context.md + roadmap.md sweep.** Replace `brainchild` with `operator` in all three docs. Watch for context-dependent ones: "the `brainchild` wrapper" → "the `operator` wrapper"; the `brainchild run claude` invocation throughout becomes `operator run claude`; `~/.brainchild/.env` → `~/.operator/.env`. | ⬜ | ~30m |
+
+**Phase total: ~5–6h.** *Belongs before 14.12.3 / 14.12.4 / 14.12.5 because the rebrand touches the wizard copy, the bundled agent configs, and the README rewrite — easier to do them once on the new name than to do them on `brainchild` and re-do.*
+
+---
+
 ## Phase 16: README & Launch ← MVP GATE
 
 *Ship it.*
