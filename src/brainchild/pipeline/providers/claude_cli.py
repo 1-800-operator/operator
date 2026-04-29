@@ -146,6 +146,35 @@ class ClaudeCLIProvider(LLMProvider):
         self._perm_resp_pipe = None
         self._perm_pump_thread = None
         self._perm_stop = threading.Event()
+        # Meeting record path. When set (captions enabled + meeting URL
+        # known), _spawn registers a bundled transcript MCP server via
+        # --mcp-config so inner-claude can fetch spoken-caption history
+        # on demand. None disables that server entirely.
+        self._meeting_record_path: str | None = None
+
+    def set_meeting_record_path(self, path):
+        """Set the meeting JSONL path so the bundled transcript MCP can read it.
+
+        Called by LLMClient.set_record once the meeting record is wired.
+        Takes effect on the next subprocess spawn — already-spawned
+        subprocesses keep whatever config they were launched with, which
+        is fine because mid-meeting record changes don't happen.
+
+        Also appends a runtime backstop to `_append_system_prompt` so the
+        recall_transcript hint survives even if a user nukes the agent's
+        ground_rules. The MCP tool's own description is the primary
+        signal; this is defense in depth.
+        """
+        self._meeting_record_path = str(path) if path else None
+        if self._meeting_record_path:
+            backstop = (
+                "\n\nA tool named `recall_transcript` is available this meeting. "
+                "Call it when a chat message asks about something said aloud — "
+                "spoken audio is not in your prompt context."
+            )
+            existing = self._append_system_prompt or ""
+            if "recall_transcript" not in existing:
+                self._append_system_prompt = existing + backstop
 
     # --- lifecycle -----------------------------------------------------
 
@@ -207,6 +236,15 @@ class ClaudeCLIProvider(LLMProvider):
             # of truth (rather than auto-accept or auto-bypass).
             cmd += ["--permission-mode", "default"]
 
+        # Register the bundled transcript MCP server via --mcp-config so the
+        # model can fetch spoken-caption history on demand. We piggyback on
+        # the permission-bridge tempdir when present; otherwise create a
+        # one-off tempdir scoped to the spawn so the JSON survives until
+        # claude reads it.
+        mcp_config_path = self._maybe_write_mcp_config()
+        if mcp_config_path is not None:
+            cmd += ["--mcp-config", str(mcp_config_path)]
+
         # Force subscription auth: clear ANTHROPIC_API_KEY so claude falls
         # through to the OAuth-stored Max credential. We additionally
         # assert apiKeySource == "none" on the system-init event below.
@@ -237,6 +275,42 @@ class ClaudeCLIProvider(LLMProvider):
             target=lambda: self._stderr_buf.extend(self._proc.stderr), daemon=True,
         ).start()
         return True
+
+    def _maybe_write_mcp_config(self):
+        """Write the per-spawn MCP config registering the transcript server.
+
+        Returns the path to the JSON file, or None when no meeting record
+        path is set (captions disabled, or no meeting yet). Lives in the
+        permission-bridge tempdir if one exists, else a fresh one.
+        """
+        if not self._meeting_record_path:
+            return None
+        if self._perm_tempdir is not None:
+            target_dir = self._perm_tempdir
+        else:
+            target_dir = Path(tempfile.mkdtemp(prefix="brainchild-claude-mcp-"))
+            # Cache so we can clean up alongside the permission-bridge
+            # tempdir when the subprocess dies. _teardown_permission_bridge
+            # already rms perm_tempdir; we extend it to also rm any mcp-only
+            # dir we created.
+            self._mcp_only_tempdir = target_dir
+        config_path = target_dir / "mcp.json"
+        config_path.write_text(json.dumps({
+            "mcpServers": {
+                "transcript": {
+                    "command": sys.executable,
+                    "args": ["-m", "brainchild.mcp_servers.transcript_server"],
+                    "env": {
+                        "OPERATOR_MEETING_RECORD_PATH": self._meeting_record_path,
+                    },
+                }
+            }
+        }, indent=2))
+        log.info(
+            f"ClaudeCLI registering transcript MCP server "
+            f"(record={self._meeting_record_path})"
+        )
+        return config_path
 
     def _setup_permission_bridge(self):
         """Create the tempdir, named pipes, and settings.json for the IPC bridge.
@@ -369,6 +443,16 @@ class ClaudeCLIProvider(LLMProvider):
         self._perm_tempdir = None
         self._perm_req_pipe = None
         self._perm_resp_pipe = None
+        # If _maybe_write_mcp_config created a standalone tempdir (no
+        # permission bridge present), drop it here too.
+        mcp_only = getattr(self, "_mcp_only_tempdir", None)
+        if mcp_only is not None:
+            try:
+                if mcp_only.exists():
+                    shutil.rmtree(mcp_only, ignore_errors=True)
+            except Exception:
+                pass
+            self._mcp_only_tempdir = None
 
     # --- restart / history rebuild ------------------------------------
 

@@ -33,6 +33,154 @@ if not _cfg_path.exists():
 
 _config = yaml.safe_load(_cfg_path.read_text())
 
+
+def _validate_config(cfg, source: Path) -> None:
+    """Sanity-check the shape of the loaded agent config.
+
+    Catches the common ways `brainchild edit` or a hand-edit can produce
+    a structurally-valid YAML that violates type expectations — e.g. a
+    missing newline that turns a list of strings into a dict (the case
+    that bit the user in 14.13). Each violation is a single line naming
+    the key and what was expected; all violations are surfaced together
+    so one round of editing fixes everything.
+
+    Errors here exit the process with a clear stderr message instead of
+    letting the bad shape leak into runtime code where it surfaces as a
+    `TypeError` ten layers down.
+    """
+    errors: list[str] = []
+
+    def _require_dict(key, val):
+        if val is None:
+            errors.append(f"`{key}` is missing — expected a mapping (dict).")
+        elif not isinstance(val, dict):
+            errors.append(f"`{key}` must be a mapping (dict), got {type(val).__name__}.")
+
+    def _require_str(key, val, *, allow_empty=False):
+        if not isinstance(val, str):
+            errors.append(f"`{key}` must be a string, got {type(val).__name__}.")
+        elif not allow_empty and not val.strip():
+            errors.append(f"`{key}` is empty — provide a non-empty string.")
+
+    def _require_list_of_str(key, val):
+        if val is None:
+            return
+        if not isinstance(val, list):
+            errors.append(f"`{key}` must be a list of strings, got {type(val).__name__}.")
+            return
+        for i, item in enumerate(val):
+            if not isinstance(item, str):
+                errors.append(
+                    f"`{key}[{i}]` must be a string, got {type(item).__name__} "
+                    f"({item!r}). A common cause is a missing newline or wrong "
+                    f"indentation between this entry and the next block."
+                )
+
+    if not isinstance(cfg, dict):
+        errors.append(f"top-level config must be a mapping, got {type(cfg).__name__}.")
+        cfg = {}
+
+    # agent
+    agent = cfg.get("agent")
+    _require_dict("agent", agent)
+    if isinstance(agent, dict):
+        _require_str("agent.name", agent.get("name"))
+
+    # llm
+    llm = cfg.get("llm")
+    _require_dict("llm", llm)
+    if isinstance(llm, dict):
+        provider = llm.get("provider")
+        _require_str("llm.provider", provider)
+        if isinstance(provider, str) and provider not in ("openai", "anthropic", "claude_cli"):
+            errors.append(
+                f"`llm.provider` must be one of openai, anthropic, claude_cli — "
+                f"got {provider!r}."
+            )
+        if isinstance(provider, str) and provider != "claude_cli":
+            _require_str("llm.model", llm.get("model"))
+
+    # transcript (optional block)
+    transcript = cfg.get("transcript")
+    if transcript is not None:
+        _require_dict("transcript", transcript)
+        if isinstance(transcript, dict):
+            ce = transcript.get("captions_enabled")
+            if ce is not None and not isinstance(ce, bool):
+                errors.append(
+                    f"`transcript.captions_enabled` must be true or false, got "
+                    f"{type(ce).__name__} ({ce!r})."
+                )
+
+    # permissions (optional block)
+    permissions = cfg.get("permissions")
+    if permissions is not None:
+        _require_dict("permissions", permissions)
+        if isinstance(permissions, dict):
+            _require_list_of_str("permissions.auto_approve", permissions.get("auto_approve"))
+            _require_list_of_str("permissions.always_ask", permissions.get("always_ask"))
+
+    # skills (optional block)
+    skills = cfg.get("skills")
+    if skills is not None:
+        _require_dict("skills", skills)
+        if isinstance(skills, dict):
+            _require_list_of_str("skills.enabled", skills.get("enabled"))
+            ext = skills.get("external_paths")
+            if ext is not None and "paths" not in skills:
+                _require_list_of_str("skills.external_paths", ext)
+            pd = skills.get("progressive_disclosure")
+            if pd is not None and not isinstance(pd, bool):
+                errors.append(
+                    f"`skills.progressive_disclosure` must be true or false, got "
+                    f"{type(pd).__name__}."
+                )
+
+    # mcp_servers (optional block; per-server validation is light — full
+    # spawn-time validation lives in mcp_client where the actual connect
+    # happens. We just guard against the type-mixing cases.)
+    servers = cfg.get("mcp_servers")
+    if servers is not None and not isinstance(servers, dict):
+        errors.append(
+            f"`mcp_servers` must be a mapping of name → server-config, got "
+            f"{type(servers).__name__}."
+        )
+    elif isinstance(servers, dict):
+        for name, block in servers.items():
+            if not isinstance(block, dict):
+                errors.append(
+                    f"`mcp_servers.{name}` must be a mapping, got "
+                    f"{type(block).__name__}."
+                )
+                continue
+            if "command" in block and not isinstance(block["command"], str):
+                errors.append(f"`mcp_servers.{name}.command` must be a string.")
+            args = block.get("args")
+            if args is not None and not isinstance(args, list):
+                errors.append(f"`mcp_servers.{name}.args` must be a list.")
+            env = block.get("env")
+            if env is not None and not isinstance(env, dict):
+                errors.append(f"`mcp_servers.{name}.env` must be a mapping.")
+
+    # personality / ground_rules (optional strings)
+    for key in ("personality", "ground_rules"):
+        v = cfg.get(key)
+        if v is not None and not isinstance(v, str):
+            errors.append(f"`{key}` must be a string, got {type(v).__name__}.")
+
+    if errors:
+        sys.stderr.write(f"\nCONFIG ERROR in {source}:\n")
+        for e in errors:
+            sys.stderr.write(f"  - {e}\n")
+        sys.stderr.write(
+            f"\nFix with `brainchild edit {BOT_NAME}` (or any text editor) "
+            f"and re-run.\n"
+        )
+        raise SystemExit(2)
+
+
+_validate_config(_config, _cfg_path)
+
 # ── User-facing config (read from agents/<name>/config.yaml) ──────────────
 
 # Agent

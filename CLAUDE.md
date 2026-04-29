@@ -116,6 +116,15 @@ API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc.) live in a
 
 `chat_runner.py` defines `READ_TOOLS` — a set of known read-only MCP tools that auto-execute without confirmation. Any tool not in that set prompts the user in chat before running. Per-server overrides (`confirm_tools`) in the bot's `agents/<name>/config.yaml` can force confirmation on specific tools.
 
+### Imported MCP Servers — cwd & Secrets Contract
+
+The `claude` agent re-imports MCPs from `~/.claude.json` and `claude mcp list` on every boot (via `_sync_claude_imports` in `__main__.py`). Two conventions imported servers must follow to spawn cleanly under operator:
+
+- **Absolute paths.** Operator spawns MCP subprocesses from the user's invocation cwd (or `$HOME` for the bundled transcript server). Relative `command` or `args` paths in `~/.claude.json` (e.g. `./mcp-server/index.js`) won't resolve. Use `~/...` (expanded) or `/abs/path/...` instead. Servers using internal `dotenv.config()` to load `./.env` from cwd will not find that file under operator — move secrets to `~/.brainchild/.env` and reference via `${VAR}` in the server's env block.
+- **Secrets in `~/.brainchild/.env`.** API keys and tokens belong in the shared `.env` file (loaded by `config.py:load_dotenv`), referenced as `${VAR}` in the MCP server's `env` block. Don't paste literal secrets into `~/.brainchild/agents/<name>/config.yaml` — the file is opened routinely via `brainchild edit` and is more likely to leak (screenshots, bug reports, accidental git-add) than `~/.claude.json` itself.
+
+Imported entries split field ownership between the source and the user. Re-imports overwrite `command`, `args`, `env`, `auth`, `auth_url`, `description` from `~/.claude.json`. They preserve `enabled`, `hints`, `read_tools`, `confirm_tools` so meeting-scope edits via `brainchild edit claude` survive each sync. Servers removed from `~/.claude.json` are dropped on the next sync.
+
 ### Participant-based Auto-leave
 
 When the bot has seen at least one other participant and is then alone for `ALONE_EXIT_GRACE_SECONDS`, it leaves automatically. 1-on-1 mode (participant count ≤ `ONE_ON_ONE_THRESHOLD`) skips the trigger-phrase requirement.

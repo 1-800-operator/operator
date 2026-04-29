@@ -171,15 +171,57 @@ def _existing_bots() -> list[str]:
     )
 
 
+def _ruamel():
+    """Lazy ruamel.yaml round-trip parser. Cached at module level via attr.
+
+    Configured for round-trip mode: comments preserved, block-scalar styles
+    (`|` for multi-line `ground_rules` / `personality`) preserved, mappings
+    not reordered. width=4096 effectively disables the default ~80-column
+    line wrap which otherwise rewraps long values into folded form.
+    """
+    cached = getattr(_ruamel, "_cached", None)
+    if cached is not None:
+        return cached
+    from ruamel.yaml import YAML
+    y = YAML(typ="rt")
+    y.preserve_quotes = True
+    y.width = 4096
+    y.indent(mapping=2, sequence=4, offset=2)
+    _ruamel._cached = y
+    return y
+
+
 def _load_yaml(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    """Round-trip load: returns a CommentedMap that survives mutation+dump
+    without losing comments or block-scalar formatting.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return {}
+    return _ruamel().load(text) or {}
 
 
-def _dump_yaml(data: dict, path: Path) -> None:
-    path.write_text(
-        yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=1000),
-        encoding="utf-8",
-    )
+def _dump_yaml(data, path: Path) -> None:
+    """Atomic write of a config to disk.
+
+    Uses ruamel.yaml's round-trip dumper so a CommentedMap (loaded via
+    `_load_yaml`) round-trips with its comments, block-scalar styles
+    (`|`), and key order intact. Plain dicts also serialize cleanly —
+    they just have nothing to preserve.
+
+    Atomic via tempfile + fsync + os.replace: a crash mid-write leaves
+    either the old or new content, never a truncated half.
+    """
+    import io
+    buf = io.StringIO()
+    _ruamel().dump(data, buf)
+    serialized = buf.getvalue()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(serialized)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _validate_name(raw: str) -> tuple[bool, str]:

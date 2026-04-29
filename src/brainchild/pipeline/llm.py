@@ -94,8 +94,19 @@ class LLMClient:
         self._mcp_status_text: str = ""
 
     def set_record(self, record: MeetingRecord):
-        """Attach (or replace) the MeetingRecord backing this client."""
+        """Attach (or replace) the MeetingRecord backing this client.
+
+        Also forwards the record's JSONL path to providers that expose
+        `set_meeting_record_path` — used by claude_cli to register a
+        bundled transcript MCP server pointing at the live file.
+        """
         self._record = record
+        setter = getattr(self._provider, "set_meeting_record_path", None)
+        if callable(setter) and getattr(record, "path", None) is not None:
+            try:
+                setter(record.path)
+            except Exception as e:
+                log.warning(f"LLM: provider rejected meeting record path: {e}")
 
     def inject_skills(self, skills: list, progressive: bool):
         """Advertise available skills in the system prompt.

@@ -23,33 +23,56 @@ _SKILLS_DIR = Path.home() / ".brainchild" / "skills"
 _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 
-def _bootstrap_claude_imports() -> None:
-    """First-run Claude Code auto-import for the `claude` agent — Phase 15.9.
+# MCP-server fields whose source of truth is the user's Claude Code config —
+# always overwritten from `~/.claude.json` / `claude mcp list` on every boot
+# so updates flow through (e.g., user re-points a stdio server at a new
+# binary path; we pick that up automatically).
+_CLAUDE_MCP_SOURCE_DRIVEN_FIELDS = (
+    "command", "args", "env", "auth", "auth_url", "description",
+)
+# Fields the user owns via `brainchild edit claude` — preserved across
+# re-imports so meeting-scope tweaks aren't clobbered every run.
+_CLAUDE_MCP_USER_PRESERVED_FIELDS = (
+    "enabled", "hints", "read_tools", "confirm_tools",
+)
 
-    Loads ~/.brainchild/agents/claude/config.yaml, merges in any MCPs
-    discovered from the user's `~/.claude.json` and `claude mcp list`
-    output, and appends commented env-var placeholders to ~/.brainchild/.env
-    for any unset vars the imported MCPs reference.
 
-    Idempotent via `_claude_import_done: true` in the agent config — first
-    run does the work, subsequent runs skip entirely (important: keeps
-    the ~3s `claude mcp list` shell-out off the hot path for every boot).
+def _sync_claude_imports() -> None:
+    """Sync the `claude` agent's MCP servers with the user's Claude Code config.
 
-    Comments in config.yaml are lost on the first write (PyYAML drops
-    them on round-trip); matches the wizard's existing write behavior.
+    Runs on every boot of the claude agent. Re-reads ~/.claude.json plus
+    `claude mcp list`, then for each discovered MCP merges with the
+    existing entry in ~/.brainchild/agents/claude/config.yaml:
+
+      - command, args, env, auth, auth_url, description → overwritten
+        from source so changes in Claude Code flow through.
+      - enabled, hints, read_tools, confirm_tools → preserved from the
+        user's existing entry so meeting-scope edits stick.
+
+    Servers present in the user config but missing from the discovered
+    set are dropped — if the user removed an MCP from Claude Code, they
+    want it gone from operator too.
+
+    The `~3s` cost of `claude mcp list` is paid every boot. If that
+    becomes a real latency concern, add a hash-check fast-path keyed on
+    a digest of ~/.claude.json#mcpServers — but defer until measured.
+
+    Comments in config.yaml are lost on rewrite (PyYAML round-trip);
+    we only write back if the merged config differs from what's on disk,
+    so a no-op sync doesn't trash formatting unnecessarily.
     """
     cfg_path = _AGENTS_DIR / "claude" / "config.yaml"
     if not cfg_path.is_file():
         return
 
-    import yaml
+    # Load via ruamel round-trip so comments and block-scalar styles in
+    # the user's config survive the mutation+dump cycle. PyYAML safe_load
+    # would return a plain dict and the next dump would strip everything
+    # cosmetic.
+    from brainchild.pipeline.setup import _load_yaml, _dump_yaml
     try:
-        with cfg_path.open(encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
-        return
-
-    if cfg.get("_claude_import_done"):
+        cfg = _load_yaml(cfg_path)
+    except Exception:
         return
 
     from brainchild.pipeline.claude_code_import import (
@@ -58,33 +81,73 @@ def _bootstrap_claude_imports() -> None:
     )
 
     mcps, wrapped = discover_all_mcps()
-    servers = cfg.setdefault("mcp_servers", {})
+    existing = cfg.get("mcp_servers") or {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    new_servers: dict = {}
     added: list[str] = []
+    updated: list[str] = []
+    removed: list[str] = []
     env_refs: set[str] = set()
+
+    discovered_names = {m.name for m in mcps}
     for m in mcps:
-        if m.name in servers:
-            continue
-        servers[m.name] = m.block
-        added.append(m.name)
+        prev = existing.get(m.name)
+        if isinstance(prev, dict):
+            merged = dict(prev)
+            for f in _CLAUDE_MCP_SOURCE_DRIVEN_FIELDS:
+                if f in m.block:
+                    merged[f] = m.block[f]
+            for f in _CLAUDE_MCP_USER_PRESERVED_FIELDS:
+                if f in prev:
+                    merged[f] = prev[f]
+                elif f in m.block:
+                    merged[f] = m.block[f]
+            new_servers[m.name] = merged
+            if any(merged.get(f) != prev.get(f) for f in _CLAUDE_MCP_SOURCE_DRIVEN_FIELDS):
+                updated.append(m.name)
+        else:
+            new_servers[m.name] = m.block
+            added.append(m.name)
         env_refs.update(m.env_vars_referenced)
+
+    for name in existing:
+        if name not in discovered_names:
+            removed.append(name)
 
     env_file = Path.home() / ".brainchild" / ".env"
     placeheld: list[str] = []
     if env_refs:
         placeheld = append_env_placeholders(sorted(env_refs), env_file)
 
-    cfg["_claude_import_done"] = True
-    try:
-        with cfg_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-    except OSError as e:
-        print(f"[claude] WARN: could not write {cfg_path}: {e}", file=sys.stderr)
-        return
+    # Drop the legacy first-run-done flag if it's still hanging around —
+    # the gate it controlled is gone now.
+    cfg.pop("_claude_import_done", None)
+    cfg["mcp_servers"] = new_servers
 
+    # Only rewrite the file when the merge actually changed something on
+    # disk. Keeps formatting churn off no-op boots.
+    on_disk_cfg = _load_yaml(cfg_path)
+    on_disk_servers = on_disk_cfg.get("mcp_servers") or {}
+    if dict(new_servers) != dict(on_disk_servers) or "_claude_import_done" in on_disk_cfg:
+        try:
+            _dump_yaml(cfg, cfg_path)
+        except OSError as e:
+            print(f"[claude] WARN: could not write {cfg_path}: {e}", file=sys.stderr)
+            return
+
+    parts = []
     if added:
-        msg = f"[claude] auto-imported {len(added)} MCP(s): {', '.join(added)}"
-        if wrapped:
-            msg += f" ({wrapped} hosted, wrapped via mcp-remote)"
+        parts.append(f"+{len(added)} ({', '.join(added)})")
+    if updated:
+        parts.append(f"~{len(updated)} ({', '.join(updated)})")
+    if removed:
+        parts.append(f"-{len(removed)} ({', '.join(removed)})")
+    if parts:
+        msg = f"[claude] MCP sync: {' '.join(parts)}"
+        if wrapped and added:
+            msg += f" — {wrapped} hosted wrapped via mcp-remote"
         print(msg, file=sys.stderr)
     if placeheld:
         print(
@@ -252,6 +315,75 @@ def _kill_orphaned_children():
             pass
 
 
+# Short, single-clause hint per MCP startup-failure kind. Keep these
+# under ~30 chars so the roll-up line stays scannable when several
+# servers fail at once.
+_MCP_KIND_HINT = {
+    "missing_creds":   "missing {vars}",
+    "binary_missing":  "binary not found",
+    "startup_timeout": "didn't respond",
+    "handshake_crash": "crashed on startup",
+    "oauth_needed":    "run `brainchild auth {name}`",
+    "unknown":         "error",
+}
+
+
+def _emit_mcp_rollup(mcp, connector=None):
+    """Print one ▸ line summarizing per-server MCP connect status.
+
+    Silent when there are no MCP servers configured or the MCPClient
+    didn't run (Track A: claude_cli owns its own MCPs). On mixed
+    success, failed servers get a terse remediation hint pulled from
+    `_MCP_KIND_HINT` so the user knows the exact next command without
+    digging through /tmp/brainchild.log.
+
+    If `connector` is provided AND any servers failed, also drop a
+    single chat-side one-liner so meeting participants see the
+    degraded state without having to inspect the host terminal.
+    Successful-only loads stay terminal-only — chat doesn't need to
+    say "everything's fine."
+    """
+    from brainchild import config
+    from brainchild.pipeline import ui
+    if not mcp or not config.MCP_SERVERS:
+        return
+    failures = getattr(mcp, "startup_failures", {}) or {}
+    parts = []
+    for name in config.MCP_SERVERS:
+        info = failures.get(name)
+        if not info:
+            parts.append(f"{name} ✓")
+            continue
+        kind = info.get("kind", "unknown")
+        template = _MCP_KIND_HINT.get(kind, "error")
+        if kind == "missing_creds":
+            vars_list = info.get("vars") or []
+            vars_str = vars_list[0] if len(vars_list) == 1 else "credentials"
+            hint = template.format(vars=vars_str)
+        elif kind == "oauth_needed":
+            hint = template.format(name=name)
+        else:
+            hint = template
+        parts.append(f"{name} ✗ ({hint})")
+    ui.say("MCP: " + " · ".join(parts))
+
+    if connector is not None and failures:
+        failed_names = [n for n in failures]
+        suffix = "" if len(failed_names) == 1 else "s"
+        chat_msg = (
+            f"⚠ {len(failed_names)} MCP server{suffix} failed to start: "
+            f"{', '.join(failed_names)}. Tools from {'it' if len(failed_names) == 1 else 'them'} "
+            f"won't work this meeting — see host terminal or `tail /tmp/brainchild.log` for details."
+        )
+        try:
+            connector.send_chat(chat_msg)
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger("brainchild").warning(
+                f"could not surface MCP failure to chat: {e}"
+            )
+
+
 def _print_startup_banner(skills):
     """Print the face + identity + loadout banner as the boot splash.
 
@@ -270,7 +402,9 @@ def _print_startup_banner(skills):
     """
     from brainchild import config
     import sys as _sys
+    import shutil as _shutil
     from brainchild.pipeline import face
+    from rich.cells import cell_len
 
     bot_name = os.environ.get("BRAINCHILD_BOT", "")
     portrait_path = _AGENTS_DIR / bot_name / "portrait.txt"
@@ -294,11 +428,44 @@ def _print_startup_banner(skills):
     parts.append(config.LLM_MODEL or f"{config.LLM_PROVIDER} (subscription)")
     loadout = sep.join(parts)
 
-    right = [config.AGENT_NAME, config.AGENT_TAGLINE, loadout, ""]
-
     gap = "   "
+    face_w = max((cell_len(fl) for fl in face_lines), default=0)
+    term_w = _shutil.get_terminal_size((80, 20)).columns
+    right_w = max(20, term_w - face_w - cell_len(gap))
+
+    def _wrap(text: str) -> list[str]:
+        if not text:
+            return [""]
+        if cell_len(text) <= right_w:
+            return [text]
+        out: list[str] = []
+        cur = ""
+        for word in text.split(" "):
+            candidate = f"{cur} {word}" if cur else word
+            if cell_len(candidate) <= right_w:
+                cur = candidate
+                continue
+            if cur:
+                out.append(cur)
+                cur = ""
+            while cell_len(word) > right_w:
+                out.append(word[:right_w])
+                word = word[right_w:]
+            cur = word
+        if cur:
+            out.append(cur)
+        return out
+
+    right: list[str] = []
+    for entry in (config.AGENT_NAME, config.AGENT_TAGLINE, loadout):
+        right.extend(_wrap(entry))
+
+    pad_face = " " * face_w
+    n_rows = max(len(face_lines), len(right))
     print("", file=_sys.stderr)
-    for fl, rt in zip(face_lines, right):
+    for i in range(n_rows):
+        fl = face_lines[i] if i < len(face_lines) else pad_face
+        rt = right[i] if i < len(right) else ""
         print(f"{fl}{gap}{rt}".rstrip(), file=_sys.stderr)
     print("", file=_sys.stderr)
 
@@ -392,7 +559,17 @@ def _run_edit(argv):
     import shlex
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     cmd = shlex.split(editor) + [str(path)]
-    return subprocess.call(cmd)
+    subprocess.call(cmd)
+    # Editors (vim especially) sometimes exit nonzero for benign reasons —
+    # swapfile noise, terminal weirdness — even when the user saved cleanly.
+    # Don't propagate that to the shell prompt; the only thing that matters
+    # is whether the config still exists. Print a positive signal so the
+    # user has no ambiguity about whether their edit landed.
+    if path.exists():
+        print(f"Saved {path}")
+        return 0
+    print(f"File no longer exists: {path}")
+    return 1
 
 
 def _run_where(argv):
@@ -645,10 +822,11 @@ def _run_bot(name, rest):
                 file=sys.stderr,
             )
             return 2
-        # First-run auto-import of Claude Code MCPs (+ env placeholders).
-        # Idempotent via a marker in config.yaml; safe to call every run
-        # but skips the ~3s `claude mcp list` shell-out after first run.
-        _bootstrap_claude_imports()
+        # Sync Claude Code MCP servers into the agent config on every boot —
+        # picks up servers added/removed/edited in `~/.claude.json` since
+        # the last run. Pays the ~3s `claude mcp list` shell-out cost
+        # every boot in exchange for staying in sync.
+        _sync_claude_imports()
 
     # MUST be set before any `from brainchild import config` fires in the pipeline modules.
     os.environ["BRAINCHILD_BOT"] = name
@@ -800,6 +978,7 @@ def _run_macos(meeting_url=None, force=False):
             gh_login = mcp.resolve_github_user()
             if gh_login:
                 llm.inject_github_user(gh_login)
+        _emit_mcp_rollup(mcp, connector=connector)
 
     log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")
     runner = ChatRunner(
@@ -823,7 +1002,7 @@ def _run_macos(meeting_url=None, force=False):
             with open(reason_file) as _f:
                 reason = _f.read().strip()
             os.remove(reason_file)
-            ui.warn(reason)
+            ui.err(reason, hint_log=False)
             log.info(reason)
         except FileNotFoundError:
             if signum:
@@ -924,6 +1103,7 @@ def _run_linux(meeting_url, force=False):
             log.error(f"MCP client startup failed: {e}")
             ui.err("MCP startup failed")
             mcp = None
+        _emit_mcp_rollup(mcp, connector=connector)
 
     runner = ChatRunner(
         connector,
