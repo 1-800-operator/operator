@@ -474,6 +474,50 @@ def test_shared_library_skills_without_external():
     print("  library-only resolution: PASS")
 
 
+def test_project_scope_skills_walked_via_cwd():
+    """`<cwd>/.claude/skills/` is walked implicitly so project-scoped Claude
+    Code skills surface without needing a config edit. Mirrors the cwd-aware
+    walk we do for project-scope MCPs.
+    """
+    from brainchild.pipeline.skills import load_skills
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = Path(tmp)
+        _write_skill(proj / ".claude" / "skills" / "proj-only", "proj-only", "Project skill.")
+        skills = load_skills(
+            None,
+            external_paths=None,
+            shared_library_dir=Path(tmp) / "no-library",
+            cwd=proj,
+        )
+        names = [s.name for s in skills]
+        assert names == ["proj-only"], names
+    print("  project-scope skills walked via cwd: PASS")
+
+
+def test_project_scope_skills_override_external_on_collision():
+    """Project scope wins on name collision (last-wins, project comes after
+    external in source order). Mirrors project-scope MCP precedence.
+    """
+    from brainchild.pipeline.skills import load_skills
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ext = Path(tmp) / "external"
+        proj = Path(tmp) / "project"
+        _write_skill(ext / "shared", "shared", "External version.", body="EXT BODY")
+        _write_skill(proj / ".claude" / "skills" / "shared", "shared", "Project version.", body="PROJ BODY")
+        skills = load_skills(
+            None,
+            external_paths=[str(ext)],
+            shared_library_dir=Path(tmp) / "no-library",
+            cwd=proj,
+        )
+        assert len(skills) == 1
+        assert skills[0].description == "Project version."
+        assert "PROJ BODY" in skills[0].body
+    print("  project-scope overrides external on collision: PASS")
+
+
 def test_empty_external_paths_with_missing_library():
     """No library, no external_paths → empty result, no crash."""
     from brainchild.pipeline.skills import load_skills
@@ -515,5 +559,7 @@ if __name__ == "__main__":
     _run_with_caplog(test_tilde_external_path_expands)
     _run_with_caplog(test_shared_library_scanned_first)
     test_shared_library_skills_without_external()
+    test_project_scope_skills_walked_via_cwd()
+    test_project_scope_skills_override_external_on_collision()
     test_empty_external_paths_with_missing_library()
     print("\nAll skill tests passed.")

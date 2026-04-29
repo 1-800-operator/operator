@@ -41,6 +41,7 @@ from brainchild.pipeline.claude_code_import import (
     append_env_placeholders,
     discover_all_mcps,
     discover_hosted_mcps_via_cli,
+    discover_mcp_health,
     extract_imported_mcps,
     read_user_claude_md,
     read_user_mcp_config,
@@ -244,6 +245,35 @@ def test_extract_imported_mcps_skips_malformed_entries():
     print("PASS  test_extract_imported_mcps_skips_malformed_entries")
 
 
+def test_extract_imported_mcps_includes_project_scope_for_cwd():
+    # `claude mcp add` defaults to project scope, writing entries under
+    # ~/.claude.json#projects.<cwd>.mcpServers — not the top level. Importer
+    # must walk both. Pin cwd so the test is independent of where it runs.
+    cfg = {
+        "mcpServers": {"user-scope-thing": {"command": "uss"}},
+        "projects": {
+            "/some/proj": {"mcpServers": {"proj-scope-thing": {"command": "pst"}}},
+        },
+    }
+    mcps, _ = extract_imported_mcps(cfg, cwd=Path("/some/proj"))
+    names = {m.name for m in mcps}
+    assert names == {"user-scope-thing", "proj-scope-thing"}, names
+    print("PASS  test_extract_imported_mcps_includes_project_scope_for_cwd")
+
+
+def test_extract_imported_mcps_project_scope_wins_on_collision():
+    cfg = {
+        "mcpServers": {"shared": {"command": "user-version"}},
+        "projects": {
+            "/some/proj": {"mcpServers": {"shared": {"command": "proj-version"}}},
+        },
+    }
+    mcps, _ = extract_imported_mcps(cfg, cwd=Path("/some/proj"))
+    assert len(mcps) == 1
+    assert mcps[0].block["command"] == "proj-version", mcps[0].block["command"]
+    print("PASS  test_extract_imported_mcps_project_scope_wins_on_collision")
+
+
 # ---------------------------------------------------------------------------
 # discover_hosted_mcps_via_cli
 # ---------------------------------------------------------------------------
@@ -291,6 +321,24 @@ def test_discover_hosted_mcps_timeout_returns_empty():
     print("PASS  test_discover_hosted_mcps_timeout_returns_empty")
 
 
+def test_discover_hosted_mcps_parses_http_annotation():
+    # claude-code annotates HTTP-not-SSE remote MCPs with `(HTTP)` between
+    # the URL and the ` - status` segment. Earlier regex didn't tolerate
+    # that and silently dropped Sentry-style entries.
+    stdout = (
+        "sentry: https://mcp.sentry.dev/mcp (HTTP) - ✓ Connected\n"
+        "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected\n"
+    )
+    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+               return_value=_run_ok(stdout)):
+        mcps = discover_hosted_mcps_via_cli()
+    names = [m.name for m in mcps]
+    assert names == ["sentry", "claude-ai-linear"], names
+    sentry = [m for m in mcps if m.name == "sentry"][0]
+    assert sentry.transport == "http", sentry.transport
+    print("PASS  test_discover_hosted_mcps_parses_http_annotation")
+
+
 def test_discover_hosted_mcps_skips_malformed_lines():
     stdout = (
         "garbage\n"
@@ -302,6 +350,39 @@ def test_discover_hosted_mcps_skips_malformed_lines():
         mcps = discover_hosted_mcps_via_cli()
     assert [m.name for m in mcps] == ["ok-entry"]
     print("PASS  test_discover_hosted_mcps_skips_malformed_lines")
+
+
+# ---------------------------------------------------------------------------
+# discover_mcp_health
+# ---------------------------------------------------------------------------
+
+def test_discover_mcp_health_classifies_status():
+    stdout = (
+        "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected\n"
+        "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ! Needs authentication\n"
+        "sentry: https://mcp.sentry.dev/mcp (HTTP) - ✗ Failed to connect\n"
+    )
+    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+               return_value=_run_ok(stdout)):
+        records = discover_mcp_health()
+    assert len(records) == 3
+    by_name = {name: (status, healthy) for name, _u, status, healthy in records}
+    assert by_name["claude.ai Linear"][1] is True
+    assert by_name["claude.ai Gmail"][1] is False
+    assert by_name["claude.ai Gmail"][0] == "! Needs authentication"
+    assert by_name["sentry"][1] is False
+    assert by_name["sentry"][0] == "✗ Failed to connect"
+    print("PASS  test_discover_mcp_health_classifies_status")
+
+
+def test_discover_mcp_health_returns_empty_on_cli_failure():
+    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+               side_effect=FileNotFoundError):
+        assert discover_mcp_health() == []
+    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+               return_value=_run_ok("", returncode=1)):
+        assert discover_mcp_health() == []
+    print("PASS  test_discover_mcp_health_returns_empty_on_cli_failure")
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +413,9 @@ def test_discover_all_merges_both_sources(home):
 
 @_with_fake_home
 def test_read_user_claude_md_missing_returns_none(home):
-    assert read_user_claude_md() is None
+    # Pin cwd to a clean dir so the project-scope walk doesn't pick up
+    # whatever CLAUDE.md happens to live in the test runner's cwd.
+    assert read_user_claude_md(cwd=home) is None
     print("PASS  test_read_user_claude_md_missing_returns_none")
 
 
@@ -340,8 +423,39 @@ def test_read_user_claude_md_missing_returns_none(home):
 def test_read_user_claude_md_present_returns_contents(home):
     (home / ".claude").mkdir()
     (home / ".claude" / "CLAUDE.md").write_text("# hi\n")
-    assert read_user_claude_md() == "# hi\n"
+    # Pin cwd to a clean dir so we test the user-scope-only path.
+    clean_cwd = home / "empty_proj"
+    clean_cwd.mkdir()
+    assert read_user_claude_md(cwd=clean_cwd) == "# hi\n"
     print("PASS  test_read_user_claude_md_present_returns_contents")
+
+
+@_with_fake_home
+def test_read_user_claude_md_walks_project_scope_too(home):
+    # User scope absent. Project root + project .claude/ both present.
+    # Multi-source result should include both, each with a section header.
+    proj = home / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("PROJECT ROOT RULES\n")
+    (proj / ".claude" / "CLAUDE.md").write_text("PROJECT CLAUDE DIR RULES\n")
+    out = read_user_claude_md(cwd=proj)
+    assert out is not None
+    assert "PROJECT ROOT RULES" in out
+    assert "PROJECT CLAUDE DIR RULES" in out
+    assert "# CLAUDE.md — project (./CLAUDE.md)" in out
+    assert "# CLAUDE.md — project (./.claude/CLAUDE.md)" in out
+    print("PASS  test_read_user_claude_md_walks_project_scope_too")
+
+
+@_with_fake_home
+def test_read_user_claude_md_single_project_source_no_header(home):
+    # Only project-scope present (no user CLAUDE.md). Single-source rule:
+    # return bare content, no section header.
+    proj = home / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("ONLY ONE SOURCE\n")
+    assert read_user_claude_md(cwd=proj) == "ONLY ONE SOURCE\n"
+    print("PASS  test_read_user_claude_md_single_project_source_no_header")
 
 
 # ---------------------------------------------------------------------------
@@ -429,14 +543,21 @@ if __name__ == "__main__":
         test_extract_imported_mcps_sse_wrapped_via_mcp_remote,
         test_extract_imported_mcps_env_vars_captured,
         test_extract_imported_mcps_skips_malformed_entries,
+        test_extract_imported_mcps_includes_project_scope_for_cwd,
+        test_extract_imported_mcps_project_scope_wins_on_collision,
         test_discover_hosted_mcps_parses_claude_mcp_list,
+        test_discover_hosted_mcps_parses_http_annotation,
         test_discover_hosted_mcps_returncode_nonzero_returns_empty,
         test_discover_hosted_mcps_file_not_found_returns_empty,
         test_discover_hosted_mcps_timeout_returns_empty,
         test_discover_hosted_mcps_skips_malformed_lines,
+        test_discover_mcp_health_classifies_status,
+        test_discover_mcp_health_returns_empty_on_cli_failure,
         test_discover_all_merges_both_sources,
         test_read_user_claude_md_missing_returns_none,
         test_read_user_claude_md_present_returns_contents,
+        test_read_user_claude_md_walks_project_scope_too,
+        test_read_user_claude_md_single_project_source_no_header,
         test_append_env_placeholders_creates_file_if_missing,
         test_append_env_placeholders_idempotent_when_var_set,
         test_append_env_placeholders_idempotent_when_placeheld,

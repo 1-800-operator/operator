@@ -200,18 +200,26 @@ def load_skills(
     enabled_names: list[str] | None,
     external_paths: list[str] | None = None,
     shared_library_dir: Path | None = None,
+    cwd: Path | None = None,
 ) -> list[Skill]:
-    """Load skills from shared library + external_paths, filtered by enabled_names.
+    """Load skills from shared library + external_paths + project scope,
+    filtered by enabled_names.
 
     Args:
       enabled_names: names to keep. None means "return all discovered."
       external_paths: list of extra paths to scan. Tilde-prefixed or
         absolute; relative paths WARN + skip.
       shared_library_dir: override ~/.brainchild/skills/ (used by tests).
+      cwd: project working directory. Defaults to Path.cwd(). Used to
+        walk `<cwd>/.claude/skills/` implicitly so project-scoped Claude
+        Code skills surface without needing to be listed in
+        external_paths. Mirrors the cwd-aware walk we do for project-
+        scope MCPs.
 
     Returns at most one Skill per name. Name collisions resolve last-wins
-    in source order: shared library first, then each external path. So
-    an external path's same-named skill overrides the library's.
+    in source order: shared library first, then each external path, then
+    project-scope. So a project skill overrides a same-named library or
+    external skill.
 
     Unknown enabled names WARN once and are silently dropped from the
     result (the LLM is unaffected; they simply don't appear in the
@@ -219,6 +227,8 @@ def load_skills(
     """
     if shared_library_dir is None:
         shared_library_dir = DEFAULT_SHARED_LIBRARY
+    if cwd is None:
+        cwd = Path.cwd()
 
     source_dirs: list[Path] = []
     shared = Path(shared_library_dir).expanduser().resolve()
@@ -229,6 +239,10 @@ def load_skills(
         p = _resolve_external_path(entry)
         if p is not None:
             source_dirs.append(p)
+
+    project_skills = (Path(cwd) / ".claude" / "skills").resolve()
+    if project_skills.is_dir():
+        source_dirs.append(project_skills)
 
     by_name: dict[str, Skill] = {}
     for src in source_dirs:

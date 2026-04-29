@@ -78,6 +78,7 @@ def _sync_claude_imports() -> None:
     from brainchild.pipeline.claude_code_import import (
         append_env_placeholders,
         discover_all_mcps,
+        discover_mcp_health,
     )
 
     mcps, wrapped = discover_all_mcps()
@@ -155,6 +156,15 @@ def _sync_claude_imports() -> None:
             f"{', '.join(placeheld)} — edit the file to fill in values.",
             file=sys.stderr,
         )
+
+    # Pre-flight MCP health: surface anything `claude mcp list` already
+    # marks as unhealthy (e.g. "Needs authentication", "Failed to connect")
+    # to stderr before meeting join. Without this, Track A users only learn
+    # an MCP is broken when its tools silently fail to work in-meeting —
+    # the inner-claude subprocess swallows the startup error.
+    for name, _url, status, healthy in discover_mcp_health():
+        if not healthy:
+            print(f"[claude] ⚠ MCP needs attention: {name} — {status}", file=sys.stderr)
 
 
 def _ensure_user_agents():

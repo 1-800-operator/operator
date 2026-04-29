@@ -149,16 +149,34 @@ def _stdio_block_from_entry(entry: dict) -> dict:
     return block
 
 
-def extract_imported_mcps(cfg: dict) -> tuple[list[ImportedMCP], int]:
+def _collect_mcp_servers_from_cfg(cfg: dict, cwd: Optional[Path] = None) -> dict:
+    """Merge user-scope `mcpServers` with project-scope mcpServers for the
+    current cwd. Project scope wins on collision — `claude mcp list` follows
+    the same precedence, and `claude mcp add` defaults entries to project
+    scope, so most user-added MCPs live there.
+    """
+    merged = dict(cfg.get("mcpServers") or {})
+    cwd_str = str(cwd if cwd is not None else Path.cwd())
+    proj = (cfg.get("projects") or {}).get(cwd_str) or {}
+    for name, entry in (proj.get("mcpServers") or {}).items():
+        merged[name] = entry
+    return merged
+
+
+def extract_imported_mcps(cfg: dict, cwd: Optional[Path] = None) -> tuple[list[ImportedMCP], int]:
     """Pull mcpServers out of the claude-code config, classify transport,
     and wrap HTTP/SSE entries with mcp-remote.
+
+    Walks both user-scope (`mcpServers`) and project-scope
+    (`projects.<cwd>.mcpServers`) entries. `cwd` defaults to the process
+    cwd; tests can pin it.
 
     Returns (mcps, http_sse_wrapped_count). The count is informational —
     callers can surface "N hosted MCPs wrapped via mcp-remote" in the
     wizard summary. No entries are silently dropped; malformed entries
     (non-dict, no command and no url) are skipped.
     """
-    servers = cfg.get("mcpServers") or {}
+    servers = _collect_mcp_servers_from_cfg(cfg, cwd)
     out: list[ImportedMCP] = []
     wrapped = 0
     for name, entry in servers.items():
@@ -189,9 +207,11 @@ def extract_imported_mcps(cfg: dict) -> tuple[list[ImportedMCP], int]:
 # Matches one MCP line in `claude mcp list` output, e.g.:
 #   "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected"
 #   "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ! Needs authentication"
-# Format as of claude-code 2.x. Tolerant of format drift via non-match skip.
+#   "sentry: https://mcp.sentry.dev/mcp (HTTP) - ✓ Connected"
+# The `(HTTP)` annotation is optional — claude-code prints it for
+# HTTP-not-SSE remote MCPs. Tolerant of format drift via non-match skip.
 _CLAUDE_MCP_LIST_RE = re.compile(
-    r"^(?P<name>.+?):\s+(?P<url>https?://\S+)\s+-\s+(?P<status>.+?)\s*$"
+    r"^(?P<name>.+?):\s+(?P<url>https?://\S+)(?:\s+\([A-Z]+\))?\s+-\s+(?P<status>.+?)\s*$"
 )
 
 _CLAUDE_MCP_LIST_TIMEOUT = 10.0
@@ -262,6 +282,45 @@ def discover_hosted_mcps_via_cli() -> list[ImportedMCP]:
     return out
 
 
+def discover_mcp_health() -> list[tuple[str, str, str, bool]]:
+    """Run `claude mcp list` and return (name, url, status, healthy) per
+    parseable line. Healthy iff the status field starts with the ✓ marker
+    claude-code uses for connected.
+
+    Use this to surface pre-flight MCP health on the claude-agent boot
+    path: an MCP that needs reauth or has failed to connect would
+    otherwise only manifest in-meeting as tools silently not working.
+
+    Shells out a second time after `discover_hosted_mcps_via_cli` —
+    accepted cost for v1; can be unified with a parsed-once cache later.
+    Returns [] on missing/failing CLI; stdio entries (no URL in CLI
+    output) are not included.
+    """
+    try:
+        r = subprocess.run(
+            ["claude", "mcp", "list"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_MCP_LIST_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0:
+        return []
+
+    out: list[tuple[str, str, str, bool]] = []
+    for line in r.stdout.splitlines():
+        m = _CLAUDE_MCP_LIST_RE.match(line)
+        if not m:
+            continue
+        name = m.group("name").strip()
+        url = m.group("url")
+        status = m.group("status").strip()
+        healthy = status.startswith("✓")
+        out.append((name, url, status, healthy))
+    return out
+
+
 def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
     """Full auto-import: merge `~/.claude.json#mcpServers` with
     `claude mcp list` output. Dedup by slugified name (local config wins
@@ -292,14 +351,45 @@ def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
     return out, wrapped_json + wrapped_cli
 
 
-def read_user_claude_md() -> Optional[str]:
-    """Return the contents of ~/.claude/CLAUDE.md, or None if missing / unreadable."""
-    if not _USER_CLAUDE_MD.is_file():
+def read_user_claude_md(cwd: Optional[Path] = None) -> Optional[str]:
+    """Return concatenated CLAUDE.md content from user-scope and
+    project-scope, or None if no source exists.
+
+    Walks (in order):
+      1. ~/.claude/CLAUDE.md (user-scope)
+      2. <cwd>/CLAUDE.md (project root)
+      3. <cwd>/.claude/CLAUDE.md (project Claude Code dir)
+
+    Each present source is included with a section header so the wizard's
+    merge into ground_rules carries full provenance. Mirrors how Claude
+    Code itself walks both scopes — without this the wizard's CLAUDE.md
+    merge view would only show user-scope rules even when the project
+    has its own CLAUDE.md sitting next to the bot.
+
+    `cwd` defaults to Path.cwd(); tests can pin it.
+    """
+    if cwd is None:
+        cwd = Path.cwd()
+    sources = [
+        ("user (~/.claude/CLAUDE.md)", _USER_CLAUDE_MD),
+        ("project (./CLAUDE.md)", cwd / "CLAUDE.md"),
+        ("project (./.claude/CLAUDE.md)", cwd / ".claude" / "CLAUDE.md"),
+    ]
+    found: list[tuple[str, str]] = []
+    for label, path in sources:
+        if not path.is_file():
+            continue
+        try:
+            found.append((label, path.read_text()))
+        except OSError:
+            continue
+    if not found:
         return None
-    try:
-        return _USER_CLAUDE_MD.read_text()
-    except OSError:
-        return None
+    if len(found) == 1:
+        # Single source: return bare content (preserves old contract;
+        # callers like the wizard can show provenance separately).
+        return found[0][1]
+    return "\n\n".join(f"# CLAUDE.md — {label}\n{content}" for label, content in found)
 
 
 def append_env_placeholders(var_names: Iterable[str], env_file: Path) -> list[str]:
