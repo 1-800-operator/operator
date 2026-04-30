@@ -181,8 +181,16 @@ Google account in a browser.
 
 **Blast radius:** full access to the Google account the bot is signed into.
 Use a dedicated Google account for the bot, not your personal one. The
-`0o700` dir perm (see hardening above) stops other users on a shared host;
-it does not stop malware running as the bot's own user.
+filesystem-perm hardening (`browser_profile/` `0o700`, `auth_state.json` +
+`google_account.json` `0o600`, `debug/` `0o700`, plus `os.umask(0o077)` at
+process start so any new file/dir under `~/.brainchild/` is born private —
+session 173, commit `9a6d02e`) stops other users on a shared host and the
+disk-mounted-elsewhere case (stolen laptop without FileVault, leaked
+backup). It does not stop malware running as the bot's own user — that
+threat model would need real encryption-at-rest (macOS Keychain / Linux
+Secret Service), which is the v2 conversation. Note: `~/.brainchild/history/`
+is still world-readable and contains every meeting's chat JSONL — pre-prod
+acceptable, but harden before launch.
 
 ### L3 — Chat and captions logged in clear
 
