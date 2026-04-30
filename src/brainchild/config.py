@@ -409,6 +409,7 @@ PROGRESS_NARRATION_THROTTLE_S     = float(_narration.get("throttle_seconds", 5))
 #   3. TOOL_TIMEOUT_SECONDS below — global fallback for any server whose
 #      name isn't in the map.
 ALONE_EXIT_GRACE_SECONDS   = 60    # once we've seen a peer and they leave, exit after this many seconds
+HOLD_DURATION_SECONDS      = 2.0   # min gap between the "Hold for <bot>..." line and the LLM-generated intro, so users register the "connecting you now" beat even when intro generation finishes fast
 LOBBY_WAIT_SECONDS         = 600   # max wait in Meet waiting room for host to admit us
 CAPTION_SILENCE_SECONDS    = 0.7   # dead-air gap before a buffered caption chunk commits to history
 MAX_TOKENS                 = 2000  # runaway guard on LLM output; "be brief" system-prompt does the real shaping. Bumped from 1000 in session 159 — multi-paragraph skill outputs (codebase-walkthrough, migration-plan) need ~1200–1800 tokens to deliver entry-point through closing-question without truncation.
@@ -520,22 +521,37 @@ MCP_SERVERS = {}
 # calls a tool whose namespaced prefix matches a disabled server, instead of
 # the generic "Unknown tool" — see mcp_client.disabled_server_for_tool().
 DISABLED_MCP_SERVERS = {}
-for _name, _srv in _config.get("mcp_servers", {}).items():
+
+# For the claude agent (Track A / claude_cli): the cfg's `mcp_servers` block
+# is a slim *overlay* — only `enabled` and user-edit fields are persisted.
+# Source-driven fields (command/args/env/auth/auth_url/description) are
+# rediscovered fresh on every boot from cwd-aware `discover_all_mcps()`.
+# Build the runtime view by joining live discovery with the overlay; dormant
+# overlay rows (no current-cwd discovery hit) drop out entirely for this run.
+if LLM_PROVIDER == "claude_cli":
+    _overlay = _config.get("mcp_servers", {}) or {}
+    try:
+        from brainchild.pipeline.claude_code_import import discover_all_mcps as _discover
+        _discovered, _ = _discover()
+    except Exception:
+        _discovered = []
+    for _m in _discovered:
+        _row = _overlay.get(_m.name) or {}
+        if isinstance(_row, dict) and not _row.get("enabled", True):
+            DISABLED_MCP_SERVERS[_m.name] = {}
+            continue
+        MCP_SERVERS[_m.name] = {"_track_a_toggle_only": True}
+    # Skip the operational-parse loop below (claude handles command/args/env).
+    _config_mcp_iter = []
+else:
+    _config_mcp_iter = list(_config.get("mcp_servers", {}).items())
+
+for _name, _srv in _config_mcp_iter:
     # Blocks with `enabled: false` are declared but dormant — kept in config so
     # the build wizard can toggle them on without re-authoring env/hints/tools.
     # Default is enabled when the field is absent (backward-compat).
     if not _srv.get("enabled", True):
         DISABLED_MCP_SERVERS[_name] = {}
-        continue
-    if LLM_PROVIDER == "claude_cli":
-        # Track A: claude already knows the command/args/env for its MCP
-        # servers (from ~/.claude.json). Our config block is a toggle-only
-        # surface so the user can disable individual servers via the wizard
-        # to save context. We track the enabled set so step 5d can pass
-        # `disabledMcpjsonServers` to claude via --settings, but skip the
-        # full operational parse (no env-var resolution, no read/confirm
-        # tool sets — claude handles all that itself).
-        MCP_SERVERS[_name] = {"_track_a_toggle_only": True}
         continue
     _resolved_env, _missing_vars = _resolve_env_vars(_srv.get("env", {}), _name)
     # Auth style: "env" (API key via .env — default) or "oauth" (mcp-remote

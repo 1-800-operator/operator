@@ -23,52 +23,60 @@ _SKILLS_DIR = Path.home() / ".brainchild" / "skills"
 _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 
-# MCP-server fields whose source of truth is the user's Claude Code config —
-# always overwritten from `~/.claude.json` / `claude mcp list` on every boot
-# so updates flow through (e.g., user re-points a stdio server at a new
-# binary path; we pick that up automatically).
-_CLAUDE_MCP_SOURCE_DRIVEN_FIELDS = (
-    "command", "args", "env", "auth", "auth_url", "description",
-)
-# Fields the user owns via `brainchild edit claude` — preserved across
-# re-imports so meeting-scope tweaks aren't clobbered every run.
-_CLAUDE_MCP_USER_PRESERVED_FIELDS = (
-    "enabled", "hints", "read_tools", "confirm_tools",
+# MCP-server overlay fields the user owns via `brainchild edit claude`.
+# Persisted to disk; preserved across boots and across cwd switches.
+# Anything outside this set (command, args, env, auth, auth_url, description)
+# is rediscovered fresh on every boot from cwd-aware `discover_all_mcps()`
+# and never written to disk — Claude Code's project-scope `mcpServers`
+# semantics make discovery cwd-sensitive, so persisting source-driven
+# fields would either flap by cwd or hide user edits behind stale state.
+_CLAUDE_MCP_OVERLAY_FIELDS = (
+    "enabled", "hints", "read_tools", "confirm_tools", "tool_timeout_seconds",
 )
 
 
 def _sync_claude_imports() -> None:
-    """Sync the `claude` agent's MCP servers with the user's Claude Code config.
+    """Sync the `claude` agent's MCP overlay with the user's Claude Code config.
 
-    Runs on every boot of the claude agent. Re-reads ~/.claude.json plus
-    `claude mcp list`, then for each discovered MCP merges with the
-    existing entry in ~/.brainchild/agents/claude/config.yaml:
+    Runs on every boot of the claude agent. Maintains a slim *overlay* in
+    ~/.brainchild/agents/claude/config.yaml's `mcp_servers` block —
+    persisting only fields the user owns (`enabled`, `hints`, `read_tools`,
+    `confirm_tools`, `tool_timeout_seconds`). Source-driven fields
+    (command/args/env/auth/auth_url/description) are NEVER stored on disk
+    and are rediscovered fresh on every boot from cwd-aware
+    `discover_all_mcps()`.
 
-      - command, args, env, auth, auth_url, description → overwritten
-        from source so changes in Claude Code flow through.
-      - enabled, hints, read_tools, confirm_tools → preserved from the
-        user's existing entry so meeting-scope edits stick.
+    Why overlay-only: Claude Code's project-scope `mcpServers` are
+    cwd-sensitive by design. Persisting the full discovered block on
+    disk meant switching cwds rewrote the cfg with whatever the new cwd
+    saw — pruning project-scope MCPs from "wrong" cwds and clobbering
+    the user's hand-authored hints. The overlay model says: cfg is the
+    user's authored truth (toggles + hints), cwd determines what's
+    *active* this run, never what's *persisted*.
 
-    Servers present in the user config but missing from the discovered
-    set are dropped — if the user removed an MCP from Claude Code, they
-    want it gone from operator too.
+    Behavior:
+      - Discovered MCP not in overlay → adds `{enabled: True}` (default-on
+        for first sight; wizard's MCP toggle step lets the user disable).
+      - Discovered MCP already in overlay → no change. User's enable/hints
+        survive untouched.
+      - In overlay but not in current discovery → DORMANT for this run.
+        Overlay entry persists. config.py's runtime view excludes it
+        (banner + LLM tools). Reactivates next time it's rediscovered.
+      - The only way to remove a dormant entry is `brainchild edit claude`
+        (explicit user action) or a full `brainchild build` reset.
 
-    The `~3s` cost of `claude mcp list` is paid every boot. If that
-    becomes a real latency concern, add a hash-check fast-path keyed on
-    a digest of ~/.claude.json#mcpServers — but defer until measured.
+    The `~3s` cost of `claude mcp list` is paid every boot. Acceptable
+    because discovery is the live source of truth — caching across boots
+    would defeat the cwd-aware semantics.
 
-    Comments in config.yaml are lost on rewrite (PyYAML round-trip);
-    we only write back if the merged config differs from what's on disk,
-    so a no-op sync doesn't trash formatting unnecessarily.
+    Comments in config.yaml are lost on rewrite (ruamel round-trip
+    preserves them, but we still only write when the overlay actually
+    changed to keep formatting churn off no-op boots).
     """
     cfg_path = _AGENTS_DIR / "claude" / "config.yaml"
     if not cfg_path.is_file():
         return
 
-    # Load via ruamel round-trip so comments and block-scalar styles in
-    # the user's config survive the mutation+dump cycle. PyYAML safe_load
-    # would return a plain dict and the next dump would strip everything
-    # cosmetic.
     from brainchild.pipeline.setup import _load_yaml, _dump_yaml
     try:
         cfg = _load_yaml(cfg_path)
@@ -76,62 +84,68 @@ def _sync_claude_imports() -> None:
         return
 
     from brainchild.pipeline.claude_code_import import (
+        _slugify_mcp_name,
         append_env_placeholders,
         discover_all_mcps,
         discover_mcp_health,
     )
 
     mcps, wrapped = discover_all_mcps()
-    existing = cfg.get("mcp_servers") or {}
-    if not isinstance(existing, dict):
-        existing = {}
+    existing_overlay = cfg.get("mcp_servers") or {}
+    if not isinstance(existing_overlay, dict):
+        existing_overlay = {}
 
-    new_servers: dict = {}
-    added: list[str] = []
-    updated: list[str] = []
-    removed: list[str] = []
-    env_refs: set[str] = set()
-
-    discovered_names = {m.name for m in mcps}
-    for m in mcps:
-        prev = existing.get(m.name)
+    def _compact(prev: dict | None) -> dict:
+        """Carry forward only meaningful overlay fields. `enabled` always
+        anchors the row (defaults True if absent); other fields drop when
+        empty so the cfg stays terse.
+        """
+        row: dict = {}
         if isinstance(prev, dict):
-            merged = dict(prev)
-            for f in _CLAUDE_MCP_SOURCE_DRIVEN_FIELDS:
-                if f in m.block:
-                    merged[f] = m.block[f]
-            for f in _CLAUDE_MCP_USER_PRESERVED_FIELDS:
-                if f in prev:
-                    merged[f] = prev[f]
-                elif f in m.block:
-                    merged[f] = m.block[f]
-            new_servers[m.name] = merged
-            if any(merged.get(f) != prev.get(f) for f in _CLAUDE_MCP_SOURCE_DRIVEN_FIELDS):
-                updated.append(m.name)
-        else:
-            new_servers[m.name] = m.block
+            for k in _CLAUDE_MCP_OVERLAY_FIELDS:
+                if k not in prev:
+                    continue
+                v = prev[k]
+                if k == "enabled":
+                    row["enabled"] = bool(v)
+                elif v:  # drop empty list / "" / 0
+                    row[k] = v
+        row.setdefault("enabled", True)
+        return row
+
+    new_overlay: dict = {}
+    added: list[str] = []
+    env_refs: set[str] = set()
+    discovered_names = {m.name for m in mcps}
+
+    for m in mcps:
+        prev = existing_overlay.get(m.name)
+        new_overlay[m.name] = _compact(prev if isinstance(prev, dict) else None)
+        if not isinstance(prev, dict):
             added.append(m.name)
         env_refs.update(m.env_vars_referenced)
 
-    for name in existing:
-        if name not in discovered_names:
-            removed.append(name)
+    # Dormant rows: in overlay but not in current discovery. Keep the row
+    # (overlay is the persistence layer; cwd determines what's active this
+    # run, never what's persisted).
+    dormant: list[str] = []
+    for name, prev in existing_overlay.items():
+        if name in discovered_names:
+            continue
+        new_overlay[name] = _compact(prev if isinstance(prev, dict) else None)
+        dormant.append(name)
 
     env_file = Path.home() / ".brainchild" / ".env"
     placeheld: list[str] = []
     if env_refs:
         placeheld = append_env_placeholders(sorted(env_refs), env_file)
 
-    # Drop the legacy first-run-done flag if it's still hanging around —
-    # the gate it controlled is gone now.
     cfg.pop("_claude_import_done", None)
-    cfg["mcp_servers"] = new_servers
+    cfg["mcp_servers"] = new_overlay
 
-    # Only rewrite the file when the merge actually changed something on
-    # disk. Keeps formatting churn off no-op boots.
     on_disk_cfg = _load_yaml(cfg_path)
     on_disk_servers = on_disk_cfg.get("mcp_servers") or {}
-    if dict(new_servers) != dict(on_disk_servers) or "_claude_import_done" in on_disk_cfg:
+    if dict(new_overlay) != dict(on_disk_servers) or "_claude_import_done" in on_disk_cfg:
         try:
             _dump_yaml(cfg, cfg_path)
         except OSError as e:
@@ -141,10 +155,8 @@ def _sync_claude_imports() -> None:
     parts = []
     if added:
         parts.append(f"+{len(added)} ({', '.join(added)})")
-    if updated:
-        parts.append(f"~{len(updated)} ({', '.join(updated)})")
-    if removed:
-        parts.append(f"-{len(removed)} ({', '.join(removed)})")
+    if dormant:
+        parts.append(f"~{len(dormant)} dormant ({', '.join(dormant)})")
     if parts:
         msg = f"[claude] MCP sync: {' '.join(parts)}"
         if wrapped and added:
@@ -159,12 +171,15 @@ def _sync_claude_imports() -> None:
 
     # Pre-flight MCP health: surface anything `claude mcp list` already
     # marks as unhealthy (e.g. "Needs authentication", "Failed to connect")
-    # to stderr before meeting join. Without this, Track A users only learn
-    # an MCP is broken when its tools silently fail to work in-meeting —
-    # the inner-claude subprocess swallows the startup error.
+    # to stderr before meeting join. Filter by overlay's `enabled` so
+    # disabled servers don't generate noise.
     for name, _url, status, healthy in discover_mcp_health():
-        if not healthy:
-            print(f"[claude] ⚠ MCP needs attention: {name} — {status}", file=sys.stderr)
+        if healthy:
+            continue
+        srv = new_overlay.get(_slugify_mcp_name(name))
+        if isinstance(srv, dict) and not srv.get("enabled", True):
+            continue
+        print(f"[claude] ⚠ MCP needs attention: {name} — {status}", file=sys.stderr)
 
 
 def _ensure_user_agents():

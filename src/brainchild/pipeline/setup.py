@@ -470,17 +470,20 @@ def _auto_import_claude_setup(state: WizardState) -> None:
         claude_md = read_user_claude_md() if claude_md_sources else None
 
     added_mcps: list[str] = []
-    enabled_existing: list[str] = []
+    # Overlay model (Option A): persist only user-edit fields. Source-driven
+    # fields (command/args/env/auth/auth_url/description) are NEVER stored on
+    # disk for the claude agent — they're rediscovered fresh per boot from the
+    # cwd-aware `discover_all_mcps()`.
+    #
+    # Don't silently flip a disabled overlay row to enabled just because the
+    # MCP is still in Claude Code — the overlay IS the user's authored truth,
+    # and "I disabled this" must persist across re-imports. New MCPs (no
+    # overlay row yet) default-on for first sight; the toggle picker in
+    # step 2 lets the user opt out.
     for m in mcps:
         if m.name in servers:
-            # Bundled scaffold wins on hints/read_tools/confirm_tools, but
-            # the fact that the user has this server configured in Claude
-            # Code is the stronger signal — flip the bundled block on.
-            if not servers[m.name].get("enabled"):
-                servers[m.name]["enabled"] = True
-                enabled_existing.append(m.name)
             continue
-        servers[m.name] = m.block
+        servers[m.name] = {"enabled": True}
         added_mcps.append(m.name)
 
     # Pre-check only skills sourced from the user's external paths
@@ -506,12 +509,7 @@ def _auto_import_claude_setup(state: WizardState) -> None:
             f"{f' ({wrapped} hosted, wrapped via mcp-remote)' if wrapped else ''}: "
             f"{', '.join(added_mcps)}"
         )
-    if enabled_existing:
-        console.print(
-            f"    [green]✓[/green] {len(enabled_existing)} MCP(s) enabled from your Claude Code setup: "
-            f"{', '.join(enabled_existing)}"
-        )
-    if not added_mcps and not enabled_existing:
+    if not added_mcps:
         console.print("    [dim]No MCPs to import (already configured or none found).[/dim]")
     if from_external:
         console.print(
@@ -594,26 +592,12 @@ def _step2_mcps(state: WizardState) -> None:
     for i, n in enumerate(names):
         servers[n]["enabled"] = bool(final[i])
 
-    # Claude preset: append commented env-var placeholders for any MCP the
-    # user just approved, so step 5 has a ready list to prompt for and
-    # later `brainchild run claude` gets a clear "set X in .env" from the
-    # preflight instead of silent boot failures. Idempotent — vars already
-    # set or placeheld are skipped.
-    if state.based_on == "claude":
-        needed: set[str] = set()
-        for n in names:
-            if not servers[n].get("enabled"):
-                continue
-            for v in (servers[n].get("env") or {}).values():
-                if isinstance(v, str):
-                    needed.update(_ENV_REF_RE.findall(v))
-        if needed:
-            added = append_env_placeholders(sorted(needed), _ENV_FILE)
-            if added:
-                console.print(
-                    f"  [dim]+ appended {len(added)} env-var placeholder(s) to "
-                    f".env: {', '.join(added)}[/dim]"
-                )
+    # Claude preset: env-var placeholders are now appended by
+    # `_sync_claude_imports` on every boot (which has access to the
+    # discovered MCPs' full env blocks). The wizard's overlay no longer
+    # carries `env` keys, so this surface moved to the runtime sync —
+    # the user sees the "+ appended N env placeholder(s)" line on their
+    # next `brainchild run claude` instead of during setup.
 
     _render_mcp_readiness(servers)
 

@@ -12,8 +12,15 @@ while [ -L "$SOURCE" ]; do
 done
 REPO_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Preserve the user's invocation cwd: the `claude` agent's path-based
+# CLAUDE.md mirror resolves `./CLAUDE.md` against `Path.cwd()` to match
+# Claude Code's project-scope semantics. Activating the venv from
+# $REPO_DIR is fine, but we exec python from the user's cwd so `./`
+# means what they expect.
+USER_CWD="$PWD"
 cd "$REPO_DIR"
 # shellcheck disable=SC1091
 source venv/bin/activate
+cd "$USER_CWD"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 exec python -m brainchild "$@"
