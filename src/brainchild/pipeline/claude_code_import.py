@@ -351,43 +351,83 @@ def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
     return out, wrapped_json + wrapped_cli
 
 
-def read_user_claude_md(cwd: Optional[Path] = None) -> Optional[str]:
-    """Return concatenated CLAUDE.md content from user-scope and
-    project-scope, or None if no source exists.
+def normalize_path_for_storage(p: Path, cwd: Optional[Path] = None) -> str:
+    """Render `p` in the smartest portable form for config storage:
+
+      - Under `$HOME` → `~/relative/...`  (survives cross-machine config sync)
+      - Under `cwd` → `./relative/...`    (re-resolves against current launch dir)
+      - Otherwise → absolute path string  (brittle, won't survive moves)
+
+    Mirrors the resolution rules in `config._resolve_claude_md_path`. The
+    wizard uses this when persisting user-chosen paths into config so the
+    same path round-trips cleanly across machines and project moves.
+    """
+    if cwd is None:
+        cwd = Path.cwd()
+    p = p.resolve()
+    home = Path.home().resolve()
+    cwd = cwd.resolve()
+    try:
+        rel = p.relative_to(home)
+        return f"~/{rel}" if str(rel) else "~"
+    except ValueError:
+        pass
+    try:
+        rel = p.relative_to(cwd)
+        return f"./{rel}" if str(rel) else "."
+    except ValueError:
+        pass
+    return str(p)
+
+
+def discover_claude_md_sources(
+    cwd: Optional[Path] = None,
+) -> list[tuple[str, str]]:
+    """Return present CLAUDE.md sources as `(short_label, content)` tuples,
+    in walk order. Empty list if none exist.
 
     Walks (in order):
       1. ~/.claude/CLAUDE.md (user-scope)
       2. <cwd>/CLAUDE.md (project root)
       3. <cwd>/.claude/CLAUDE.md (project Claude Code dir)
 
-    Each present source is included with a section header so the wizard's
-    merge into ground_rules carries full provenance. Mirrors how Claude
-    Code itself walks both scopes — without this the wizard's CLAUDE.md
-    merge view would only show user-scope rules even when the project
-    has its own CLAUDE.md sitting next to the bot.
+    Mirrors how Claude Code itself walks both scopes. Returning the list
+    (vs. just merged content) lets callers show accurate provenance in
+    UI prompts — the wizard previously hardcoded `~/.claude/CLAUDE.md`
+    in its append prompt even when content came from project-scope.
 
     `cwd` defaults to Path.cwd(); tests can pin it.
     """
     if cwd is None:
         cwd = Path.cwd()
-    sources = [
-        ("user (~/.claude/CLAUDE.md)", _USER_CLAUDE_MD),
-        ("project (./CLAUDE.md)", cwd / "CLAUDE.md"),
-        ("project (./.claude/CLAUDE.md)", cwd / ".claude" / "CLAUDE.md"),
+    candidates = [
+        ("~/.claude/CLAUDE.md", _USER_CLAUDE_MD),
+        ("./CLAUDE.md", cwd / "CLAUDE.md"),
+        ("./.claude/CLAUDE.md", cwd / ".claude" / "CLAUDE.md"),
     ]
     found: list[tuple[str, str]] = []
-    for label, path in sources:
+    for label, path in candidates:
         if not path.is_file():
             continue
         try:
             found.append((label, path.read_text()))
         except OSError:
             continue
+    return found
+
+
+def read_user_claude_md(cwd: Optional[Path] = None) -> Optional[str]:
+    """Return concatenated CLAUDE.md content from user-scope and
+    project-scope, or None if no source exists.
+
+    Single source returns bare content (preserves old contract); multiple
+    sources are joined with `# CLAUDE.md — <label>` section headers so
+    provenance survives into ground_rules.
+    """
+    found = discover_claude_md_sources(cwd)
     if not found:
         return None
     if len(found) == 1:
-        # Single source: return bare content (preserves old contract;
-        # callers like the wizard can show provenance separately).
         return found[0][1]
     return "\n\n".join(f"# CLAUDE.md — {label}\n{content}" for label, content in found)
 

@@ -7,7 +7,7 @@ Usage:
     brainchild run <name>       Auto-open a new Meet, join as that bot
     brainchild try <name>       Terminal test-drive (no Meet)
     brainchild build            Create a new agent (wizard)
-    brainchild edit <target>    Open an agent config (or .env) in $EDITOR
+    brainchild edit <target>    Edit an agent config (wizard, surgical) or .env (in $EDITOR)
     brainchild where <target>   Print the absolute path of a config file
     brainchild                  Print usage + agent list
 """
@@ -554,27 +554,48 @@ def _resolve_config_target(target):
 
 
 def _run_edit(argv):
+    """`brainchild edit <name>` is the surgical-modify path. For bot
+    names, run the same wizard as `brainchild build` minus the
+    "reset to bundled?" gate — every step pre-loaded with current state,
+    user accepts/changes each one, atomic write at the end. For `.env`
+    (which has no toggleable shape), keep the $EDITOR flow.
+    """
     if not argv:
         print("Usage: brainchild edit <bot-name | .env>\n")
         _print_usage()
         return 2
-    path, err = _resolve_config_target(argv[0])
-    if err:
-        print(err)
+    target = argv[0]
+    if target in (".env", "env"):
+        return _run_edit_env_file()
+    if target not in _available_bots():
+        print(
+            f"Unknown target: {target!r}. Expected a bot name or `.env`.\n"
+            f"Available bots: {', '.join(sorted(_available_bots())) or '(none)'}"
+        )
         _print_usage()
         return 2
+    from brainchild.pipeline.chrome_preflight import require_chrome_or_exit
+    require_chrome_or_exit()
+    from brainchild.pipeline.setup import run as _wizard_run
+    return _wizard_run([], target_agent=target, reset_allowed=False)
+
+
+def _run_edit_env_file():
+    """`brainchild edit .env` keeps the $EDITOR flow — env-var key/value
+    pairs are the wrong shape for a TUI."""
+    import shlex
+    path = Path.home() / ".brainchild" / ".env"
     if not path.exists():
         print(f"Config file does not exist: {path}")
         return 1
-    import shlex
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     cmd = shlex.split(editor) + [str(path)]
     subprocess.call(cmd)
     # Editors (vim especially) sometimes exit nonzero for benign reasons —
     # swapfile noise, terminal weirdness — even when the user saved cleanly.
     # Don't propagate that to the shell prompt; the only thing that matters
-    # is whether the config still exists. Print a positive signal so the
-    # user has no ambiguity about whether their edit landed.
+    # is whether the file still exists. Print a positive signal so the user
+    # has no ambiguity about whether their edit landed.
     if path.exists():
         print(f"Saved {path}")
         return 0

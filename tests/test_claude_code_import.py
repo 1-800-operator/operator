@@ -442,9 +442,63 @@ def test_read_user_claude_md_walks_project_scope_too(home):
     assert out is not None
     assert "PROJECT ROOT RULES" in out
     assert "PROJECT CLAUDE DIR RULES" in out
-    assert "# CLAUDE.md — project (./CLAUDE.md)" in out
-    assert "# CLAUDE.md — project (./.claude/CLAUDE.md)" in out
+    assert "# CLAUDE.md — ./CLAUDE.md" in out
+    assert "# CLAUDE.md — ./.claude/CLAUDE.md" in out
     print("PASS  test_read_user_claude_md_walks_project_scope_too")
+
+
+@_with_fake_home
+def test_normalize_path_for_storage_prefers_home_then_cwd_then_absolute(home):
+    from brainchild.pipeline.claude_code_import import normalize_path_for_storage
+    cwd = home / "proj"
+    cwd.mkdir()
+    # Under HOME → ~/...
+    assert normalize_path_for_storage(home / ".claude" / "x", cwd=cwd) == "~/.claude/x"
+    # Outside home, under cwd → ./...
+    import tempfile as _tf
+    extern = Path(_tf.mkdtemp(prefix="extern_"))
+    try:
+        cwd2 = extern / "p"
+        cwd2.mkdir()
+        (cwd2 / "CLAUDE.md").touch()
+        assert normalize_path_for_storage(cwd2 / "CLAUDE.md", cwd=cwd2) == "./CLAUDE.md"
+        # Outside both → absolute
+        abs_path = extern / "totally_unrelated.md"
+        abs_path.touch()
+        assert normalize_path_for_storage(abs_path, cwd=cwd) == str(abs_path.resolve())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(extern, ignore_errors=True)
+    print("PASS  test_normalize_path_for_storage_prefers_home_then_cwd_then_absolute")
+
+
+@_with_fake_home
+def test_discover_claude_md_sources_returns_labels_in_walk_order(home):
+    # All three sources present. Caller (e.g. wizard) needs the labels
+    # to render accurate provenance — without this the prompt hardcodes
+    # ~/.claude/CLAUDE.md regardless of which scopes actually exist.
+    from brainchild.pipeline.claude_code_import import discover_claude_md_sources
+    (home / ".claude").mkdir(exist_ok=True)
+    (home / ".claude" / "CLAUDE.md").write_text("USER\n")
+    proj = home / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("PROJ ROOT\n")
+    (proj / ".claude" / "CLAUDE.md").write_text("PROJ CLAUDE\n")
+    sources = discover_claude_md_sources(cwd=proj)
+    labels = [label for label, _ in sources]
+    assert labels == ["~/.claude/CLAUDE.md", "./CLAUDE.md", "./.claude/CLAUDE.md"]
+    contents = [content for _, content in sources]
+    assert contents == ["USER\n", "PROJ ROOT\n", "PROJ CLAUDE\n"]
+    print("PASS  test_discover_claude_md_sources_returns_labels_in_walk_order")
+
+
+@_with_fake_home
+def test_discover_claude_md_sources_empty_when_nothing_present(home):
+    from brainchild.pipeline.claude_code_import import discover_claude_md_sources
+    proj = home / "empty"
+    proj.mkdir()
+    assert discover_claude_md_sources(cwd=proj) == []
+    print("PASS  test_discover_claude_md_sources_empty_when_nothing_present")
 
 
 @_with_fake_home
@@ -557,6 +611,9 @@ if __name__ == "__main__":
         test_read_user_claude_md_missing_returns_none,
         test_read_user_claude_md_present_returns_contents,
         test_read_user_claude_md_walks_project_scope_too,
+        test_normalize_path_for_storage_prefers_home_then_cwd_then_absolute,
+        test_discover_claude_md_sources_returns_labels_in_walk_order,
+        test_discover_claude_md_sources_empty_when_nothing_present,
         test_read_user_claude_md_single_project_source_no_header,
         test_append_env_placeholders_creates_file_if_missing,
         test_append_env_placeholders_idempotent_when_var_set,

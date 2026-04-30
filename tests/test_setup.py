@@ -538,6 +538,177 @@ def test_wrap_cells_hard_splits_oversized_token():
     print("  wrap_cells hard-splits wide token: PASS")
 
 
+# ── _maybe_reset_to_bundled — `brainchild build` reset-with-backup ──────
+
+
+def _seed_reset_fixture(tmp: Path, name: str = "claude") -> tuple[Path, Path]:
+    """Build minimal user-scope + bundled cfg paths for reset tests.
+    Returns (cfg_path, bundled_cfg)."""
+    user_dir = tmp / "user_agents" / name
+    bundled_dir = tmp / "bundled_agents" / name
+    user_dir.mkdir(parents=True)
+    bundled_dir.mkdir(parents=True)
+    cfg_path = user_dir / "config.yaml"
+    bundled_cfg = bundled_dir / "config.yaml"
+    return cfg_path, bundled_cfg
+
+
+def test_reset_to_bundled_skips_when_user_scope_missing():
+    """No user-scope config → nothing to back up, return None silently."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path, bundled_cfg = _seed_reset_fixture(Path(tmp))
+        bundled_cfg.write_text("name: claude\n")
+        # cfg_path intentionally missing
+        result = wizard._maybe_reset_to_bundled("claude", cfg_path)
+        assert result is None
+        assert not cfg_path.exists()
+
+
+def test_reset_to_bundled_skips_when_user_scope_identical_to_bundled():
+    """Pristine user-scope (== bundled) → no prompt, no backup."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path, bundled_cfg = _seed_reset_fixture(Path(tmp))
+        bundled_cfg.write_text("name: claude\nfoo: bar\n")
+        cfg_path.write_text("name: claude\nfoo: bar\n")
+        # Patch the module-level bundled dir to point at our fixture.
+        orig = wizard._BUNDLED_AGENTS_DIR
+        wizard._BUNDLED_AGENTS_DIR = bundled_cfg.parents[1]
+        try:
+            result = wizard._maybe_reset_to_bundled("claude", cfg_path)
+        finally:
+            wizard._BUNDLED_AGENTS_DIR = orig
+        assert result is None
+        # cfg_path untouched
+        assert cfg_path.read_text() == "name: claude\nfoo: bar\n"
+        # No backup files in the user dir
+        assert list(cfg_path.parent.glob("*.bak.*")) == []
+
+
+def test_reset_to_bundled_writes_backup_and_replaces_when_confirmed():
+    """User edited config + says 'y' → backup written, cfg replaced with
+    bundled, backup path returned. Other agents' configs are never read."""
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path, bundled_cfg = _seed_reset_fixture(Path(tmp))
+        bundled_cfg.write_text("name: claude\npersonality: bundled\n")
+        cfg_path.write_text("name: claude\npersonality: USER EDITED\n")
+        # Decoy second agent — must not be touched
+        decoy = cfg_path.parent.parent / "pm" / "config.yaml"
+        decoy.parent.mkdir()
+        decoy.write_text("name: pm\npersonality: pm-rules\n")
+        decoy_before = decoy.read_text()
+
+        orig = wizard._BUNDLED_AGENTS_DIR
+        wizard._BUNDLED_AGENTS_DIR = bundled_cfg.parents[1]
+        try:
+            with patch.object(wizard.Prompt, "ask", return_value="y"):
+                result = wizard._maybe_reset_to_bundled("claude", cfg_path)
+        finally:
+            wizard._BUNDLED_AGENTS_DIR = orig
+
+        assert result is not None
+        assert result.exists()
+        assert "USER EDITED" in result.read_text()  # backup carries pre-reset
+        assert cfg_path.read_text() == "name: claude\npersonality: bundled\n"
+        # Decoy agent untouched
+        assert decoy.read_text() == decoy_before
+        assert not list(decoy.parent.glob("*.bak.*"))
+
+
+def test_edit_preset_skips_reset_when_reset_allowed_false():
+    """`brainchild edit <name>` passes reset_allowed=False so users get
+    surgical access to the wizard without the destructive gate firing.
+    `_edit_preset(name, reset_allowed=False)` should never call
+    `_maybe_reset_to_bundled` even when user-scope differs from bundled."""
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        sandbox = Path(tmp)
+        # Set up an agent that DIFFERS from bundled — the trigger condition
+        # for the reset prompt under reset_allowed=True.
+        agents_dir = sandbox / "user_agents"
+        bundled_dir = sandbox / "bundled_agents"
+        (agents_dir / "claude").mkdir(parents=True)
+        (bundled_dir / "claude").mkdir(parents=True)
+        cfg_path = agents_dir / "claude" / "config.yaml"
+        # Minimal valid yaml the wizard can actually load — must include
+        # agent + llm or _load_yaml/portrait machinery downstream may break.
+        cfg_path.write_text(
+            "agent:\n  name: claude\nllm:\n  provider: claude_cli\n"
+            "personality: USER EDITED\n"
+        )
+        (bundled_dir / "claude" / "config.yaml").write_text(
+            "agent:\n  name: claude\nllm:\n  provider: claude_cli\n"
+            "personality: bundled\n"
+        )
+
+        orig_user = wizard._AGENTS_DIR
+        orig_bundled = wizard._BUNDLED_AGENTS_DIR
+        wizard._AGENTS_DIR = agents_dir
+        wizard._BUNDLED_AGENTS_DIR = bundled_dir
+        try:
+            # If _maybe_reset_to_bundled were called, it would prompt — patch
+            # to assert it never runs.
+            with patch.object(
+                wizard, "_maybe_reset_to_bundled",
+                side_effect=AssertionError("must not be called in edit mode"),
+            ), patch.object(
+                wizard.face, "load_or_render", return_value="portrait"
+            ), patch.object(
+                wizard, "_auto_import_claude_setup", return_value=None
+            ):
+                state = wizard._edit_preset("claude", reset_allowed=False)
+            assert state.bot_cfg["personality"] == "USER EDITED", \
+                "edit mode must preserve current state, not reset"
+        finally:
+            wizard._AGENTS_DIR = orig_user
+            wizard._BUNDLED_AGENTS_DIR = orig_bundled
+
+
+def test_run_target_agent_unknown_returns_1():
+    """`brainchild edit <missing>` should fail-fast with a clear message
+    rather than dropping into the picker."""
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        sandbox = Path(tmp) / "agents"
+        sandbox.mkdir()
+        # No bots seeded → `target_agent="missing"` not in _existing_bots()
+        orig = wizard._AGENTS_DIR
+        wizard._AGENTS_DIR = sandbox
+        try:
+            with patch.object(wizard, "_step1_fighter_select",
+                              side_effect=AssertionError("must not run picker")):
+                rc = wizard.run([], target_agent="missing", reset_allowed=False)
+            assert rc == 1
+        finally:
+            wizard._AGENTS_DIR = orig
+
+
+def test_reset_to_bundled_raises_wizard_cancel_on_decline():
+    """User says 'n' → WizardCancel raised, no backup, no replacement."""
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path, bundled_cfg = _seed_reset_fixture(Path(tmp))
+        bundled_cfg.write_text("name: claude\nbundled: 1\n")
+        cfg_path.write_text("name: claude\nuser: 1\n")
+        cfg_before = cfg_path.read_text()
+
+        orig = wizard._BUNDLED_AGENTS_DIR
+        wizard._BUNDLED_AGENTS_DIR = bundled_cfg.parents[1]
+        try:
+            with patch.object(wizard.Prompt, "ask", return_value="n"):
+                try:
+                    wizard._maybe_reset_to_bundled("claude", cfg_path)
+                    assert False, "expected WizardCancel"
+                except wizard.WizardCancel as e:
+                    assert "edit" in str(e).lower(), str(e)
+        finally:
+            wizard._BUNDLED_AGENTS_DIR = orig
+
+        # Nothing changed on decline
+        assert cfg_path.read_text() == cfg_before
+        assert not list(cfg_path.parent.glob("*.bak.*"))
+
+
 if __name__ == "__main__":
     print("Setup wizard tests:")
     test_name_validation_reserved_and_collision()
@@ -562,4 +733,10 @@ if __name__ == "__main__":
     test_build_card_render_panel_mode()
     test_build_card_empty_bullets_show_placeholder()
     test_wrap_cells_hard_splits_oversized_token()
+    test_reset_to_bundled_skips_when_user_scope_missing()
+    test_reset_to_bundled_skips_when_user_scope_identical_to_bundled()
+    test_reset_to_bundled_writes_backup_and_replaces_when_confirmed()
+    test_edit_preset_skips_reset_when_reset_allowed_false()
+    test_run_target_agent_unknown_returns_1()
+    test_reset_to_bundled_raises_wizard_cancel_on_decline()
     print("\nAll tests passed.")

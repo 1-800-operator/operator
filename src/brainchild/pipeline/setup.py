@@ -59,6 +59,7 @@ from brainchild.pipeline.claude_code_import import (
     append_env_placeholders,
     claude_code_installed_and_logged_in,
     discover_all_mcps,
+    discover_claude_md_sources,
     read_user_claude_md,
 )
 from brainchild.pipeline.picker import Choice, PickerCancelled, select_many, select_one
@@ -361,8 +362,13 @@ def _from_scratch() -> WizardState:
     )
 
 
-def _edit_preset(name: str) -> WizardState:
+def _edit_preset(name: str, *, reset_allowed: bool = True) -> WizardState:
     cfg_path = _AGENTS_DIR / name / "config.yaml"
+    # `reset_allowed=False` is how `brainchild edit` skips the reset gate:
+    # edit is the surgical-mod path, build is the destructive-reset path.
+    backup_path = (
+        _maybe_reset_to_bundled(name, cfg_path) if reset_allowed else None
+    )
     cfg = _load_yaml(cfg_path)
     portrait_path = _AGENTS_DIR / name / "portrait.txt"
     portrait = face.load_or_render(name, portrait_path)
@@ -376,9 +382,64 @@ def _edit_preset(name: str) -> WizardState:
         portrait=portrait,
         bot_cfg=cfg,
     )
+    state._reset_backup_path = backup_path  # type: ignore[attr-defined]
     if name == "claude":
         _auto_import_claude_setup(state)
     return state
+
+
+def _maybe_reset_to_bundled(name: str, cfg_path: Path) -> Path | None:
+    """`brainchild build <name>` is the reset path — if the user has
+    customized this agent's config previously, prompt before nuking it.
+    Identical-to-bundled state proceeds silently (no point asking when
+    there's nothing to lose). Returns the backup path if a backup was
+    written, else None.
+
+    Surgical at the file level: only touches `<name>/config.yaml`. Other
+    agents' configs are never read, prompted on, or modified.
+    """
+    import shutil
+    from datetime import datetime
+
+    bundled_cfg = _BUNDLED_AGENTS_DIR / name / "config.yaml"
+    if not cfg_path.exists() or not bundled_cfg.exists():
+        # Fresh install or oddly-missing bundle — nothing to back up,
+        # `_ensure_user_agents` will have already seeded if it could.
+        return None
+    if cfg_path.read_bytes() == bundled_cfg.read_bytes():
+        # User-scope is identical to bundled defaults → no prior edits
+        # to lose. Skip the prompt entirely.
+        return None
+
+    console.print()
+    console.print(
+        f"  [yellow]⚠[/yellow]  Existing [bold]{name}[/bold] config found "
+        f"with edits.\n"
+        f"     [dim]`build` will reset it to bundled defaults "
+        f"(your current settings will be backed up).[/dim]\n"
+        f"     [dim]For surgical changes, use [bold]brainchild edit "
+        f"{name}[/bold] instead.[/dim]"
+    )
+    answer = Prompt.ask(
+        f"  Reset [bold]{name}[/bold] to defaults?",
+        choices=["y", "n"],
+        default="n",
+    )
+    if answer.lower() != "y":
+        raise WizardCancel(
+            f"reset declined — `brainchild edit {name}` is the surgical "
+            f"path; `brainchild build {name}` is the reset path."
+        )
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = cfg_path.parent / f"{cfg_path.name}.bak.{ts}"
+    shutil.copy2(cfg_path, backup_path)
+    shutil.copy2(bundled_cfg, cfg_path)
+    console.print(
+        f"  [green]✓[/green] previous config backed up → "
+        f"[dim]{backup_path}[/dim]"
+    )
+    return backup_path
 
 
 def _auto_import_claude_setup(state: WizardState) -> None:
@@ -405,7 +466,8 @@ def _auto_import_claude_setup(state: WizardState) -> None:
     ):
         mcps, wrapped = discover_all_mcps()
         discovered = _discover_skill_candidates(state)
-        claude_md = read_user_claude_md()
+        claude_md_sources = discover_claude_md_sources()
+        claude_md = read_user_claude_md() if claude_md_sources else None
 
     added_mcps: list[str] = []
     enabled_existing: list[str] = []
@@ -434,6 +496,7 @@ def _auto_import_claude_setup(state: WizardState) -> None:
     # Stash on state via a plain attribute — WizardState is a dataclass
     # but Python still permits ad-hoc attrs. Step 4 reads it.
     state._claude_md_content = claude_md  # type: ignore[attr-defined]
+    state._claude_md_sources = claude_md_sources  # type: ignore[attr-defined]
 
     console.print()
     console.print("  [bold]Claude Code auto-import:[/bold]")
@@ -460,10 +523,13 @@ def _auto_import_claude_setup(state: WizardState) -> None:
             "    [dim]No skills found under ~/.claude/skills/ — toggle any "
             "bundled skills in the next step.[/dim]"
         )
-    if claude_md:
+    if claude_md_sources:
+        labels = ", ".join(label for label, _ in claude_md_sources)
         console.print(
-            f"    [dim]Found ~/.claude/CLAUDE.md ({len(claude_md)} chars) — "
-            f"step 4 will offer to append it to ground rules.[/dim]"
+            f"    [dim]Found CLAUDE.md ({len(claude_md_sources)} source"
+            f"{'s' if len(claude_md_sources) != 1 else ''}: {labels}; "
+            f"{len(claude_md)} chars) — "
+            f"step 4 will offer to append to ground rules.[/dim]"
         )
 
 
@@ -983,22 +1049,50 @@ def _step4_system_prompt(state: WizardState) -> None:
         else:
             console.print(f"  [dim]system prompt left blank[/dim]")
 
-    # Claude preset: offer to append the user's ~/.claude/CLAUDE.md to
-    # ground_rules. Opt-in (default N) because these files can be long
-    # and project-specific content sometimes leaks in. Appending keeps
-    # whatever the user just typed for personality intact.
+    # Claude preset: mirror Claude Code's CLAUDE.md sources by storing
+    # PATHS (not baked content) in `claude_md_imports`. config.py reads
+    # those files fresh at every boot, so editing your CLAUDE.md takes
+    # effect next session without re-running the wizard. Default Y —
+    # the claude agent's identity is "your Claude Code setup," and
+    # CLAUDE.md is part of that. The user can decline here, or untoggle
+    # individual sources later via `brainchild edit`. The labels we
+    # store (`~/.claude/CLAUDE.md`, `./CLAUDE.md`, etc.) are already in
+    # the portable storage form used by `_resolve_claude_md_path`.
     claude_md = getattr(state, "_claude_md_content", None)
-    if state.based_on == "claude" and claude_md:
+    claude_md_sources = getattr(state, "_claude_md_sources", []) or []
+    if state.based_on == "claude" and claude_md_sources:
         console.print()
+        if len(claude_md_sources) == 1:
+            label = claude_md_sources[0][0]
+            prompt_label = f"[bold]{label}[/bold] ({len(claude_md)} chars)"
+        else:
+            labels = ", ".join(label for label, _ in claude_md_sources)
+            prompt_label = (
+                f"CLAUDE.md from [bold]{len(claude_md_sources)} sources[/bold] "
+                f"({labels}; {len(claude_md)} chars merged)"
+            )
         answer = Prompt.ask(
-            f"  Append your [bold]~/.claude/CLAUDE.md[/bold] ({len(claude_md)} chars) "
-            f"to ground rules?",
+            f"  Mirror {prompt_label} into the bot's system prompt?",
             choices=["y", "n"],
-            default="n",
+            default="y",
         )
         if answer.lower() == "y":
-            state.bot_cfg["ground_rules"] = claude_md.strip()
-            console.print("  [green]✓[/green] ~/.claude/CLAUDE.md appended to ground rules.")
+            state.bot_cfg["claude_md_imports"] = [
+                label for label, _ in claude_md_sources
+            ]
+            mounted_label = (
+                claude_md_sources[0][0]
+                if len(claude_md_sources) == 1
+                else f"{len(claude_md_sources)} CLAUDE.md sources"
+            )
+            console.print(
+                f"  [green]✓[/green] {mounted_label} mirrored — "
+                f"[dim]read fresh each session.[/dim]"
+            )
+        else:
+            # Explicit decline persists as empty list so re-runs don't
+            # silently re-mirror without asking again.
+            state.bot_cfg["claude_md_imports"] = []
 
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -1179,6 +1273,12 @@ def _reveal(state: WizardState) -> None:
     console.print(state.card(title=f"Meet {state.name}"))
     console.print()
     console.print(f"Your agent config lives in [bold]{config_path}[/bold].")
+    backup_path = getattr(state, "_reset_backup_path", None)
+    if backup_path is not None:
+        console.print(
+            f"[dim]Previous config saved at {backup_path} — "
+            f"restore with `cp {backup_path} {config_path}` if needed.[/dim]"
+        )
     console.print()
     console.print(f"Take [bold]{state.name}[/bold] for a spin: [bold]brainchild run {state.name}[/bold]")
 
@@ -1186,13 +1286,59 @@ def _reveal(state: WizardState) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────
 
 
-def run(argv: list[str]) -> int:
-    """CLI entry. argv is ignored today; kept for future flags like --dry-run."""
+def run(
+    argv: list[str],
+    *,
+    target_agent: str | None = None,
+    reset_allowed: bool = True,
+) -> int:
+    """CLI entry.
+
+    `target_agent` (set by `brainchild edit <name>`) skips the preset
+    picker and walks the wizard against that agent's existing config.
+    `reset_allowed=False` (also `edit`) suppresses the
+    "reset to bundled?" gate inside `_edit_preset` — the whole point
+    of `edit` is non-destructive surgical mods.
+
+    `argv` is currently ignored but reserved for future flags.
+    """
+    is_edit_mode = target_agent is not None
     console.print()
-    console.print("[bold]Brainchild build wizard[/bold]")
-    console.print("[dim]Six steps + sign-in. Ctrl+C / q at any picker cancels without writing.[/dim]\n")
+    console.print(
+        f"[bold]Brainchild {'edit' if is_edit_mode else 'build'} wizard[/bold]"
+    )
+    console.print(
+        "[dim]Six steps + sign-in. Ctrl+C / q at any picker cancels "
+        "without writing.[/dim]\n"
+    )
     try:
-        state = _step1_fighter_select()
+        if target_agent is not None:
+            if target_agent not in _existing_bots():
+                console.print(
+                    f"[red]No agent named[/red] [bold]{target_agent}[/bold] "
+                    f"[red]found.[/red] "
+                    f"Run [bold]brainchild build {target_agent}[/bold] to "
+                    f"create one."
+                )
+                return 1
+            # Mirror the claude-CLI prereq gate from _step1_fighter_select:
+            # the claude agent's machinery (auto-import, MCPs) hard-depends
+            # on Claude Code being installed and logged in.
+            if target_agent == "claude":
+                ok, reason = claude_code_installed_and_logged_in()
+                if not ok:
+                    console.print(
+                        f"  [red]✗ claude agent requires Claude Code:[/red] "
+                        f"{reason}"
+                    )
+                    console.print(
+                        "  [dim]Install Claude Code (https://claude.ai/code) "
+                        "and run `claude login`, then re-run.[/dim]\n"
+                    )
+                    return 1
+            state = _edit_preset(target_agent, reset_allowed=reset_allowed)
+        else:
+            state = _step1_fighter_select()
 
         # Skills first so step 3 (MCPs) can lock MCPs required by chosen skills.
         console.clear()

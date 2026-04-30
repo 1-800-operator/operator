@@ -144,6 +144,83 @@ def test_happy_path_parses_fields():
 # Test 4: SYSTEM_PROMPT composition
 # ---------------------------------------------------------------------------
 
+def test_claude_md_imports_mounted_into_system_prompt():
+    """`claude_md_imports` paths get read fresh at config-load and appended
+    to SYSTEM_PROMPT after personality + ground_rules. Missing files
+    warn-and-skip; absent block is a silent no-op."""
+    # Set up a fixture CLAUDE.md under tmp HOME so ~/... resolves to it.
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / ".claude").mkdir()
+        (tmp / ".claude" / "CLAUDE.md").write_text("USER RULE\n")
+        (tmp / "proj").mkdir()
+        (tmp / "proj" / "CLAUDE.md").write_text("PROJECT RULE\n")
+
+        # Multi-source mounts both with section headers.
+        yaml_text = (
+            MIN_YAML
+            + "\npersonality: 'be nice'\n"
+            + "ground_rules: 'no lies'\n"
+            + "claude_md_imports:\n"
+            + "  - ~/.claude/CLAUDE.md\n"
+            + "  - ./CLAUDE.md\n"
+        )
+        # Pin cwd to the proj dir so `./CLAUDE.md` resolves there.
+        prev_cwd = os.getcwd()
+        os.chdir(tmp / "proj")
+        try:
+            agents_root = tmp / ".brainchild" / "agents"
+            (agents_root / "testbot").mkdir(parents=True)
+            (agents_root / "testbot" / "config.yaml").write_text(yaml_text)
+            saved = {k: os.environ.get(k) for k in ("BRAINCHILD_BOT", "HOME")}
+            try:
+                os.environ["BRAINCHILD_BOT"] = "testbot"
+                os.environ["HOME"] = str(tmp)
+                spec = importlib.util.spec_from_file_location(
+                    f"config_test_md_{id(tmp)}", REAL_CONFIG_PY
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+        finally:
+            os.chdir(prev_cwd)
+
+        sp = module.SYSTEM_PROMPT
+        # personality + ground_rules + claude_md block, in that order
+        assert sp.startswith("be nice\n\nno lies\n\n"), repr(sp[:100])
+        assert "# CLAUDE.md — ~/.claude/CLAUDE.md" in sp
+        assert "USER RULE" in sp
+        assert "# CLAUDE.md — ./CLAUDE.md" in sp
+        assert "PROJECT RULE" in sp
+        assert module.CLAUDE_MD_IMPORTS_RAW == [
+            "~/.claude/CLAUDE.md", "./CLAUDE.md",
+        ]
+    finally:
+        shutil.rmtree(tmp)
+    print("PASS  test_claude_md_imports_mounted_into_system_prompt")
+
+
+def test_claude_md_imports_missing_paths_skipped_silently():
+    """Stored path that doesn't resolve to a file is skipped (warn to
+    stderr, not an error). Common when configs travel cross-machine."""
+    yaml_text = (
+        MIN_YAML
+        + "\npersonality: 'p'\n"
+        + "claude_md_imports:\n"
+        + "  - ~/.this/does/not/exist.md\n"
+    )
+    mod, exc = load_config(yaml_text)
+    assert exc is None, f"unexpected exit: {exc}"
+    assert mod.SYSTEM_PROMPT == "p"
+    assert mod.CLAUDE_MD_BLOCK == ""
+    print("PASS  test_claude_md_imports_missing_paths_skipped_silently")
+
+
 def test_system_prompt_composition():
     """personality first, ground_rules last, joined with blank line; missing blocks drop out."""
     # Both present
@@ -377,6 +454,8 @@ if __name__ == "__main__":
         test_unknown_bot_exits,
         test_happy_path_parses_fields,
         test_system_prompt_composition,
+        test_claude_md_imports_mounted_into_system_prompt,
+        test_claude_md_imports_missing_paths_skipped_silently,
         test_intro_on_join_default_and_override,
         test_mcp_servers_filter_and_overrides,
         test_mcp_env_strips_unsafe_keys,

@@ -168,6 +168,9 @@ def _validate_config(cfg, source: Path) -> None:
         if v is not None and not isinstance(v, str):
             errors.append(f"`{key}` must be a string, got {type(v).__name__}.")
 
+    # claude_md_imports (optional list of strings — paths, not content)
+    _require_list_of_str("claude_md_imports", cfg.get("claude_md_imports"))
+
     if errors:
         sys.stderr.write(f"\nCONFIG ERROR in {source}:\n")
         for e in errors:
@@ -206,7 +209,64 @@ HISTORY_MESSAGES       = _config["llm"].get("history_messages", 40)
 # Either block may be absent/empty — omitted blocks just drop out.
 PERSONALITY   = (_config.get("personality") or "").strip()
 GROUND_RULES  = (_config.get("ground_rules") or "").strip()
-SYSTEM_PROMPT = "\n\n".join(b for b in (PERSONALITY, GROUND_RULES) if b)
+
+# `claude_md_imports` (optional, claude preset's path-based mirror): the
+# wizard stores PATHS (e.g. `~/.claude/CLAUDE.md`, `./CLAUDE.md`) rather
+# than baking content into ground_rules. Files are read fresh at every
+# config-load (per-meeting boot), so editing your CLAUDE.md takes effect
+# next session without re-running the wizard. Missing files are skipped
+# with a stderr warning — common when configs travel across machines or
+# the user launches from a different cwd than originally configured.
+def _resolve_claude_md_path(p: str) -> Path:
+    """`~/...` → home-relative; `./...` → cwd-relative; everything else
+    used as-is. cwd is captured at import time, mirroring how Claude Code
+    itself resolves project-scope CLAUDE.md."""
+    if p.startswith("~/"):
+        return Path.home() / p[2:]
+    if p.startswith("./"):
+        return Path.cwd() / p[2:]
+    if p.startswith("~"):  # bare ~ or ~user — let expanduser handle it
+        return Path(p).expanduser()
+    return Path(p)
+
+
+def _read_claude_md_imports(paths: list[str]) -> str:
+    """Read each path, concatenate with section headers (multi-source)
+    or bare content (single source). Empty result → empty string. Missing
+    files warn-and-skip, never error: the wizard saved a list of paths
+    that may not all be reachable from this machine/cwd."""
+    if not paths:
+        return ""
+    found: list[tuple[str, str]] = []
+    for stored_label in paths:
+        resolved = _resolve_claude_md_path(stored_label)
+        if not resolved.is_file():
+            sys.stderr.write(
+                f"[{BOT_NAME}] ⚠ claude_md_imports: skipped missing source "
+                f"'{stored_label}' (resolved to {resolved})\n"
+            )
+            continue
+        try:
+            found.append((stored_label, resolved.read_text()))
+        except OSError as e:
+            sys.stderr.write(
+                f"[{BOT_NAME}] ⚠ claude_md_imports: read failed for "
+                f"'{stored_label}': {e}\n"
+            )
+    if not found:
+        return ""
+    if len(found) == 1:
+        return found[0][1].strip()
+    return "\n\n".join(
+        f"# CLAUDE.md — {label}\n{content.strip()}" for label, content in found
+    )
+
+
+CLAUDE_MD_IMPORTS_RAW = list(_config.get("claude_md_imports") or [])
+CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)
+SYSTEM_PROMPT = "\n\n".join(
+    b for b in (PERSONALITY, GROUND_RULES, CLAUDE_MD_BLOCK) if b
+)
 
 # Skills
 #
