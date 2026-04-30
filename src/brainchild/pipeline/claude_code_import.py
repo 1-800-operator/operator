@@ -216,6 +216,40 @@ _CLAUDE_MCP_LIST_RE = re.compile(
 
 _CLAUDE_MCP_LIST_TIMEOUT = 10.0
 
+# Cache the `claude mcp list` shell-out result for the lifetime of the
+# process. The CLI's output is stable once started (no live MCP add/remove
+# from inside operator), so paying ~3s per call when boot makes 3 of them
+# (sync discovery + sync health + config.py runtime view) is wasteful —
+# total boot cost was ~9s pre-cache. None means "not yet fetched"; an
+# empty CompletedProcess is a valid cached result (CLI missing/failed).
+_CLAUDE_MCP_LIST_CACHE: subprocess.CompletedProcess | None = None
+
+
+def _claude_mcp_list_cached() -> subprocess.CompletedProcess | None:
+    """Run `claude mcp list` once per process and cache the result.
+
+    Returns None if the CLI isn't on PATH or the call times out;
+    otherwise returns the CompletedProcess so callers can inspect
+    returncode + stdout. Subsequent calls reuse the cached result.
+
+    To bust the cache (e.g. tests adding MCPs mid-process), set
+    _CLAUDE_MCP_LIST_CACHE to None.
+    """
+    global _CLAUDE_MCP_LIST_CACHE
+    if _CLAUDE_MCP_LIST_CACHE is not None:
+        return _CLAUDE_MCP_LIST_CACHE
+    try:
+        r = subprocess.run(
+            ["claude", "mcp", "list"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_MCP_LIST_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    _CLAUDE_MCP_LIST_CACHE = r
+    return r
+
 
 def _slugify_mcp_name(raw: str) -> str:
     """Convert a display name like 'claude.ai Linear' to a YAML key like
@@ -244,16 +278,8 @@ def discover_hosted_mcps_via_cli() -> list[ImportedMCP]:
 
     Returns [] if the CLI isn't available, times out, or exits non-zero.
     """
-    try:
-        r = subprocess.run(
-            ["claude", "mcp", "list"],
-            capture_output=True,
-            text=True,
-            timeout=_CLAUDE_MCP_LIST_TIMEOUT,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if r.returncode != 0:
+    r = _claude_mcp_list_cached()
+    if r is None or r.returncode != 0:
         return []
 
     out: list[ImportedMCP] = []
@@ -291,21 +317,15 @@ def discover_mcp_health() -> list[tuple[str, str, str, bool]]:
     path: an MCP that needs reauth or has failed to connect would
     otherwise only manifest in-meeting as tools silently not working.
 
-    Shells out a second time after `discover_hosted_mcps_via_cli` —
-    accepted cost for v1; can be unified with a parsed-once cache later.
+    Shares the cached `claude mcp list` invocation with
+    `discover_hosted_mcps_via_cli` (and the runtime view in `config.py`),
+    so a single shell-out covers all three call sites — used to be
+    ~9s of cold MCP discovery per boot before the cache.
     Returns [] on missing/failing CLI; stdio entries (no URL in CLI
     output) are not included.
     """
-    try:
-        r = subprocess.run(
-            ["claude", "mcp", "list"],
-            capture_output=True,
-            text=True,
-            timeout=_CLAUDE_MCP_LIST_TIMEOUT,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if r.returncode != 0:
+    r = _claude_mcp_list_cached()
+    if r is None or r.returncode != 0:
         return []
 
     out: list[tuple[str, str, str, bool]] = []

@@ -66,6 +66,10 @@ def _with_fake_home(fn):
                 # Re-patch module-level constants derived from Path.home() at
                 # import time — they won't pick up the patched Path.home.
                 import brainchild.pipeline.claude_code_import as mod
+                # Bust the per-process `claude mcp list` cache so each test
+                # sees a fresh mock invocation instead of whatever a prior
+                # test (or the real CLI) populated.
+                mod._CLAUDE_MCP_LIST_CACHE = None
                 with (
                     patch.object(mod, "_USER_CONFIG_CANDIDATES", [
                         home / ".claude.json",
@@ -679,7 +683,12 @@ if __name__ == "__main__":
         test_append_env_placeholders_fixes_missing_trailing_newline,
     ]
     failed = 0
+    # Bust the per-process `claude mcp list` cache before every test so
+    # tests that mock subprocess.run see a fresh shell-out instead of
+    # whatever a prior test (or the real CLI on this machine) cached.
+    import brainchild.pipeline.claude_code_import as _cci_mod
     for t in tests:
+        _cci_mod._CLAUDE_MCP_LIST_CACHE = None
         try:
             t()
         except AssertionError as e:

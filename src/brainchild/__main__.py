@@ -876,9 +876,16 @@ def _run_bot(name, rest):
             return 2
         # Sync Claude Code MCP servers into the agent config on every boot —
         # picks up servers added/removed/edited in `~/.claude.json` since
-        # the last run. Pays the ~3s `claude mcp list` shell-out cost
-        # every boot in exchange for staying in sync.
+        # the last run. Shares one cached `claude mcp list` shell-out with
+        # downstream config.py runtime view (per-process cache in
+        # `claude_code_import._claude_mcp_list_cached`).
+        import time as _time_init
+        import logging as _logging_init
+        _t_sync = _time_init.monotonic()
         _sync_claude_imports()
+        _logging_init.getLogger("brainchild").info(
+            f"TIMING claude_sync={_time_init.monotonic() - _t_sync:.2f}s"
+        )
 
     # MUST be set before any `from brainchild import config` fires in the pipeline modules.
     os.environ["BRAINCHILD_BOT"] = name
@@ -888,7 +895,11 @@ def _run_bot(name, rest):
     # cost on the happy path). Non-zero exit means the user opted out
     # mid-prompt; skip browser spin-up entirely.
     if not no_preflight:
+        _t_cfg = _time_init.monotonic()
         from brainchild import config
+        _logging_init.getLogger("brainchild").info(
+            f"TIMING config_import={_time_init.monotonic() - _t_cfg:.2f}s"
+        )
         from brainchild.pipeline.readiness import (
             PREFLIGHT_OK,
             preflight_mcp_readiness,
