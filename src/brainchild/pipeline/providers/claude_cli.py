@@ -340,6 +340,34 @@ class ClaudeCLIProvider(LLMProvider):
             f"{shlex.quote(str(req))} {shlex.quote(str(resp))}"
         )
 
+        # Propagate operator's overlay disable-state to the inner CLI via
+        # `disabledMcpjsonServers`. Without this, a server the user toggled
+        # off in `brainchild edit claude` would still be auto-loaded by the
+        # CLI subprocess and exposed to the model — making operator's
+        # disable cosmetic at the banner/preflight surface only.
+        # Caveat: `disabledMcpjsonServers` only governs servers registered
+        # via JSON (`~/.claude.json`#mcpServers + `.mcp.json`); claude.ai-
+        # hosted MCPs (Gmail/Drive/Calendar/Linear from `claude mcp list`)
+        # have no known runtime disable surface today, so disabling those
+        # in operator stays cosmetic until we find a CLI knob.
+        from brainchild import config as _cfg
+        # Discover JSON-keyed names from ~/.claude.json so we can map our
+        # slugified disabled set back to raw JSON keys. (CLI-discovered
+        # claude.ai names get slugified at import; JSON-keyed names pass
+        # through unchanged. Names that exist in both forms in the
+        # disabled set get included as-is — extras are harmless.)
+        try:
+            from brainchild.pipeline.claude_code_import import read_user_mcp_config
+            json_cfg = read_user_mcp_config()
+            json_keys: set[str] = set((json_cfg.get("mcpServers") or {}).keys())
+            for proj in (json_cfg.get("projects") or {}).values():
+                json_keys.update((proj.get("mcpServers") or {}).keys())
+        except Exception:
+            json_keys = set()
+        disabled_json = sorted(
+            n for n in (_cfg.DISABLED_MCP_SERVERS or {}).keys() if n in json_keys
+        )
+
         settings = {
             "hooks": {
                 "PreToolUse": [
@@ -356,6 +384,8 @@ class ClaudeCLIProvider(LLMProvider):
                 ]
             }
         }
+        if disabled_json:
+            settings["disabledMcpjsonServers"] = disabled_json
         (tmp / "settings.json").write_text(json.dumps(settings, indent=2))
         log.info(f"ClaudeCLI permission bridge: tempdir={tmp}")
 

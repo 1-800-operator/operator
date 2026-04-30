@@ -73,10 +73,16 @@ permissions:
   # is checked first, so an explicit deny pattern beats a broad allow.
   # See README → "MCP permissions" for the full pattern syntax.
 
-# MCP servers — toggle-only under track A. claude already has each server's
-# command/args/env wired from ~/.claude.json; this list controls which ones
-# the wizard / runtime hand to inner-claude (`enabled: false` ⇒ added to
-# settings.json's disabledMcpjsonServers).
+# MCP servers — toggle-only overlay under track A. The slim `enabled` flag
+# is the user's authored truth; command/args/env are rediscovered fresh
+# every boot from cwd-aware `discover_all_mcps()`. JSON-keyed servers
+# (~/.claude.json#mcpServers + .mcp.json) flow `enabled: false` into the
+# inner CLI's `disabledMcpjsonServers` so the disable actually stops the
+# CLI from auto-loading them. claude.ai-hosted servers (Gmail/Drive/
+# Linear etc. from `claude mcp list`) have no known runtime disable knob
+# today, so toggling them off in operator hides them from operator's
+# banner + preflight but the CLI still loads them — cosmetic until we
+# find a CLI surface or add an LLM-side guard.
 #
 # The list is empty in the shipped config; on first boot brainchild reads
 # the user's ~/.claude.json + `claude mcp list` and writes a toggle entry

@@ -263,7 +263,16 @@ def _read_claude_md_imports(paths: list[str]) -> str:
 
 
 CLAUDE_MD_IMPORTS_RAW = list(_config.get("claude_md_imports") or [])
-CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)
+# Skip the CLAUDE.md mirror entirely for the claude_cli provider — the
+# Claude Code CLI auto-loads CLAUDE.md from cwd + ~/.claude/CLAUDE.md as
+# memory on every invocation, so passing it again via --append-system-prompt
+# would double the same content into context. The field is preserved on
+# disk for non-claude bots that may want to use it; for claude_cli it's
+# silently ignored.
+if LLM_PROVIDER == "claude_cli":
+    CLAUDE_MD_BLOCK = ""
+else:
+    CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)
 SYSTEM_PROMPT = "\n\n".join(
     b for b in (PERSONALITY, GROUND_RULES, CLAUDE_MD_BLOCK) if b
 )

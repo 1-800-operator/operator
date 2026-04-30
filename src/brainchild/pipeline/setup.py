@@ -59,8 +59,6 @@ from brainchild.pipeline.claude_code_import import (
     append_env_placeholders,
     claude_code_installed_and_logged_in,
     discover_all_mcps,
-    discover_claude_md_sources,
-    read_user_claude_md,
 )
 from brainchild.pipeline.picker import Choice, PickerCancelled, select_many, select_one
 from brainchild.pipeline.readiness import STATUS_GLYPH, report_mcp_readiness
@@ -461,13 +459,11 @@ def _auto_import_claude_setup(state: WizardState) -> None:
     servers = state.bot_cfg.setdefault("mcp_servers", {})
 
     with console.status(
-        "[dim]wiring in your Claude skills, MCPs, and CLAUDE.md[/dim]",
+        "[dim]wiring in your Claude skills and MCPs[/dim]",
         spinner="simpleDots",
     ):
         mcps, wrapped = discover_all_mcps()
         discovered = _discover_skill_candidates(state)
-        claude_md_sources = discover_claude_md_sources()
-        claude_md = read_user_claude_md() if claude_md_sources else None
 
     added_mcps: list[str] = []
     # Overlay model (Option A): persist only user-edit fields. Source-driven
@@ -496,11 +492,6 @@ def _auto_import_claude_setup(state: WizardState) -> None:
     if from_external:
         state.enabled_skill_names = from_external
 
-    # Stash on state via a plain attribute — WizardState is a dataclass
-    # but Python still permits ad-hoc attrs. Step 4 reads it.
-    state._claude_md_content = claude_md  # type: ignore[attr-defined]
-    state._claude_md_sources = claude_md_sources  # type: ignore[attr-defined]
-
     console.print()
     console.print("  [bold]Claude Code auto-import:[/bold]")
     if added_mcps:
@@ -520,14 +511,6 @@ def _auto_import_claude_setup(state: WizardState) -> None:
         console.print(
             "    [dim]No skills found under ~/.claude/skills/ — toggle any "
             "bundled skills in the next step.[/dim]"
-        )
-    if claude_md_sources:
-        labels = ", ".join(label for label, _ in claude_md_sources)
-        console.print(
-            f"    [dim]Found CLAUDE.md ({len(claude_md_sources)} source"
-            f"{'s' if len(claude_md_sources) != 1 else ''}: {labels}; "
-            f"{len(claude_md)} chars) — "
-            f"step 4 will offer to append to ground rules.[/dim]"
         )
 
 
@@ -1011,72 +994,66 @@ def _step_permissions(state: WizardState) -> None:
 
 
 def _step4_system_prompt(state: WizardState) -> None:
-    """Author the agent's system prompt — one input covers voice and rules.
+    """Author the agent's system prompt — voice + always-on rules.
 
-    On non-empty input: stored on `personality`; `ground_rules` is cleared.
-    On empty input: preserve whatever the preset (or existing agent) already
-    has in personality/ground_rules — never silently wipe defaults. config.py
-    joins the two blocks with a blank line when either is non-empty.
+    When existing content is present, render it in full as dim preview
+    above a single binary `Keep existing prompt? [y/n]` (default y).
+    `n` clears both personality and ground_rules. There's no inline
+    replace affordance — authoring a fresh prompt happens via the
+    no-existing-content path (fresh build) or by clearing here and
+    re-running build. Avoids the caveman bug (session 174) where a
+    stale "Speak like a caveman." stuck around because the input prompt
+    didn't show the existing value and users hit Enter expecting clear.
+
+    Claude preset note: the next sub-prompt APPENDS CLAUDE.md to whatever
+    this step produces. Clear here if you want CLAUDE.md alone.
     """
     console.print("[bold]4. System Prompt[/bold]")
-    console.print("  [dim]Give your agent personality and some ground rules.[/dim]\n")
-    new_text = _prompt_with_hint("Leave empty to keep the preset's defaults").strip()
-    if new_text:
-        state.bot_cfg["personality"] = new_text
-        state.bot_cfg["ground_rules"] = ""
-        console.print(f"  ✓ system prompt saved ({len(new_text)} chars)")
+    if state.based_on == "claude":
+        console.print(
+            "  [dim]The agent's voice and always-on rules. Your CLAUDE.md "
+            "files are loaded automatically by Claude Code itself — no need "
+            "to repeat that content here.[/dim]\n"
+        )
     else:
-        existing_chars = len((state.bot_cfg.get("personality") or "").strip()) \
-            + len((state.bot_cfg.get("ground_rules") or "").strip())
-        if existing_chars:
-            console.print(f"  [dim]kept preset defaults ({existing_chars} chars)[/dim]")
+        console.print("  [dim]Give your agent personality and some ground rules.[/dim]\n")
+
+    existing_personality = (state.bot_cfg.get("personality") or "").strip()
+    existing_ground_rules = (state.bot_cfg.get("ground_rules") or "").strip()
+    composed = "\n\n".join(b for b in (existing_personality, existing_ground_rules) if b)
+    existing_chars = len(composed)
+
+    if existing_chars:
+        console.print(f"  [dim]{composed}[/dim]\n")
+        keep = Prompt.ask(
+            f"  Keep existing prompt? ({existing_chars} chars)",
+            choices=["y", "n"],
+            default="y",
+        ).lower()
+        if keep == "y":
+            console.print(f"  [dim]kept existing ({existing_chars} chars)[/dim]")
+        else:
+            state.bot_cfg["personality"] = ""
+            state.bot_cfg["ground_rules"] = ""
+            console.print(f"  ✓ system prompt cleared")
+    else:
+        new_text = _prompt_with_hint("Leave empty for no personality / ground rules").strip()
+        if new_text:
+            state.bot_cfg["personality"] = new_text
+            state.bot_cfg["ground_rules"] = ""
+            console.print(f"  ✓ system prompt saved ({len(new_text)} chars)")
         else:
             console.print(f"  [dim]system prompt left blank[/dim]")
 
-    # Claude preset: mirror Claude Code's CLAUDE.md sources by storing
-    # PATHS (not baked content) in `claude_md_imports`. config.py reads
-    # those files fresh at every boot, so editing your CLAUDE.md takes
-    # effect next session without re-running the wizard. Default Y —
-    # the claude agent's identity is "your Claude Code setup," and
-    # CLAUDE.md is part of that. The user can decline here, or untoggle
-    # individual sources later via `brainchild edit`. The labels we
-    # store (`~/.claude/CLAUDE.md`, `./CLAUDE.md`, etc.) are already in
-    # the portable storage form used by `_resolve_claude_md_path`.
-    claude_md = getattr(state, "_claude_md_content", None)
-    claude_md_sources = getattr(state, "_claude_md_sources", []) or []
-    if state.based_on == "claude" and claude_md_sources:
-        console.print()
-        if len(claude_md_sources) == 1:
-            label = claude_md_sources[0][0]
-            prompt_label = f"[bold]{label}[/bold] ({len(claude_md)} chars)"
-        else:
-            labels = ", ".join(label for label, _ in claude_md_sources)
-            prompt_label = (
-                f"CLAUDE.md from [bold]{len(claude_md_sources)} sources[/bold] "
-                f"({labels}; {len(claude_md)} chars merged)"
-            )
-        answer = Prompt.ask(
-            f"  Mirror {prompt_label} into the bot's system prompt?",
-            choices=["y", "n"],
-            default="y",
-        )
-        if answer.lower() == "y":
-            state.bot_cfg["claude_md_imports"] = [
-                label for label, _ in claude_md_sources
-            ]
-            mounted_label = (
-                claude_md_sources[0][0]
-                if len(claude_md_sources) == 1
-                else f"{len(claude_md_sources)} CLAUDE.md sources"
-            )
-            console.print(
-                f"  [green]✓[/green] {mounted_label} mirrored — "
-                f"[dim]read fresh each session.[/dim]"
-            )
-        else:
-            # Explicit decline persists as empty list so re-runs don't
-            # silently re-mirror without asking again.
-            state.bot_cfg["claude_md_imports"] = []
+    # Claude preset: the CLAUDE.md mirror sub-step that lived here was
+    # removed in session 174. Rationale: the Claude Code CLI auto-loads
+    # CLAUDE.md from cwd + ~/.claude/CLAUDE.md as memory on every call,
+    # so operator passing the same content via --append-system-prompt
+    # was double-loading the bytes into the inner Claude's context. The
+    # `claude_md_imports` field on the cfg is now silently dropped for
+    # the claude preset to avoid leaving cosmetic state behind.
+    if state.based_on == "claude":
+        state.bot_cfg.pop("claude_md_imports", None)
 
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
