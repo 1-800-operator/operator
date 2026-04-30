@@ -137,15 +137,27 @@ def _capture_email(page) -> str | None:
 
 def _write_artifacts(context, page, account_file: Path, auth_state_path: Path) -> str | None:
     """After SID cookie is detected: capture email, persist both artifacts."""
+    import os as _os
+
     email = _capture_email(page)
-    auth_state_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         context.storage_state(path=str(auth_state_path))
+        # auth_state.json carries .google.com session cookies (SID,
+        # __Secure-1PSID, …). Lock it down so it isn't world-readable.
+        try:
+            _os.chmod(auth_state_path, 0o600)
+        except OSError as e:
+            log.warning(f"google_signin: chmod 0o600 on auth_state failed: {e}")
     except Exception as e:
         log.warning(f"google_signin: storage_state write failed: {e}")
     if email:
         try:
             account_file.write_text(json.dumps({"email": email}), encoding="utf-8")
+            try:
+                _os.chmod(account_file, 0o600)
+            except OSError as e:
+                log.warning(f"google_signin: chmod 0o600 on account_file failed: {e}")
         except OSError as e:
             log.warning(f"google_signin: account file write failed: {e}")
     return email

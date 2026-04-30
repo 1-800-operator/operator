@@ -613,6 +613,12 @@ from brainchild.pipeline.auth import (
 
 
 def main():
+    # Strip group/world bits from anything we create under ~/.brainchild/.
+    # Files are born 0o600 and dirs 0o700 with this mask, closing the
+    # mkdir → chmod race for callers that don't pass mode= explicitly.
+    # Only touches files this process creates; existing files keep their
+    # current perms.
+    os.umask(0o077)
     _migrate_legacy_user_artifacts()
     _ensure_user_agents()
     _ensure_user_skills()

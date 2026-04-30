@@ -105,9 +105,13 @@ class LinuxAdapter(MeetingConnector):
         except Exception as e:
             log.debug(f"LinuxAdapter: could not open chat panel: {e}")
             try:
-                os.makedirs(config.DEBUG_DIR, exist_ok=True)
+                os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
                 _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
                 page.screenshot(path=_shot)
+                try:
+                    os.chmod(_shot, 0o600)
+                except OSError:
+                    pass
                 log.debug(f"LinuxAdapter: saved debug screenshot to {_shot}")
             except Exception:
                 pass
@@ -276,9 +280,11 @@ class LinuxAdapter(MeetingConnector):
 
     def _browser_session(self, meeting_url):
         """Run headless Playwright/Chromium session. Blocks until leave() is called."""
-        os.makedirs(self._user_data_dir, exist_ok=True)
         # Lock the profile dir to owner-only — contents include Google session
         # cookies and shouldn't be listable by other users on shared hosts.
+        # mode= on makedirs makes creation atomic-private; chmod is the
+        # belt for the case where the dir already exists with looser perms.
+        os.makedirs(self._user_data_dir, exist_ok=True, mode=0o700)
         try:
             os.chmod(self._user_data_dir, 0o700)
         except OSError as e:

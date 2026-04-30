@@ -249,15 +249,29 @@ def inject_cookies(context, auth_state):
 def save_debug(page, label="debug"):
     """Save a screenshot and HTML dump for diagnosis."""
     debug_dir = config.DEBUG_DIR
-    os.makedirs(debug_dir, exist_ok=True)
+    os.makedirs(debug_dir, exist_ok=True, mode=0o700)
     try:
-        page.screenshot(path=os.path.join(debug_dir, f"{label}.png"), full_page=True)
+        os.chmod(debug_dir, 0o700)
+    except OSError:
+        pass
+    png_path = os.path.join(debug_dir, f"{label}.png")
+    html_path = os.path.join(debug_dir, f"{label}.html")
+    try:
+        page.screenshot(path=png_path, full_page=True)
+        try:
+            os.chmod(png_path, 0o600)
+        except OSError:
+            pass
         log.info(f"session: screenshot saved to {debug_dir}/{label}.png")
     except Exception as e:
         log.warning(f"session: screenshot failed: {e}")
     try:
-        with open(os.path.join(debug_dir, f"{label}.html"), "w") as f:
+        with open(html_path, "w") as f:
             f.write(page.content())
+        try:
+            os.chmod(html_path, 0o600)
+        except OSError:
+            pass
         log.info(f"session: HTML saved to {debug_dir}/{label}.html")
     except Exception as e:
         log.warning(f"session: HTML dump failed: {e}")

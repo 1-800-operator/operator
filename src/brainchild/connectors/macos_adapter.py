@@ -192,9 +192,13 @@ class MacOSAdapter(MeetingConnector):
         except Exception as e:
             log.debug(f"MacOSAdapter: could not open chat panel: {e}")
             try:
-                os.makedirs(config.DEBUG_DIR, exist_ok=True)
+                os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
                 _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
                 page.screenshot(path=_shot)
+                try:
+                    os.chmod(_shot, 0o600)
+                except OSError:
+                    pass
                 log.debug(f"MacOSAdapter: saved debug screenshot to {_shot}")
             except Exception:
                 pass
@@ -533,7 +537,9 @@ class MacOSAdapter(MeetingConnector):
         t_start = time.monotonic()
         # Lock the profile dir to owner-only — contents include Google session
         # cookies and shouldn't be listable by other users on shared hosts.
-        os.makedirs(BROWSER_PROFILE, exist_ok=True)
+        # mode= on makedirs makes creation atomic-private; chmod is the
+        # belt for the case where the dir already exists with looser perms.
+        os.makedirs(BROWSER_PROFILE, exist_ok=True, mode=0o700)
         try:
             os.chmod(BROWSER_PROFILE, 0o700)
         except OSError as e:
