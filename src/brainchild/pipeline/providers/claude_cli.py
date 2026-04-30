@@ -114,6 +114,32 @@ class ClaudeCLIProvider(LLMProvider):
         self._append_system_prompt = append_system_prompt or None
         self._cwd = cwd or os.path.expanduser("~")
         self._permission_handler = permission_handler
+        # Layer a notice naming the disabled MCP servers onto the system
+        # prompt so the model neither lists them when asked nor attempts
+        # to call them. The CLI's tool definitions for these still load
+        # (claude.ai-hosted MCPs aren't governed by `disabledMcpjsonServers`
+        # and live behind claude.ai OAuth, so we can't excise them from
+        # context without re-auth UX regression). This notice is the
+        # cheapest functional disable: bridge-guard catches any call
+        # attempts that slip through, but the prompt nudge keeps the
+        # model from claiming or trying in the first place.
+        try:
+            from brainchild import config as _cfg
+            disabled = sorted((_cfg.DISABLED_MCP_SERVERS or {}).keys())
+        except Exception:
+            disabled = []
+        if disabled:
+            disable_notice = (
+                f"\n\nNOTE: The following MCP servers are disabled in this "
+                f"bot's configuration and MUST NOT be used or claimed as "
+                f"available: {', '.join(disabled)}. If asked what tools you "
+                f"have, do not mention them. If asked to do something that "
+                f"would require one of these servers, say it's disabled in "
+                f"the bot's config and offer to walk the user through "
+                f"`brainchild edit claude` to re-enable."
+            )
+            existing = self._append_system_prompt or ""
+            self._append_system_prompt = (existing + disable_notice).lstrip()
         # Optional progress narrator: callable (tool_name, tool_input) ->
         # None, fired on every tool_use content block as the model emits
         # them. Lets the chat runner post a "📖 reading X" line so the
