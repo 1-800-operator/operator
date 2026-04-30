@@ -29,6 +29,14 @@ class MeetingConnector:
         """
         return 0
 
+    def get_participant_names(self):
+        """Return display names of participants currently in the meeting.
+
+        Best-effort — connectors that can't scrape names return []. Includes
+        the bot's own name; callers that want only "others" should filter.
+        """
+        return []
+
     def is_connected(self):
         """Return True if the browser session is still alive.
 

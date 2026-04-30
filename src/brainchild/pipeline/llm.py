@@ -371,27 +371,58 @@ class LLMClient:
         except Exception as e:
             log.warning(f"LLM warmup failed (non-fatal): {e}")
 
-    def intro(self) -> str:
+    def intro(
+        self,
+        *,
+        participant_names: list[str] | None = None,
+        participant_count: int = 0,
+    ) -> str:
         """Generate a self-introduction for the chat panel on join.
 
         Sent with no message history — the bot is greeting the room, not
         reacting to it. Relies on the system prompt already carrying skills,
         MCP hints, and MCP status (injected during startup) so the model has
         full visibility into what it can actually do this session.
+
+        `participant_names` and `participant_count` are best-effort signals
+        from the connector. When names are available, the bot can address
+        people directly; when only count is available, the bot at least
+        knows whether it's a 1-on-1 or a group.
         """
+        # Filter out the bot's own tile from any scraped names. Match
+        # case-insensitively because Meet sometimes uppercases the display
+        # name in the participants panel.
+        own_name_lower = config.AGENT_NAME.lower()
+        others = [
+            n for n in (participant_names or [])
+            if n and n.strip().lower() != own_name_lower
+        ]
+        if others:
+            if len(others) == 1:
+                room_ctx = f"You are joining a 1-on-1 with {others[0]}. "
+            elif len(others) <= 4:
+                room_ctx = f"You are joining a meeting with: {', '.join(others)}. "
+            else:
+                sample = ", ".join(others[:3])
+                room_ctx = (
+                    f"You are joining a meeting with {len(others)} people, "
+                    f"including {sample}. "
+                )
+        elif participant_count > 1:
+            room_ctx = (
+                f"You are joining a meeting with {participant_count - 1} "
+                f"other participants. "
+            )
+        elif participant_count == 1:
+            room_ctx = "You are joining a 1-on-1 with one other person. "
+        else:
+            room_ctx = ""
         prompt = (
-            f"Introduce yourself to the meeting in chat. Your name is "
+            f"{room_ctx}"
+            f"Introduce yourself in chat. Your name is "
             f"\"{config.AGENT_NAME}\" — use that exact name; do not invent "
             f"a different one.\n"
             "Constraints:\n"
-            "- Open with a brief greeting word ('Hey', 'Hi', 'Greetings', "
-            "'Howdy', 'Hello' — pick one that matches your personality), "
-            f"then \"I'm\" or \"I am\", then your name (\"{config.AGENT_NAME}\"), "
-            "then a dash or sentence break, then the substance. The shape is "
-            f"\"<greeting>, I'm {config.AGENT_NAME} — <substance>.\" "
-            f"NEVER write \"<greeting>, {config.AGENT_NAME}\" alone — that reads "
-            f"like you're greeting someone named {config.AGENT_NAME} instead of "
-            f"introducing yourself. No 'everyone!', no extra filler.\n"
             "- Keep it tight: two mid-size sentences, or up to three short "
             "ones. Aim for ~30 words total; never exceed 45.\n"
             "- After the greeting, cover two things only: who you are "

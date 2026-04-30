@@ -613,6 +613,8 @@ class LinuxAdapter(MeetingConnector):
                                 result_q.put([])
                             elif cmd == "participant_count":
                                 result_q.put(0)
+                            elif cmd == "participant_names":
+                                result_q.put([])
                             else:
                                 result_q.put(None)
                         except queue.Empty:

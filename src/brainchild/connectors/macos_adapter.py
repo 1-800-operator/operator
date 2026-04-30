@@ -132,6 +132,15 @@ class MacOSAdapter(MeetingConnector):
         except queue.Empty:
             return 0
 
+    def get_participant_names(self):
+        """Return participant display names via browser thread (best effort)."""
+        result_q = queue.Queue()
+        self._chat_queue.put(("participant_names", None, result_q))
+        try:
+            return result_q.get(timeout=5)
+        except queue.Empty:
+            return []
+
     def is_connected(self):
         """Return True if the browser session is still alive."""
         return not self._browser_closed.is_set()
@@ -360,6 +369,44 @@ class MacOSAdapter(MeetingConnector):
             log.warning(f"MacOSAdapter: get_participant_count failed: {e}")
             return 0
 
+    def _do_get_participant_names(self, page):
+        """Best-effort participant name scrape via tile DOM.
+
+        Meet renders one tile per participant with `data-requested-participant-id`.
+        We try a few selectors per tile because Meet's class names rotate; we
+        also fall back to textContent. Returns a deduped list of plausible
+        names. Returns [] on any failure — callers must degrade gracefully.
+        """
+        try:
+            return page.evaluate("""() => {
+                const tiles = document.querySelectorAll('[data-requested-participant-id]');
+                const names = [];
+                const seen = new Set();
+                tiles.forEach(t => {
+                    let name = '';
+                    const labelled = t.querySelector('[data-self-name]');
+                    if (labelled) name = (labelled.textContent || '').trim();
+                    if (!name) {
+                        const aria = t.getAttribute('aria-label') || '';
+                        if (aria && !aria.includes('More options') && !aria.includes('Menu')) {
+                            name = aria.trim();
+                        }
+                    }
+                    if (!name) {
+                        const txt = (t.textContent || '').trim();
+                        if (txt && txt.length < 60) name = txt;
+                    }
+                    if (name && !seen.has(name)) {
+                        seen.add(name);
+                        names.push(name);
+                    }
+                });
+                return names;
+            }""") or []
+        except Exception as e:
+            log.warning(f"MacOSAdapter: get_participant_names failed: {e}")
+            return []
+
     def _process_chat_queue(self, page):
         """Drain the chat command queue. Called from browser thread's idle loop."""
         while not self._chat_queue.empty():
@@ -376,6 +423,9 @@ class MacOSAdapter(MeetingConnector):
             elif cmd == "participant_count":
                 count = self._do_get_participant_count(page)
                 result_q.put(count)
+            elif cmd == "participant_names":
+                names = self._do_get_participant_names(page)
+                result_q.put(names)
 
     # ── Waiting room ─────────────────────────────────────────────────
 

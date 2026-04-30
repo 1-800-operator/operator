@@ -122,6 +122,13 @@ class ChatRunner:
         self._turn_count = 0
         self._load_skill_calls = 0
         self._load_skill_by_name: dict[str, int] = {}
+        # Per-turn heartbeat. Set in _handle_message, incremented in
+        # _execute_and_respond, drained in _dispatch_result on the
+        # terminal text branches. None means "no turn in flight" — the
+        # heartbeat closer is a no-op so intro / failure-banner sends
+        # don't get a phantom "Replied" line.
+        self._turn_start_ts: float | None = None
+        self._turn_tool_count = 0
         # Self-intro on join. Background thread generates the text; main loop
         # posts it (so send_chat stays single-threaded). User-message
         # processing is deferred until the intro lands; messages that arrive
@@ -130,6 +137,7 @@ class ChatRunner:
         self._intro_ready = threading.Event()
         self._intro_text = ""
         self._intro_posted = not config.INTRO_ON_JOIN
+        self._hold_posted_at: float | None = None
         self._pre_intro_buffer: list[dict] = []
         # Progress narrator state (track A only). _last_send_time is
         # updated by _send so the narrator can stay quiet during fast
@@ -235,14 +243,13 @@ class ChatRunner:
                 meta={"meet_url": meeting_url},
             )
             self._llm.set_record(self._record)
-        # Kick off intro LLM call in parallel with browser join — the
-        # intro doesn't depend on browser state, only on a live LLM, so
-        # we can save the full intro-turn latency by overlapping it with
-        # the ~5–10s browser launch + join wait. The main loop's intro
-        # gate still waits for `_intro_ready` AND `saw_others`, so we
-        # never post into an empty room.
-        if config.INTRO_ON_JOIN:
-            threading.Thread(target=self._generate_intro, daemon=True).start()
+        # Intro generation is deferred to when `saw_others` flips in the
+        # main loop, so we can scrape participant names/count first and
+        # bake them into the prompt (lets the model address people by name
+        # and pick singular vs plural greeting). Trades the ~3–5s parallel-
+        # generation win for participant-aware framing; the HOLD_DURATION
+        # beat usually overlaps the LLM call so the user-visible delay is
+        # small. See _generate_intro for the kickoff.
         # Skip join if connector was already started (e.g. for parallel MCP init)
         if not self._connector.join_status:
             self._connector.join(meeting_url)
@@ -272,7 +279,21 @@ class ChatRunner:
                             "consider re-running scripts/auth_export.py")
 
         log.info("ChatRunner: joined")
-        ui.ok("Joined meeting — listening for chat.")
+        # Listening line — show trigger phrase + room state up front so
+        # the user knows how to address the bot and whether 1-on-1 mode
+        # is active. Best-effort participant count; falls back to a
+        # generic message if the connector hasn't reported yet.
+        try:
+            seed_count = self._connector.get_participant_count()
+        except Exception:
+            seed_count = 0
+        trigger = config.TRIGGER_PHRASE
+        if seed_count and seed_count <= ONE_ON_ONE_THRESHOLD:
+            ui.ok(f"Joined as @{trigger} · solo (1-on-1 mode)")
+        elif seed_count:
+            ui.ok(f"Joined as @{trigger} · {seed_count} participants")
+        else:
+            ui.ok(f"Joined as @{trigger} — listening for chat.")
         self._post_mcp_failure_banner()
         log.info("ChatRunner: starting chat loop")
         self._loop()
@@ -320,16 +341,23 @@ class ChatRunner:
         line = "Heads-up — " + "; ".join(fragments) + ". Ask for details."
         self._send(line)
 
-    def _generate_intro(self):
+    def _generate_intro(self, participant_names=None, participant_count=0):
         """Background-thread LLM call for the self-intro.
 
         Stores the result in _intro_text and signals via _intro_ready. The
         main loop is responsible for sending it (so send_chat is never
         called off-thread). On generation failure, _intro_text stays empty
         and the main loop will skip the post.
+
+        Participant info (names/count) is scraped once at trigger time and
+        passed in so the LLM can address people by name and pick the right
+        singular/plural framing.
         """
         try:
-            self._intro_text = self._llm.intro()
+            self._intro_text = self._llm.intro(
+                participant_names=participant_names,
+                participant_count=participant_count,
+            )
         except Exception as e:
             log.error(f"ChatRunner: intro generation failed — skipping: {e}")
             self._intro_text = ""
@@ -372,7 +400,7 @@ class ChatRunner:
             # Detect unexpected browser session death (crash, page loss, etc.)
             if not self._connector.is_connected():
                 log.warning("ChatRunner: connector disconnected unexpectedly — exiting loop")
-                ui.warn("Meeting connection lost — chat loop stopped.")
+                ui.err("Meeting connection lost — chat loop stopped.")
                 break
 
             # Post the self-intro the first iteration after generation completes
@@ -382,7 +410,42 @@ class ChatRunner:
             # instantly, user takes 5–15s to get through pre-join + open chat,
             # and Meet only shows messages received after you've opened chat).
             # Drain anything buffered during the gap once it does post.
-            if not self._intro_posted and self._intro_ready.is_set() and saw_others:
+            # "Hold for <bot>..." line — first chat post, gated on saw_others
+            # for the same reason the intro is: Meet only renders messages
+            # received after a participant opens chat, so posting before a
+            # human is in the room means nobody ever sees it. Stamp the post
+            # time so the intro gate below can enforce the connecting-beat
+            # floor. We also kick off intro generation here (rather than at
+            # run() start) so we can scrape participant names/count first
+            # and bake them into the LLM prompt.
+            if self._hold_posted_at is None and saw_others:
+                self._send(f"Hold for {config.AGENT_NAME}...")
+                self._hold_posted_at = time.time()
+                if config.INTRO_ON_JOIN:
+                    try:
+                        names = self._connector.get_participant_names()
+                    except Exception as e:
+                        log.warning(f"ChatRunner: get_participant_names failed: {e}")
+                        names = []
+                    try:
+                        count = self._connector.get_participant_count()
+                    except Exception:
+                        count = 0
+                    threading.Thread(
+                        target=self._generate_intro,
+                        kwargs={"participant_names": names, "participant_count": count},
+                        daemon=True,
+                    ).start()
+
+            # Enforce a minimum gap after the "Hold for <bot>..." line so the
+            # "connecting you now" beat registers even if intro generation
+            # finishes faster than humans can read. Floor only — if the LLM
+            # is slow we never wait *longer* than it does.
+            hold_elapsed_ok = (
+                self._hold_posted_at is not None
+                and (time.time() - self._hold_posted_at) >= config.HOLD_DURATION_SECONDS
+            )
+            if not self._intro_posted and self._intro_ready.is_set() and saw_others and hold_elapsed_ok:
                 if self._intro_text:
                     self._send(self._intro_text)
                 self._intro_posted = True
@@ -556,9 +619,33 @@ class ChatRunner:
         else:
             log.debug("ChatRunner: stored as context (no trigger phrase)")
 
+    def _emit_turn_done(self, *, failed: bool = False):
+        """Close out the per-turn stdout heartbeat.
+
+        Drains _turn_start_ts so the next call is a no-op (idempotent —
+        confirmation paths and recursive _dispatch_result calls can each
+        trigger this without doubling). Reports elapsed wall time and
+        the count of tools auto-executed during the turn. NO message
+        bodies, sender names, or tool arguments — heartbeat is metadata
+        only by user constraint.
+        """
+        if self._turn_start_ts is None:
+            return
+        elapsed = time.time() - self._turn_start_ts
+        n_tools = self._turn_tool_count
+        self._turn_start_ts = None
+        self._turn_tool_count = 0
+        suffix = f" · {n_tools} tool{'s' if n_tools != 1 else ''}" if n_tools else ""
+        if failed:
+            ui.err(f"Turn {self._turn_count} failed — {elapsed:.1f}s{suffix}")
+        else:
+            ui.ok(f"Replied — {elapsed:.1f}s{suffix}")
+
     def _handle_message(self, text):
         """Process a single chat message via LLM."""
         self._turn_count += 1
+        self._turn_start_ts = time.time()
+        self._turn_tool_count = 0
         # Slash-invocation fast path — /<name> (after trigger phrase is already stripped).
         # If it matches a loaded skill, prepend the body to the user message so the
         # LLM sees the full instructions without the extra load_skill round-trip.
@@ -586,6 +673,7 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
+            self._emit_turn_done(failed=True)
             return
 
         # llm.ask returns a raw string only on the legacy non-streaming
@@ -716,10 +804,12 @@ class ChatRunner:
         """Route an LLM result (text, tool_call, or context_overflow)."""
         if isinstance(result, str):
             self._send(result)
+            self._emit_turn_done()
         elif result["type"] == "text":
             # Streaming path already posted each paragraph via on_paragraph.
             if not result.get("streamed"):
                 self._send(result["content"])
+            self._emit_turn_done()
         elif result["type"] == "tool_call":
             if result["name"] == LOAD_SKILL_TOOL:
                 self._handle_load_skill(result)
@@ -729,6 +819,7 @@ class ChatRunner:
                 self._execute_and_respond(result)
         elif result["type"] == "context_overflow":
             self._send("Our conversation got too long — I've cleared the history. What would you like to do next?")
+            self._emit_turn_done()
 
     def _handle_load_skill(self, tc):
         """Resolve a load_skill call locally and feed the skill body back as the tool result."""
@@ -768,6 +859,7 @@ class ChatRunner:
         heartbeats added more noise than signal.
         """
         log.info(f"ChatRunner: auto-executing {tc['name']}")
+        self._turn_tool_count += 1
         t_exec_start = time.monotonic()
         result_holder = [None]
         error_holder = [None]
@@ -821,6 +913,7 @@ class ChatRunner:
         except Exception as e:
             log.error(f"ChatRunner: LLM summary failed: {e}")
             self._send("Tool succeeded but I couldn't summarize the result.")
+            self._emit_turn_done(failed=True)
             return
 
         self._dispatch_result(result)
@@ -874,6 +967,7 @@ class ChatRunner:
         except Exception as llm_err:
             log.error(f"ChatRunner: LLM error-summary call failed: {llm_err}")
             self._send(fallback)
+            self._emit_turn_done(failed=True)
             return
         self._dispatch_result(result)
 
