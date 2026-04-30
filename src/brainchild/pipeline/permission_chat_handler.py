@@ -33,6 +33,41 @@ log = logging.getLogger(__name__)
 _GLOB_CHARS = ("*", "?", "[")
 
 
+def _disabled_mcp_for_cli_tool(tool_name: str) -> str | None:
+    """For Claude CLI's `mcp__<server>__<tool>` naming, return the operator
+    overlay key of the disabled MCP if `tool_name`'s server prefix matches
+    one, else None.
+
+    Two name conventions to bridge:
+      - JSON-keyed servers (sentry, test-mcp, MyMCP) keep their JSON key as
+        operator's overlay key. The CLI's tool prefix uses underscores in
+        place of any non-alphanumeric, so `test-mcp` → tool prefix
+        `test_mcp` while overlay key stays `test-mcp`. Direct lookup catches
+        keys that survive intact (sentry, MyMCP); fallback lookup with
+        `_`→`-` + lowercase catches the hyphen/underscore swap.
+      - claude.ai-hosted servers come from `claude mcp list` display names
+        (e.g., "claude.ai Gmail") which operator slugifies to
+        `claude-ai-gmail`. The CLI's tool prefix is `claude_ai_Gmail`. The
+        `_`→`-` + lowercase normalization handles this.
+
+    Direct match runs first to avoid collapsing case-sensitive distinct
+    JSON keys (`MyMCP` vs `mymcp`).
+    """
+    if not tool_name.startswith("mcp__"):
+        return None
+    parts = tool_name.split("__", 2)
+    if len(parts) < 3:
+        return None
+    server_raw = parts[1]
+    disabled = getattr(config, "DISABLED_MCP_SERVERS", None) or {}
+    if server_raw in disabled:
+        return server_raw
+    server_norm = server_raw.lower().replace("_", "-")
+    if server_norm in disabled:
+        return server_norm
+    return None
+
+
 def _matches_any(tool_name, patterns):
     """Return True if tool_name matches any entry in patterns.
 
@@ -254,6 +289,27 @@ class PermissionChatHandler:
         self._lock = threading.Lock()
 
     def __call__(self, tool_name, tool_input):
+        # Disabled-MCP guard runs first: a server the user toggled off in
+        # `brainchild edit claude` should never be callable, even if the
+        # CLI loaded it (claude.ai-hosted MCPs aren't governed by
+        # disabledMcpjsonServers, so the cheap settings.json route can't
+        # hide them — defense-in-depth via this hook is the functional
+        # disable for those). For JSON-keyed MCPs the settings.json knob
+        # already kept them out of the CLI's tool surface, but matching
+        # here too is harmless.
+        disabled_server = _disabled_mcp_for_cli_tool(tool_name)
+        if disabled_server is not None:
+            log.info(
+                f"PermissionChatHandler: deny {tool_name!r} — "
+                f"server {disabled_server!r} is disabled in operator overlay"
+            )
+            return {
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"MCP server '{disabled_server}' is disabled in this bot's "
+                    f"config — re-enable via `brainchild edit claude` to use it."
+                ),
+            }
         # always_ask wins over auto_approve so users can pin a specific
         # deny (e.g. mcp__sentry__analyze_issue_with_seer) on top of a
         # broad allow (mcp__sentry__*). Same precedent as the legacy

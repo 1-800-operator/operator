@@ -407,6 +407,61 @@ def test_discover_all_merges_both_sources(home):
     print("PASS  test_discover_all_merges_both_sources")
 
 
+@_with_fake_home
+def test_discover_all_picks_up_project_mcp_json(home):
+    """`claude mcp add -s project ...` writes to <cwd>/.mcp.json. Operator
+    should discover those too — otherwise project-shared MCPs would be
+    invisible to operator's banner / overlay / disable-toggle even though
+    the inner CLI loads them."""
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {}}))
+    with tempfile.TemporaryDirectory() as cwd_tmp:
+        cwd = Path(cwd_tmp)
+        (cwd / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "shared-stdio": {"type": "stdio", "command": "echo", "args": ["hi"]},
+                "shared-http": {"type": "http", "url": "https://example.com/mcp"},
+            }
+        }))
+        # No CLI hosted MCPs
+        with (
+            patch("brainchild.pipeline.claude_code_import.Path.cwd", return_value=cwd),
+            patch("brainchild.pipeline.claude_code_import.subprocess.run",
+                  return_value=_run_ok("")),
+        ):
+            mcps, wrapped = discover_all_mcps()
+
+    names = {m.name for m in mcps}
+    assert names == {"shared-stdio", "shared-http"}, names
+    # http source got wrapped via mcp-remote
+    assert wrapped == 1, wrapped
+    print("PASS  test_discover_all_picks_up_project_mcp_json")
+
+
+@_with_fake_home
+def test_discover_all_dedups_user_scope_over_project_mcp_json(home):
+    """If the same name appears in user-scope and .mcp.json, user-scope
+    wins (matches CLI's local > project > user precedence on a per-name
+    basis, with first-seen winning in our merge order)."""
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"shared": {"command": "user-cmd", "args": []}}
+    }))
+    with tempfile.TemporaryDirectory() as cwd_tmp:
+        cwd = Path(cwd_tmp)
+        (cwd / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {"shared": {"command": "project-cmd", "args": []}}
+        }))
+        with (
+            patch("brainchild.pipeline.claude_code_import.Path.cwd", return_value=cwd),
+            patch("brainchild.pipeline.claude_code_import.subprocess.run",
+                  return_value=_run_ok("")),
+        ):
+            mcps, _ = discover_all_mcps()
+    assert len(mcps) == 1, [m.name for m in mcps]
+    assert mcps[0].name == "shared"
+    assert mcps[0].block["command"] == "user-cmd", mcps[0].block["command"]
+    print("PASS  test_discover_all_dedups_user_scope_over_project_mcp_json")
+
+
 # ---------------------------------------------------------------------------
 # read_user_claude_md
 # ---------------------------------------------------------------------------
@@ -608,6 +663,8 @@ if __name__ == "__main__":
         test_discover_mcp_health_classifies_status,
         test_discover_mcp_health_returns_empty_on_cli_failure,
         test_discover_all_merges_both_sources,
+        test_discover_all_picks_up_project_mcp_json,
+        test_discover_all_dedups_user_scope_over_project_mcp_json,
         test_read_user_claude_md_missing_returns_none,
         test_read_user_claude_md_present_returns_contents,
         test_read_user_claude_md_walks_project_scope_too,

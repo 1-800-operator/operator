@@ -321,20 +321,52 @@ def discover_mcp_health() -> list[tuple[str, str, str, bool]]:
     return out
 
 
-def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
-    """Full auto-import: merge `~/.claude.json#mcpServers` with
-    `claude mcp list` output. Dedup by slugified name (local config wins
-    on collision because it usually has richer metadata).
+def read_project_mcp_config(cwd: Optional[Path] = None) -> dict:
+    """Read `<cwd>/.mcp.json`. Returns {} if missing or malformed.
 
-    Returns (mcps, http_sse_wrapped_count). The count is informational
-    for wizard / first-run summary strings.
+    `.mcp.json` is the project-shared scope used by `claude mcp add -s project`
+    — it gets checked into the repo so collaborators share an MCP set. Same
+    `mcpServers: {...}` shape as `~/.claude.json` (no `projects` nesting).
+    """
+    base = cwd if cwd is not None else Path.cwd()
+    p = base / ".mcp.json"
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
+    """Full auto-import: merge MCPs from three Claude Code sources.
+
+      1. `~/.claude.json#mcpServers` (user-scope) plus
+         `~/.claude.json#projects.<cwd>.mcpServers` (local-scope, `-s local`).
+      2. `<cwd>/.mcp.json#mcpServers` (project-shared scope, `-s project` —
+         lives in the repo so collaborators share the MCP set).
+      3. `claude mcp list` output (claude.ai-hosted connectors).
+
+    Dedup by slugified name; first source wins on collision. Order matches
+    the CLI's own precedence sense (local > project > user > hosted).
+
+    Returns (mcps, http_sse_wrapped_count). The wrapped count is the number
+    of HTTP/SSE entries we routed through mcp-remote, used for wizard /
+    first-run summary strings.
     """
     from_json, wrapped_json = extract_imported_mcps(read_user_mcp_config())
+    from_project, wrapped_project = extract_imported_mcps(read_project_mcp_config())
     from_cli = discover_hosted_mcps_via_cli()
 
     out: list[ImportedMCP] = []
     seen: set[str] = set()
     for m in from_json:
+        key = _slugify_mcp_name(m.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    for m in from_project:
         key = _slugify_mcp_name(m.name)
         if key in seen:
             continue
@@ -348,7 +380,7 @@ def discover_all_mcps() -> tuple[list[ImportedMCP], int]:
         out.append(m)
         if m.transport in ("http", "sse"):
             wrapped_cli += 1
-    return out, wrapped_json + wrapped_cli
+    return out, wrapped_json + wrapped_project + wrapped_cli
 
 
 def normalize_path_for_storage(p: Path, cwd: Optional[Path] = None) -> str:
