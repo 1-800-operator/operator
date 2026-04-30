@@ -779,14 +779,23 @@ def _discover_skill_candidates(state: WizardState) -> list[tuple[str, str, str]]
     Last-wins dedup by name, with list order: library first, then each
     external path. source_label is a short tag shown in the picker row
     ("shared library" or "from ~/.claude/skills").
+
+    The claude preset SKIPS the shared library entirely — those skills
+    don't reach the inner Claude CLI subprocess (the CLI auto-loads
+    only `~/.claude/skills/` natively, and operator's `_skills` dict
+    isn't bridged to the CLI). Surfacing them in the picker would let
+    a user toggle them on with no functional effect. External paths
+    (which for the claude preset is `~/.claude/skills/`) are still
+    scanned and displayed.
     """
     from brainchild.pipeline.skills import _resolve_external_path, _scan_skills_dir
 
     by_name: dict[str, tuple[str, str]] = {}  # name → (description, source_label)
-    shared = Path.home() / ".brainchild" / "skills"
-    if shared.is_dir():
-        for sk in _scan_skills_dir(shared):
-            by_name[sk.name] = (sk.description, "shared library")
+    if state.based_on != "claude":
+        shared = Path.home() / ".brainchild" / "skills"
+        if shared.is_dir():
+            for sk in _scan_skills_dir(shared):
+                by_name[sk.name] = (sk.description, "shared library")
 
     for raw in (state.bot_cfg.get("skills", {}).get("external_paths") or []):
         p = _resolve_external_path(raw)
