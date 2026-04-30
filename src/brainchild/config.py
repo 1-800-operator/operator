@@ -202,11 +202,30 @@ LLM_PROVIDER           = _config["llm"]["provider"]
 LLM_MODEL              = _config["llm"].get("model") if LLM_PROVIDER == "claude_cli" else _config["llm"]["model"]
 HISTORY_MESSAGES       = _config["llm"].get("history_messages", 40)
 
-# System prompt is authored as two top-level blocks — `personality` (who the
-# bot is, its voice) and `ground_rules` (always-true constraints). They're
-# concatenated here with personality first and ground_rules last; rules-last
-# gains adherence because LLMs weight end-of-prompt content more heavily.
-# Either block may be absent/empty — omitted blocks just drop out.
+# System prompt has three layers, composed under the hood:
+#   1. FRAMEWORK_SYSTEM_PROMPT — operator-defined per-agent voice and
+#      always-on rules. Lives in code at `agents/<name>/framework.py`,
+#      hidden from the wizard. Applies to every run of this agent.
+#   2. PERSONALITY — user-added voice/disposition. Authored via wizard
+#      step 4. Empty for fresh agents.
+#   3. GROUND_RULES — user-added always-on rules. Authored via wizard
+#      step 4. Empty for fresh agents.
+# Composition: framework first, then user personality, then user ground_rules.
+# Rules-last gains adherence because LLMs weight end-of-prompt content
+# more heavily. Empty layers drop out of the final join.
+def _load_framework_system_prompt() -> str:
+    """Import the per-agent `framework.py` if present and return its
+    `FRAMEWORK_SYSTEM_PROMPT` constant. Missing module → empty string.
+    Hidden from the wizard so user authoring stays clean.
+    """
+    try:
+        import importlib
+        mod = importlib.import_module(f"brainchild.agents.{BOT_NAME}.framework")
+        return (getattr(mod, "FRAMEWORK_SYSTEM_PROMPT", "") or "").strip()
+    except ImportError:
+        return ""
+
+FRAMEWORK_SYSTEM_PROMPT = _load_framework_system_prompt()
 PERSONALITY   = (_config.get("personality") or "").strip()
 GROUND_RULES  = (_config.get("ground_rules") or "").strip()
 
@@ -274,7 +293,7 @@ if LLM_PROVIDER == "claude_cli":
 else:
     CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)
 SYSTEM_PROMPT = "\n\n".join(
-    b for b in (PERSONALITY, GROUND_RULES, CLAUDE_MD_BLOCK) if b
+    b for b in (FRAMEWORK_SYSTEM_PROMPT, PERSONALITY, GROUND_RULES, CLAUDE_MD_BLOCK) if b
 )
 
 # Skills

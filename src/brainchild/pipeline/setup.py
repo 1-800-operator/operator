@@ -831,11 +831,22 @@ def _render_skill_picker(
     # shows a readable excerpt.
     card_w = build_card.width_for(console)
     budget = max(24, console.size.width - card_w - 8 - 6 - 2)
+    # For the claude preset the picker is read-only/auto-enabled: the
+    # inner Claude CLI auto-loads every skill under `~/.claude/skills/`
+    # regardless of any toggle here, so unchecking would be illusory
+    # control. Lock every row and force-check via the picker's existing
+    # `locked` affordance.
+    is_claude = state.based_on == "claude"
     choices = [
-        Choice(label=name, sublabel=_truncate(desc, budget))
+        Choice(
+            label=name,
+            sublabel=_truncate(desc, budget),
+            locked=is_claude,
+            locked_note=("auto-loaded by Claude Code" if is_claude else ""),
+        )
         for name, desc, _src in candidates
     ]
-    initial = [n in current_enabled for n in names]
+    initial = [True if is_claude else (n in current_enabled) for n in names]
 
     def right_pane(_cursor, checked):
         enabled_now = [names[i] for i, on in enumerate(checked or []) if on]
@@ -1018,14 +1029,7 @@ def _step4_system_prompt(state: WizardState) -> None:
     this step produces. Clear here if you want CLAUDE.md alone.
     """
     console.print("[bold]4. System Prompt[/bold]")
-    if state.based_on == "claude":
-        console.print(
-            "  [dim]The agent's voice and always-on rules. Your CLAUDE.md "
-            "files are loaded automatically by Claude Code itself — no need "
-            "to repeat that content here.[/dim]\n"
-        )
-    else:
-        console.print("  [dim]Give your agent personality and some ground rules.[/dim]\n")
+    console.print("  [dim]Add personality and ground rules.[/dim]\n")
 
     existing_personality = (state.bot_cfg.get("personality") or "").strip()
     existing_ground_rules = (state.bot_cfg.get("ground_rules") or "").strip()
