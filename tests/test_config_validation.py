@@ -174,6 +174,29 @@ permissions:
     print("✓ all errors surfaced in one message")
 
 
+def test_yaml_parse_error_emits_friendly_config_error():
+    """A malformed YAML must surface as a CONFIG ERROR block, not a
+    raw yaml.YAMLError traceback. Wizard atomic write prevents this for
+    wizard-edited configs; manual `vim ~/.operator/agents/<name>/config.yaml`
+    edits can still trip it.
+    """
+    # Unterminated quote — guaranteed YAML parse failure.
+    yaml_text = """
+agent:
+  name: "TestBot
+  trigger_phrase: "@test"
+llm:
+  provider: claude_cli
+"""
+    code, err = _run_with_config(yaml_text)
+    assert code == 2, f"malformed YAML must exit 2, got {code}: {err}"
+    assert "CONFIG ERROR" in err, f"expected CONFIG ERROR header; got: {err}"
+    assert "YAML parse failed" in err, f"expected parse-failure marker; got: {err}"
+    assert "operator edit" in err, f"expected next-step hint; got: {err}"
+    assert "Traceback" not in err, f"raw traceback leaked: {err}"
+    print("✓ YAML parse error emits friendly CONFIG ERROR")
+
+
 def test_error_message_points_at_operator_edit():
     yaml_text = _BASE_VALID_CONFIG + """
 permissions:
@@ -196,4 +219,5 @@ if __name__ == "__main__":
     test_mcp_server_block_must_be_mapping()
     test_multiple_errors_surfaced_together()
     test_error_message_points_at_operator_edit()
+    test_yaml_parse_error_emits_friendly_config_error()
     print("\nAll config validation tests passed.")

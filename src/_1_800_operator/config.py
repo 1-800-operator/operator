@@ -31,7 +31,19 @@ if not _cfg_path.exists():
     )
     raise SystemExit(2)
 
-_config = yaml.safe_load(_cfg_path.read_text())
+try:
+    _config = yaml.safe_load(_cfg_path.read_text())
+except yaml.YAMLError as _yaml_err:
+    # Match the shape `_validate_config` uses for shape violations so a
+    # parse error doesn't surface as a raw traceback. The wizard's atomic
+    # write prevents this for wizard-edited configs; manual edits can
+    # still trip it.
+    sys.stderr.write(
+        f"\nCONFIG ERROR in {_cfg_path}:\n"
+        f"  - YAML parse failed: {_yaml_err}\n"
+        f"\nFix with `operator edit {BOT_NAME}` (or any text editor) and re-run.\n"
+    )
+    raise SystemExit(2)
 
 
 def _validate_config(cfg, source: Path) -> None:
