@@ -128,6 +128,63 @@ def _make_state(name: str, mode: str = "edit", **overrides) -> "wizard.WizardSta
     return wizard.WizardState(**defaults)
 
 
+def test_atomic_write_rollback_on_keyboard_interrupt_between_renames():
+    """KeyboardInterrupt between target→backup and tmp→target must roll back.
+
+    Pre-fix the inner except clause caught Exception (not BaseException),
+    so a Ctrl+C in the ~µs window between the two os.rename calls bypassed
+    cleanup entirely — leaving the user with an intact backup but no
+    live agent dir. Inject a KeyboardInterrupt at the second os.rename
+    and verify the original target survives.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        sandbox = Path(tmp) / "agents"
+        sandbox.mkdir()
+        original_agents_dir = wizard._AGENTS_DIR
+        original_rename = wizard.os.rename
+        wizard._AGENTS_DIR = sandbox
+
+        rename_calls = {"n": 0}
+
+        def _rename_with_ki_on_second(src, dst):
+            rename_calls["n"] += 1
+            if rename_calls["n"] == 2:
+                # First rename (target→backup) already happened; raise on
+                # the second (tmp→target) to simulate Ctrl+C in the gap.
+                raise KeyboardInterrupt
+            return original_rename(src, dst)
+
+        wizard.os.rename = _rename_with_ki_on_second
+
+        try:
+            target = sandbox / "victim"
+            target.mkdir()
+            (target / "sentinel.txt").write_text("keep-me", encoding="utf-8")
+
+            state = _make_state("victim", mode="edit")
+
+            raised = False
+            try:
+                wizard._step7_write(state)
+            except KeyboardInterrupt:
+                raised = True
+
+            assert raised, "KeyboardInterrupt should propagate after rollback"
+            # Target must have been restored from the backup.
+            assert target.exists(), "target dir must be restored after KI rollback"
+            assert (target / "sentinel.txt").read_text(encoding="utf-8") == "keep-me"
+            # No backup or tmp left behind.
+            stray = [
+                p for p in sandbox.iterdir()
+                if p.name.startswith(".victim.tmp-") or p.name.startswith("victim.bak-")
+            ]
+            assert not stray, f"stray dirs after rollback: {stray}"
+        finally:
+            wizard._AGENTS_DIR = original_agents_dir
+            wizard.os.rename = original_rename
+    print("  atomic write rollback on KeyboardInterrupt: PASS")
+
+
 def test_atomic_write_rollback_on_build_failure():
     """If build fails mid-flight, the target dir is untouched and no tmpdir lingers.
 
@@ -713,6 +770,7 @@ if __name__ == "__main__":
     print("Setup wizard tests:")
     test_name_validation_reserved_and_collision()
     test_mcp_enabled_flip_round_trip()
+    test_atomic_write_rollback_on_keyboard_interrupt_between_renames()
     test_atomic_write_rollback_on_build_failure()
     test_edit_in_place_swap_cleans_backup()
     test_from_scratch_write_creates_bundle()

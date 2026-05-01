@@ -1199,7 +1199,13 @@ def _step7_write(state: WizardState) -> Path:
             backup = _AGENTS_DIR / f"{state.name}.bak-{int(time.time())}"
             os.rename(target, backup)
         os.rename(tmp, target)
-    except Exception:
+    except BaseException:
+        # BaseException (not Exception) so KeyboardInterrupt between the
+        # two os.rename calls also triggers rollback. Without this, Ctrl+C
+        # in the ~microsecond window after target→backup but before
+        # tmp→target leaves the user with an intact backup but no live
+        # agent dir; the bot is silently missing until they rename it
+        # back by hand.
         shutil.rmtree(tmp, ignore_errors=True)
         if backup and backup.exists() and not target.exists():
             os.rename(backup, target)
