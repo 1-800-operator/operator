@@ -1,13 +1,16 @@
 """
 Test the always-re-import + per-entry merge for the claude agent's MCP block.
 
-Validates the field-ownership rules:
-  - command, args, env, auth, auth_url, description → source-driven
-    (overwritten from ~/.claude.json on every sync)
-  - enabled, hints, read_tools, confirm_tools → user-preserved
-    (kept across syncs so meeting-scope tweaks survive)
-  - servers missing in the discovered set are dropped
-  - new servers are added
+Validates the overlay-only persistence model (session 174):
+  - command, args, env, auth, auth_url, description → source-driven and
+    NEVER persisted to ~/.operator/agents/claude/config.yaml. Rediscovered
+    fresh from `discover_all_mcps()` on every boot via cwd-aware lookup.
+  - enabled, hints, read_tools, confirm_tools, tool_timeout_seconds →
+    user-preserved (kept across syncs so meeting-scope tweaks survive).
+  - Servers missing from the discovered set become DORMANT (entry is kept
+    so user-authored fields survive across cwd changes; runtime ignores
+    them until rediscovered). Pre-session-174 behavior used to drop them.
+  - New servers are added with `{enabled: True}` only.
 
 Usage:
     python tests/test_claude_mcp_sync.py
@@ -66,7 +69,10 @@ def test_first_sync_adds_servers():
         _run_sync_with(td, [mcp])
         servers = _read_cfg(cfg)["mcp_servers"]
         assert "sentry" in servers, servers
-        assert servers["sentry"]["command"] == "npx"
+        # Overlay-only: persisted entry carries `enabled` (defaulted True
+        # for first sight) and nothing else. command/args live in
+        # discovery, not on disk.
+        assert servers["sentry"] == {"enabled": True}, servers["sentry"]
         print("✓ first sync adds new server")
 
 
@@ -95,9 +101,10 @@ def test_user_preserved_fields_survive():
         )
         _run_sync_with(td, [mcp])
         s = _read_cfg(cfg)["mcp_servers"]["sentry"]
-        # Source-driven fields overwritten
-        assert s["command"] == "npx", s
-        assert s["args"] == ["-y", "sentry-mcp@latest"], s
+        # Source-driven fields are NOT on disk in the overlay model.
+        assert "command" not in s, f"command leaked into overlay: {s}"
+        assert "args" not in s, f"args leaked into overlay: {s}"
+        assert "description" not in s, f"description leaked into overlay: {s}"
         # User-preserved fields kept
         assert s["enabled"] is False, "user's enabled=false was clobbered"
         assert s["hints"] == "use ONLY for SEV-1 incidents", s["hints"]
@@ -106,14 +113,17 @@ def test_user_preserved_fields_survive():
         print("✓ user-preserved fields survive sync")
 
 
-def test_server_removed_when_missing_from_source():
+def test_server_missing_from_source_goes_dormant():
+    """Overlay-model: a missing-from-discovery row stays in the overlay so
+    user-authored fields survive cwd swings. Runtime config ignores it; only
+    a manual edit / rebuild removes it."""
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         cfg = _write_cfg(td, {"mcp_servers": {
-            "sentry": {"enabled": True, "command": "npx", "args": []},
-            "notion": {"enabled": True, "command": "npx", "args": []},
+            "sentry": {"enabled": True},
+            "notion": {"enabled": True, "hints": "user authored"},
         }})
-        # Only sentry survives in source; notion was removed from ~/.claude.json
+        # Only sentry survives in source; notion is gone from ~/.claude.json
         mcp = ImportedMCP(
             name="sentry",
             block={"enabled": True, "command": "npx", "args": [],
@@ -124,8 +134,10 @@ def test_server_removed_when_missing_from_source():
         _run_sync_with(td, [mcp])
         servers = _read_cfg(cfg)["mcp_servers"]
         assert "sentry" in servers
-        assert "notion" not in servers, "notion should have been dropped"
-        print("✓ servers missing from source are dropped")
+        assert "notion" in servers, "notion should be dormant, not dropped"
+        assert servers["notion"].get("hints") == "user authored", \
+            "user-authored hints on dormant entry must survive"
+        print("✓ servers missing from source go dormant (entry preserved)")
 
 
 def test_legacy_done_flag_removed():
@@ -142,21 +154,25 @@ def test_legacy_done_flag_removed():
 
 
 def test_no_op_does_not_rewrite():
-    """When the merged result equals the on-disk state, the file should not be touched."""
+    """When the merged overlay equals the on-disk overlay, the file is not touched."""
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        block = {
+        # On disk we already store only the overlay shape (enabled-only).
+        cfg = _write_cfg(td, {"mcp_servers": {"sentry": {"enabled": True}}})
+        before_mtime = cfg.stat().st_mtime_ns
+        # Brief sleep so mtime resolution can register a change if we did write.
+        import time
+        time.sleep(0.01)
+        # Discovery reports the same server with full source-side fields —
+        # those are pruned at sync time, so the persisted overlay still
+        # reads `{enabled: True}` and the file stays untouched.
+        full_block = {
             "enabled": True, "description": "fresh",
             "command": "npx", "args": ["-y", "x"],
             "env": {}, "auth": "env",
             "read_tools": [], "confirm_tools": [], "hints": "",
         }
-        cfg = _write_cfg(td, {"mcp_servers": {"sentry": block}})
-        before_mtime = cfg.stat().st_mtime_ns
-        # Brief sleep so mtime resolution can register a change if we did write.
-        import time
-        time.sleep(0.01)
-        mcp = ImportedMCP(name="sentry", block=block, transport="stdio", env_vars_referenced=[])
+        mcp = ImportedMCP(name="sentry", block=full_block, transport="stdio", env_vars_referenced=[])
         _run_sync_with(td, [mcp])
         after_mtime = cfg.stat().st_mtime_ns
         assert before_mtime == after_mtime, "no-op sync should not rewrite the file"
@@ -166,7 +182,7 @@ def test_no_op_does_not_rewrite():
 if __name__ == "__main__":
     test_first_sync_adds_servers()
     test_user_preserved_fields_survive()
-    test_server_removed_when_missing_from_source()
+    test_server_missing_from_source_goes_dormant()
     test_legacy_done_flag_removed()
     test_no_op_does_not_rewrite()
     print("\nAll claude MCP sync tests passed.")

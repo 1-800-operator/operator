@@ -855,6 +855,9 @@ def _run_bot(name, rest):
             print(f"Unexpected argument: {arg}")
             return 2
 
+    import time as _time_init
+    import logging as _logging_init
+
     # Claude agent — Phase 15.9 hard-fail gate. The `claude` bundled agent's
     # entire identity is "inherit your Claude Code setup." If Claude Code
     # isn't installed or the user isn't logged in, there's nothing for the
@@ -879,8 +882,6 @@ def _run_bot(name, rest):
         # the last run. Shares one cached `claude mcp list` shell-out with
         # downstream config.py runtime view (per-process cache in
         # `claude_code_import._claude_mcp_list_cached`).
-        import time as _time_init
-        import logging as _logging_init
         _t_sync = _time_init.monotonic()
         _sync_claude_imports()
         _logging_init.getLogger("operator").info(

@@ -61,7 +61,16 @@ def test_matches_any_empty_pattern_skipped():
 
 
 def _handler(auto_approve, always_ask):
-    """Build a handler with mocked connector + runner so we can test __call__."""
+    """Build a handler with mocked connector + runner so we can test __call__.
+
+    Clears config.DISABLED_MCP_SERVERS for the test — under pm/engineer/designer
+    the bundled config disables several MCPs by default, and the handler's
+    disabled-server guard runs *before* the auto_approve / always_ask match,
+    short-circuiting any test whose tool name happens to match a disabled
+    server (e.g. mcp__sentry__*).
+    """
+    from _1_800_operator import config
+    config.DISABLED_MCP_SERVERS = {}
     runner = MagicMock()
     runner._send = MagicMock()
     runner._seen_ids = set()

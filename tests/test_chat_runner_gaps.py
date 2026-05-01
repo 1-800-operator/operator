@@ -156,30 +156,33 @@ def test_auto_leave_after_grace():
 # ===========================================================================
 
 def test_needs_confirmation_branches(monkeypatch=None):
-    """read_tools auto, confirm_tools forced, unknown server → safe-default confirm."""
+    """auto_approve silent, always_ask forced, unknown tool → safe-default confirm.
+
+    Session 169 unified the legacy per-server read_tools/confirm_tools blocks
+    into PERMISSIONS_AUTO_APPROVE / PERMISSIONS_ALWAYS_ASK fnmatch lists.
+    _needs_confirmation re-prefixes track-B `server__tool` names with `mcp__`
+    before matching, so the patterns must use that form.
+    """
     runner, _, _ = make_runner()
 
-    # Swap config.MCP_SERVERS for a deterministic fixture.
-    orig = config.MCP_SERVERS
-    config.MCP_SERVERS = {
-        "linear": {
-            "read_tools": {"list_issues"},
-            "confirm_tools": {"delete_issue"},
-        },
-    }
+    orig_auto = config.PERMISSIONS_AUTO_APPROVE
+    orig_ask = config.PERMISSIONS_ALWAYS_ASK
+    config.PERMISSIONS_AUTO_APPROVE = ["mcp__linear__list_issues"]
+    config.PERMISSIONS_ALWAYS_ASK = ["mcp__linear__delete_issue"]
     try:
-        # read_tool → no confirmation
+        # auto_approve → no confirmation
         assert runner._needs_confirmation({"name": "linear__list_issues"}) is False
-        # confirm_tool → confirmation required even if also in read_tools
+        # always_ask → confirmation required even if also in auto_approve
         assert runner._needs_confirmation({"name": "linear__delete_issue"}) is True
         # tool not declared → safe default (confirm)
         assert runner._needs_confirmation({"name": "linear__create_issue"}) is True
-        # unknown server (no `__` split) → safe default (confirm)
+        # name without `__` → safe default (confirm)
         assert runner._needs_confirmation({"name": "load_skill"}) is True
-        # declared server but missing from MCP_SERVERS → safe default
+        # different server, not in either list → safe default
         assert runner._needs_confirmation({"name": "github__list_repos"}) is True
     finally:
-        config.MCP_SERVERS = orig
+        config.PERMISSIONS_AUTO_APPROVE = orig_auto
+        config.PERMISSIONS_ALWAYS_ASK = orig_ask
     print("PASS  test_needs_confirmation_branches")
 
 
@@ -207,8 +210,9 @@ def test_request_confirmation_renders_all_args_and_truncates_long_values():
 
     assert len(sent) == 1 and sent[0][1] == "confirmation"
     msg = sent[0][0]
-    # All 6 args surface — previously only the first 5 were shown
-    for k in ("team=", "title=", "description=", "priority=", "labels=", "parent="):
+    # All 6 args surface — previously only the first 5 were shown.
+    # _request_confirmation renders one bullet per arg as "  • {k}: {v}".
+    for k in ("team:", "title:", "description:", "priority:", "labels:", "parent:"):
         assert k in msg, f"missing {k!r} in confirmation: {msg}"
     # The long value was truncated — full 500-char body must not appear
     assert long_body not in msg, "Full long value leaked through untruncated"
@@ -419,6 +423,9 @@ def test_intro_on_join_posts_and_drains_buffer():
     runner._intro_posted = False
     runner._intro_text = "Hi, I'm the operator."
     runner._intro_ready.set()
+    # Stamp _hold_posted_at in the past so the "Hold for <bot>..." line is
+    # treated as already-emitted and the HOLD_DURATION_SECONDS gate is open.
+    runner._hold_posted_at = 0.0
     runner._pre_intro_buffer = [
         {"text": "first", "one_on_one": True},
         {"text": "second", "one_on_one": True},
@@ -453,6 +460,7 @@ def test_intro_failure_skips_post_but_still_drains():
     runner._intro_posted = False
     runner._intro_text = ""  # generation failed
     runner._intro_ready.set()
+    runner._hold_posted_at = 0.0  # bypass Hold-for line + HOLD_DURATION gate
     runner._pre_intro_buffer = [{"text": "msg1", "one_on_one": True}]
 
     sent = []
@@ -502,6 +510,10 @@ def test_intro_waits_for_human_in_empty_room():
     runner._intro_posted = False
     runner._intro_text = "Hi, I'm the operator."
     runner._intro_ready.set()
+    # Stub the intro-generation thread so it doesn't clobber _intro_text via
+    # llm.intro() (which is a MagicMock here). The runner spawns this thread
+    # in the same iteration that emits the Hold-for line.
+    runner._generate_intro = lambda **kw: None
 
     sent = []
     runner._send = lambda text, kind="chat": sent.append(text)
@@ -509,17 +521,20 @@ def test_intro_waits_for_human_in_empty_room():
     import _1_800_operator.pipeline.chat_runner as cr
     orig_poll = cr.POLL_INTERVAL
     orig_interval = cr.PARTICIPANT_CHECK_INTERVAL
+    orig_hold = config.HOLD_DURATION_SECONDS
     cr.POLL_INTERVAL = 0.05
     cr.PARTICIPANT_CHECK_INTERVAL = 0.05  # force a fresh participant check each loop
+    config.HOLD_DURATION_SECONDS = 0.0    # collapse the hold-line → intro gap
     try:
         run_loop_briefly(runner, duration=0.3)
     finally:
         cr.POLL_INTERVAL = orig_poll
         cr.PARTICIPANT_CHECK_INTERVAL = orig_interval
+        config.HOLD_DURATION_SECONDS = orig_hold
 
     assert runner._intro_posted is True, "intro should post after a human is seen"
-    assert sent == ["Hi, I'm the operator."], \
-        f"Expected intro sent exactly once after participant appeared, got {sent}"
+    assert sent == [f"Hold for {config.AGENT_NAME}...", "Hi, I'm the operator."], \
+        f"Expected Hold-for line then intro, got {sent}"
     print("PASS  test_intro_waits_for_human_in_empty_room")
 
 

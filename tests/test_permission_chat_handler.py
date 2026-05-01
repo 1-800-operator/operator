@@ -86,10 +86,22 @@ def test_is_yes_variants():
 
 
 def test_format_confirmation_truncates_long_args():
-    out = _format_confirmation("Write", {
-        "file_path": "/tmp/foo.txt",
-        "content": "x" * 5000,
-    })
+    """Technical-voice path renders every parameter with head…tail truncation.
+
+    `_format_confirmation` dispatches on `config.VOICE`: plain returns a
+    one-line summary (no field-name literals), technical returns the verbose
+    parameter dump used here.
+    """
+    from _1_800_operator import config
+    saved_voice = config.VOICE
+    config.VOICE = "technical"
+    try:
+        out = _format_confirmation("Write", {
+            "file_path": "/tmp/foo.txt",
+            "content": "x" * 5000,
+        })
+    finally:
+        config.VOICE = saved_voice
     assert "Write" in out
     assert "file_path" in out
     assert "content" in out
@@ -99,7 +111,14 @@ def test_format_confirmation_truncates_long_args():
 
 
 def test_format_confirmation_no_args():
-    out = _format_confirmation("Read", {})
+    """Technical-voice path emits "(no arguments)" for empty arg dicts."""
+    from _1_800_operator import config
+    saved_voice = config.VOICE
+    config.VOICE = "technical"
+    try:
+        out = _format_confirmation("Read", {})
+    finally:
+        config.VOICE = saved_voice
     assert "(no arguments)" in out
     print("  format_confirmation handles no-arg tools OK")
 

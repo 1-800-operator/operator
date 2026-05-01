@@ -220,21 +220,30 @@ def test_build_provider_selects_claude_cli(monkeypatch_attrs):
     from _1_800_operator.pipeline.providers import build_provider
 
     saved = {k: getattr(config, k) for k in monkeypatch_attrs}
+    saved_disabled = getattr(config, "DISABLED_MCP_SERVERS", {})
     try:
         for k, v in monkeypatch_attrs.items():
             setattr(config, k, v)
+        # Clear disabled MCPs — when present, the provider __init__ appends
+        # a "do not claim/call these" notice onto _append_system_prompt,
+        # which is correct prod behavior but irrelevant to this assertion.
+        config.DISABLED_MCP_SERVERS = {}
         provider = build_provider()
         assert isinstance(provider, ClaudeCLIProvider), (
             f"expected ClaudeCLIProvider, got {type(provider).__name__}"
         )
         # The provider should have inherited SYSTEM_PROMPT as the
         # --append-system-prompt content.
-        assert provider._append_system_prompt == monkeypatch_attrs["SYSTEM_PROMPT"]
+        assert provider._append_system_prompt == monkeypatch_attrs["SYSTEM_PROMPT"], (
+            f"expected exact SYSTEM_PROMPT inheritance, got "
+            f"{provider._append_system_prompt!r}"
+        )
         provider.stop()  # nothing was spawned, but stop is idempotent
         print("  build_provider selects claude_cli OK")
     finally:
         for k, v in saved.items():
             setattr(config, k, v)
+        config.DISABLED_MCP_SERVERS = saved_disabled
 
 
 def test_subprocess_restart_with_history_rebuild():
