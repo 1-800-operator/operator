@@ -325,6 +325,40 @@ def test_discover_hosted_mcps_timeout_returns_empty():
     print("PASS  test_discover_hosted_mcps_timeout_returns_empty")
 
 
+def test_claude_mcp_list_cache_caches_failures():
+    """A timed-out / missing CLI must be cached as a sentinel so repeat
+    callers within the same boot don't each pay another 10s timeout.
+
+    Boot makes three callers (discover_hosted, discover_health, runtime
+    view in config.py); without sentinel caching, a broken `claude` CLI
+    costs 30s instead of 10s.
+    """
+    import _1_800_operator.pipeline.claude_code_import as mod
+    mod._CLAUDE_MCP_LIST_CACHE = None
+    call_count = {"n": 0}
+
+    def fake_run(*args, **kwargs):
+        call_count["n"] += 1
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=10)
+
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
+               side_effect=fake_run):
+        # Three boot-time callers all degrade to empty results...
+        assert mod.discover_hosted_mcps_via_cli() == []
+        assert mod.discover_mcp_health() == []
+        assert mod.discover_hosted_mcps_via_cli() == []
+
+    # ...but only ONE shell-out happens.
+    assert call_count["n"] == 1, \
+        f"Expected exactly 1 subprocess.run after caching, got {call_count['n']}"
+    # And the cached sentinel reports failure shape callers already handle.
+    cached = mod._CLAUDE_MCP_LIST_CACHE
+    assert cached is not None
+    assert cached.returncode != 0
+    mod._CLAUDE_MCP_LIST_CACHE = None  # cleanup so other tests stay fresh
+    print("PASS  test_claude_mcp_list_cache_caches_failures")
+
+
 def test_discover_hosted_mcps_parses_http_annotation():
     # claude-code annotates HTTP-not-SSE remote MCPs with `(HTTP)` between
     # the URL and the ` - status` segment. Earlier regex didn't tolerate
@@ -663,6 +697,7 @@ if __name__ == "__main__":
         test_discover_hosted_mcps_returncode_nonzero_returns_empty,
         test_discover_hosted_mcps_file_not_found_returns_empty,
         test_discover_hosted_mcps_timeout_returns_empty,
+        test_claude_mcp_list_cache_caches_failures,
         test_discover_hosted_mcps_skips_malformed_lines,
         test_discover_mcp_health_classifies_status,
         test_discover_mcp_health_returns_empty_on_cli_failure,

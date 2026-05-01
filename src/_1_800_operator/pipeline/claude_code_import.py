@@ -228,9 +228,11 @@ _CLAUDE_MCP_LIST_CACHE: subprocess.CompletedProcess | None = None
 def _claude_mcp_list_cached() -> subprocess.CompletedProcess | None:
     """Run `claude mcp list` once per process and cache the result.
 
-    Returns None if the CLI isn't on PATH or the call times out;
-    otherwise returns the CompletedProcess so callers can inspect
-    returncode + stdout. Subsequent calls reuse the cached result.
+    Returns a CompletedProcess so callers can inspect returncode + stdout.
+    Subsequent calls reuse the cached result — including cached failures
+    (CLI missing or timed out), so a broken `claude` binary costs one
+    10s timeout at boot, not three (discovery + health + runtime view
+    each shell out otherwise).
 
     To bust the cache (e.g. tests adding MCPs mid-process), set
     _CLAUDE_MCP_LIST_CACHE to None.
@@ -246,7 +248,15 @@ def _claude_mcp_list_cached() -> subprocess.CompletedProcess | None:
             timeout=_CLAUDE_MCP_LIST_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        # Cache the failure as a sentinel so repeat callers within the
+        # same boot don't each pay another 10s timeout. Callers already
+        # treat returncode != 0 as "no results" and degrade gracefully.
+        r = subprocess.CompletedProcess(
+            args=["claude", "mcp", "list"],
+            returncode=-1,
+            stdout="",
+            stderr="",
+        )
     _CLAUDE_MCP_LIST_CACHE = r
     return r
 
