@@ -1,8 +1,9 @@
 # Brainchild
 
-Chat-based AI meeting participant for Google Meet. Joins, reads chat, replies
-via an LLM with tool access (Linear, GitHub, and other MCP servers you wire
-up), and leaves when everyone else does.
+> Brainchild is an open-source CLI tool that drops AI participants into your Google Meet. Install via pip, configure via YAML, run from your terminal.
+
+Joins, reads chat, replies via an LLM with tool access (Linear, GitHub, and
+other MCP servers you wire up), and leaves when everyone else does.
 
 ```bash
 brainchild run pm                                        # open a fresh Meet

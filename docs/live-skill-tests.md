@@ -4,18 +4,20 @@
 
 ## Use cases under test
 
-| Session | Use case | Tools claude reaches for | What we're checking |
-|---|---|---|---|
-| 0 | Track-A safety | n/a | subscription auth, hook round-trip, fail-loud |
-| 1 | codebase walkthrough | Read, Grep, Glob | claude traces a real subsystem with `file:line` citations |
-| 1 | migration plan | Read, Grep, Glob | structured phased plan, 3–7 phases, no code in reply |
-| 1 | test generation | Read, Write, Bash | reads sibling tests, writes a real test file, runs it |
-| 1 | live coding edit | Read, Grep, Edit, Bash | claude makes a small repo change end-to-end via chat-gated edits |
-| 2 | scope estimate | Linear MCP, Read, Grep | T-shirt size from a Linear ticket |
-| 2 | PRD from discussion | Read (meeting JSONL) | structured PRD from caption transcript |
-| 2 | release notes | GitHub MCP | grouped changelog from a commit range |
-| 2 | PR review | GitHub MCP, Read | bug + risk callouts citing `file:line` |
-| 3 | live bug triage | Sentry MCP, Read | five-phase triage from a real Sentry issue |
+
+| Session | Use case             | Tools claude reaches for | What we're checking                                              |
+| ------- | -------------------- | ------------------------ | ---------------------------------------------------------------- |
+| 0       | Track-A safety       | n/a                      | subscription auth, hook round-trip, fail-loud                    |
+| 1       | codebase walkthrough | Read, Grep, Glob         | claude traces a real subsystem with `file:line` citations        |
+| 1       | migration plan       | Read, Grep, Glob         | structured phased plan, 3–7 phases, no code in reply             |
+| 1       | test generation      | Read, Write, Bash        | reads sibling tests, writes a real test file, runs it            |
+| 1       | live coding edit     | Read, Grep, Edit, Bash   | claude makes a small repo change end-to-end via chat-gated edits |
+| 2       | scope estimate       | Linear MCP, Read, Grep   | T-shirt size from a Linear ticket                                |
+| 2       | PRD from discussion  | Read (meeting JSONL)     | structured PRD from caption transcript                           |
+| 2       | release notes        | GitHub MCP               | grouped changelog from a commit range                            |
+| 2       | PR review            | GitHub MCP, Read         | bug + risk callouts citing `file:line`                           |
+| 3       | live bug triage      | Sentry MCP, Read         | five-phase triage from a real Sentry issue                       |
+
 
 The point of session 0 is to gate every other test on the basics — if the hook isn't round-tripping, nothing else in this doc can succeed.
 
@@ -85,6 +87,7 @@ These six gates check that the track-A architecture itself works before we lean 
 > say hi
 
 **Expected behavior:**
+
 - bot replies with a brief greeting
 - `/tmp/brainchild.log` contains `ClaudeCLI subprocess ready: apiKeySource=none, session=<uuid>`
 
@@ -93,6 +96,7 @@ These six gates check that the track-A architecture itself works before we lean 
 **Say "done" when:** bot has replied OR you've confirmed it crashed.
 
 **What I'll grep:**
+
 ```
 grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -10
 ```
@@ -106,6 +110,7 @@ grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/bra
 > write a file at /tmp/track_a_test.txt with the contents "hello track A"
 
 **Expected behavior:**
+
 - bot posts a confirmation message: `Run Write?` followed by the `file_path` and `content` arguments and `OK?`
 - you reply `yes` (or `ok`)
 - bot proceeds; file lands at `/tmp/track_a_test.txt`
@@ -116,6 +121,7 @@ grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/bra
 **Say "done" when:** the file is on disk OR the bot reports an error.
 
 **What I'll grep:**
+
 ```
 grep "PermissionChatHandler\|permission_handler\|PreToolUse" /tmp/brainchild.log | tail -20
 ```
@@ -125,6 +131,7 @@ grep "PermissionChatHandler\|permission_handler\|PreToolUse" /tmp/brainchild.log
 ### Test 0.3 — Auto-approve silent path
 
 **Pre-step:**
+
 ```bash
 echo "the secret word is pelican" > /tmp/track_a_read_test.txt
 ```
@@ -134,6 +141,7 @@ echo "the secret word is pelican" > /tmp/track_a_read_test.txt
 > read /tmp/track_a_read_test.txt and tell me the secret word
 
 **Expected behavior:**
+
 - bot does NOT post a confirmation prompt for the Read
 - bot replies with "pelican" (or quotes the line)
 
@@ -142,6 +150,7 @@ echo "the secret word is pelican" > /tmp/track_a_read_test.txt
 **Say "done" when:** bot has answered.
 
 **What I'll grep:**
+
 ```
 grep "PermissionChatHandler: auto-approve" /tmp/brainchild.log | tail -10
 ```
@@ -159,6 +168,7 @@ grep "PermissionChatHandler: auto-approve" /tmp/brainchild.log | tail -10
 > no, write it at /tmp/different.txt instead
 
 **Expected behavior:**
+
 - bot sees the deny + reason in the PreToolUse response, adjusts
 - bot may post a NEW confirmation: `Run Write?` for `/tmp/different.txt`
 - if you approve the second prompt, the file lands at `/tmp/different.txt`, NOT `/tmp/track_a_deny.txt`
@@ -168,6 +178,7 @@ grep "PermissionChatHandler: auto-approve" /tmp/brainchild.log | tail -10
 **Say "done" when:** the bot's flow has terminated.
 
 **What I'll grep:**
+
 ```
 grep "user replied (treated as deny)\|permissionDecision.*deny" /tmp/brainchild.log | tail -10
 ```
@@ -189,6 +200,7 @@ kill <pid>
 > recap our last two messages
 
 **Expected behavior:**
+
 - bot detects the dead subprocess on the next turn
 - spawns fresh, re-feeds prior turns via the synthesized opener (probe 7 strategy 2)
 - replies coherently, demonstrating it remembers the prior conversation
@@ -198,6 +210,7 @@ kill <pid>
 **Say "done" when:** bot has replied.
 
 **What I'll grep:**
+
 ```
 grep "subprocess died mid-meeting\|attempting one restart\|synthesized opener" /tmp/brainchild.log | tail -10
 ```
@@ -213,6 +226,7 @@ ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" brainchild run claude
 ```
 
 **Expected behavior:**
+
 - brainchild starts joining a meeting
 - on the FIRST user message, `ClaudeCLISubscriptionRequiredError` raises with the message "claude reported apiKeySource='ANTHROPIC_API_KEY'; track A requires subscription auth..."
 - bot does NOT silently bill the user's API account
@@ -222,6 +236,7 @@ ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" brainchild run claude
 **Say "done" when:** the error has been logged OR (if it doesn't fire) the bot replies normally — that's a fail.
 
 **What I'll grep:**
+
 ```
 grep "ClaudeCLISubscriptionRequiredError\|apiKeySource" /tmp/brainchild.log | tail -10
 ```
@@ -241,6 +256,7 @@ After this test, restart brainchild WITHOUT the bogus key for the rest of the do
 > walk us through how the chat polling loop works in this codebase
 
 **Expected behavior:**
+
 - bot uses Read / Grep / Glob (silent — auto_approve list)
 - traces from entry-point through `pipeline/chat_runner.py:_loop`, citing real `file:line` references
 - replies as multiple short messages, one per hop
@@ -251,9 +267,11 @@ After this test, restart brainchild WITHOUT the bogus key for the rest of the do
 **Say "done" when:** the bot has posted the closing message OR you've confirmed it's stuck.
 
 **What I'll grep:**
+
 ```
 grep "TIMING claude_cli_turn\|stream_event.*content_block_delta\|ChatRunner: new message" /tmp/brainchild.log | tail -40
 ```
+
 Plus the JSONL meeting record for the full bot replies.
 
 ---
@@ -265,6 +283,7 @@ Plus the JSONL meeting record for the full bot replies.
 > what would it take to migrate this codebase from chat-only to also supporting Slack as a connector? give us a phased plan
 
 **Expected behavior:**
+
 - bot reads enough of the codebase to ground the plan (Read/Grep, silent)
 - returns a structured plan: Migration / Surface area / Phases (3–7) / Risks / Sequencing / Open questions
 - per phase: What / Files / Blast radius / Depends on / Rough size
@@ -316,6 +335,7 @@ EOF
 > write tests for the is_valid_email function in /tmp/test_fixtures/email_validator.py — happy path plus 4 edge cases. use pytest. then run them.
 
 **Expected behavior:**
+
 - bot reads the fixture (silent — Read in auto_approve)
 - proposes a Write for `/tmp/test_fixtures/test_email_validator.py` — confirmation prompt arrives, you approve
 - proposes a Bash run (`python -m pytest /tmp/test_fixtures/test_email_validator.py -v` or similar) — confirmation prompt arrives, you approve
@@ -326,6 +346,7 @@ EOF
 **Say "done" when:** the run output is back in chat.
 
 **What I'll grep:**
+
 ```
 grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'" /tmp/brainchild.log | tail -20
 ```
@@ -339,6 +360,7 @@ grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'
 > add a `--version` flag to the brainchild CLI that prints the package version. repo path is /Users/jojo/Desktop/operator. don't commit, just leave the change in the working tree.
 
 **Expected behavior:**
+
 - bot reads `src/brainchild/__main__.py` and figures out where to add `--version` (silent — Read/Grep)
 - proposes one or more Edits (or a Write) — confirmation prompts arrive, you approve each
 - optionally proposes a Bash run to verify (`python -m brainchild --version`) — you approve
@@ -349,6 +371,7 @@ grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'
 **Say "done" when:** the bot reports done OR you stop it.
 
 **What I'll grep:**
+
 ```
 grep "PermissionChatHandler: asking user about\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -50
 ```
@@ -378,9 +401,10 @@ Copy the ticket URL.
 
 **Trigger phrase (replace `<linear-url>`):**
 
-> scope this ticket: <linear-url>
+> scope this ticket: 
 
 **Expected behavior:**
+
 - bot calls a Linear MCP tool to fetch the ticket (the MCP itself may prompt for confirmation — depends on whether the tool is in claude's own native settings or comes through MCP. Treat any MCP confirmation as auto-track-A behavior, approve.)
 - optionally peeks at affected files via Read/Grep (silent)
 - replies: Size (XS/S/M/L/XL) + Files to touch + Blockers + Risks + Unknowns
@@ -391,6 +415,7 @@ Copy the ticket URL.
 **Say "done" when:** estimate is posted.
 
 **What I'll grep:**
+
 ```
 grep "PermissionChatHandler: asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -25
 ```
@@ -410,6 +435,7 @@ You can paraphrase, but cover: stealth concept, the three behaviors it disables,
 > turn the last 90 seconds of discussion into a PRD. read the meeting record at ~/.brainchild/history/
 
 **Expected behavior:**
+
 - bot uses Read on the meeting JSONL (silent — Read auto-approved)
 - emits structured PRD: Problem / User / Goal / Scope / Non-goals / Open questions / Owner
 - quotes specific phrasings from your speech ("ship a v1 within two weeks", "per-meeting via a CLI flag", etc.)
@@ -420,9 +446,11 @@ You can paraphrase, but cover: stealth concept, the three behaviors it disables,
 **Say "done" when:** PRD is posted.
 
 **What I'll grep:**
+
 ```
 grep "Read.*history\|MeetingRecord\|caption" /tmp/brainchild.log | tail -20
 ```
+
 Plus the JSONL — I'll check the bot's PRD reply has section headers and quotes real caption text.
 
 ---
@@ -434,6 +462,7 @@ Plus the JSONL — I'll check the bot's PRD reply has section headers and quotes
 > give us release notes for the last 10 commits on main, repo is github.com/shapirojojo/operator
 
 **Expected behavior:**
+
 - bot uses GitHub MCP (or `gh` via Bash — confirm if Bash) to fetch commits + PRs
 - groups output: Features / Fixes / Changes / Internal
 - each line cites `(#<PR-number>)` or commit SHA short prefix
@@ -444,6 +473,7 @@ Plus the JSONL — I'll check the bot's PRD reply has section headers and quotes
 **Say "done" when:** notes are posted.
 
 **What I'll grep:**
+
 ```
 grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp/brainchild.log | tail -25
 ```
@@ -456,9 +486,10 @@ grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp
 
 **Trigger phrase (replace `<pr-url>`):**
 
-> review this PR: <pr-url>
+> review this PR: 
 
 **Expected behavior:**
+
 - bot uses GitHub MCP / Bash / WebFetch to read the PR + changed files
 - replies with: Summary + Bugs + Missing tests + Risks + Style + Questions sections
 - every Bugs/Risks claim cites `file:line`
@@ -469,6 +500,7 @@ grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp
 **Say "done" when:** review is posted.
 
 **What I'll grep:**
+
 ```
 grep "asking user about\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -25
 ```
@@ -486,6 +518,7 @@ This one has the highest setup cost. ~15 min of prep before the meeting starts.
 **Step 1 — Sentry account:** sign up at [sentry.io](https://sentry.io) with `shapirojojo@gmail.com` if you haven't.
 
 **Step 2 — Create a project:**
+
 - Project type: Python
 - Project name: `brainchild-track-a-test`
 - Copy the DSN.
@@ -562,9 +595,10 @@ If it's missing, add it via Claude Code's mcp commands or the claude.ai connecto
 
 **Trigger phrase (replace `<sentry-issue-url>`):**
 
-> prod is broken — what's going on with this Sentry issue: <sentry-issue-url>
+> prod is broken — what's going on with this Sentry issue: 
 
 **Expected behavior:**
+
 - bot calls the Sentry MCP to fetch the issue
 - optionally Reads `/tmp/sentry_demo/trigger_error.py` to ground the cause analysis (silent — Read)
 - emits five-phase triage as **separate messages**, one per phase:
@@ -579,6 +613,7 @@ If it's missing, add it via Claude Code's mcp commands or the claude.ai connecto
 **Say "done" when:** all five phases are posted.
 
 **What I'll grep:**
+
 ```
 grep "asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -40
 ```
@@ -621,3 +656,4 @@ tail -f /tmp/brainchild.log
 ls -t ~/.brainchild/history/ | head -3
 tail -f ~/.brainchild/history/<slug>.jsonl | jq 'select(.kind == "chat" and .sender == "claude")'
 ```
+
