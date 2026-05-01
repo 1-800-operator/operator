@@ -85,6 +85,27 @@ def test_is_yes_variants():
     print("  _is_yes variants OK")
 
 
+def test_is_yes_negation_gate():
+    """Affirmative token paired with a negation must NOT approve.
+
+    Mirrors the negation gate in chat_runner._handle_confirmation so the
+    track-A permission handler and the track-B confirmation flow agree
+    on the same yes/no contract. Without the gate, "ok no don't do that"
+    would auto-approve a tool call because "ok" matches.
+    """
+    negated = [
+        "ok no don't do that",
+        "yes don't",
+        "go ahead no actually wait",
+        "sure, but do not run it",
+        "approve? nah, cancel that",
+        "do it… no actually stop",
+    ]
+    for t in negated:
+        assert not _is_yes(t), f"_is_yes({t!r}) should be False (negation gate)"
+    print("  _is_yes negation gate OK")
+
+
 def test_format_confirmation_truncates_long_args():
     """Technical-voice path renders every parameter with head…tail truncation.
 
@@ -252,6 +273,8 @@ def test_handler_claims_seen_ids_so_main_loop_skips():
 def main():
     print("test_is_yes_variants")
     test_is_yes_variants()
+    print("test_is_yes_negation_gate")
+    test_is_yes_negation_gate()
     print("test_format_confirmation_truncates_long_args")
     test_format_confirmation_truncates_long_args()
     print("test_format_confirmation_no_args")

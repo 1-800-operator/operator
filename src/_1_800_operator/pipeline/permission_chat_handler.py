@@ -108,8 +108,23 @@ _AFFIRM_PATTERNS = [
 
 
 def _is_yes(text):
-    """Best-effort yes detection, modeled on chat_runner._handle_confirmation."""
+    """Best-effort yes detection, modeled on chat_runner._handle_confirmation.
+
+    Mirrors the negation gate added to _handle_confirmation: a reply that
+    pairs an affirmative token with a negation ("ok no don't do that",
+    "yes don't") must NOT auto-approve. Same semantics on both confirmation
+    surfaces (track-B chat_runner + track-A permission handler) keeps the
+    user-facing contract consistent regardless of which path they're on.
+    """
     lower = text.lower().strip()
+    has_negative = (
+        re.search(r"\b(no|nope|nah|stop|cancel)\b", lower) is not None
+        or "don't" in lower
+        or "dont" in lower
+        or "do not" in lower
+    )
+    if has_negative:
+        return False
     if "go ahead" in lower or "do it" in lower:
         return True
     return any(p.search(lower) for p in _AFFIRM_PATTERNS)

@@ -26,23 +26,23 @@ permission semantics; the bridge handles the envelope shape.
 
 Failure modes:
   - Pipes missing: print deny, exit 0 (claude still sees a clean decision).
-  - Parent never responds within HARD_TIMEOUT_SECONDS: deny with timeout reason.
   - JSON parse errors on the wire: deny with parse reason.
+  - Pipe write/read errors: deny with the underlying exception.
 
 Hard-fail (exit 2) is reserved for cases where we want claude to see the
 error directly; here we always emit a clean JSON allow/deny so claude's
 control flow stays predictable.
+
+Upper-bound timeout: the bridge has no Python-side watchdog. Pipe opens
+and reads block indefinitely under POSIX semantics, so the ceiling on
+how long this process can hang is governed by claude's own PreToolUse
+hook timeout (set to 600s in `claude_cli._setup_permission_bridge`'s
+settings.json `hooks.PreToolUse[].hooks[].timeout`). The CLI kills the
+hook process and treats the absent decision as a deny when that fires.
 """
 import json
 import sys
 from pathlib import Path
-
-
-# Hard ceiling on how long the bridge will wait for the parent's response.
-# In production this is the chat round-trip, which can be long if the user
-# is mid-conversation. Set generously; the parent itself can decide to
-# auto-deny earlier and write an early response back.
-HARD_TIMEOUT_SECONDS = 600
 
 
 def _emit(decision: str, reason: str) -> None:
