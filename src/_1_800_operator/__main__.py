@@ -913,10 +913,8 @@ def _run_bot(name, rest):
                 return rc
 
     if sys.platform == "darwin":
-        _run_macos(url, force=force)
-    else:
-        _run_linux(url, force=force)
-    return 0
+        return _run_macos(url, force=force) or 0
+    return _run_linux(url, force=force) or 0
 
 
 def _run_macos(meeting_url=None, force=False):
@@ -1020,7 +1018,7 @@ def _run_macos(meeting_url=None, force=False):
             ui.err("meet.new did not produce a meeting URL")
             connector.leave()
             _kill_orphaned_children()
-            return
+            return 1
         log.info(f"meet.new resolved to {meeting_url}")
         ui.ok(f"Fresh meeting: {meeting_url}")
         # The bot joins in a headless Chrome — pop the Meet open in the
@@ -1092,6 +1090,7 @@ def _run_macos(meeting_url=None, force=False):
     finally:
         _shutdown()
         ui.ok("Left meeting — goodbye.")
+    return 0
 
 
 def _run_linux(meeting_url, force=False):
@@ -1204,6 +1203,7 @@ def _run_linux(meeting_url, force=False):
     finally:
         _shutdown()
         ui.ok("Left meeting — goodbye.")
+    return 0
 
 
 if __name__ == "__main__":

@@ -403,6 +403,32 @@ def test_run_bot_parses_url_and_flags_and_sets_env():
     print("PASS  test_run_bot_parses_url_and_flags_and_sets_env")
 
 
+def test_run_bot_propagates_platform_runner_exit_code():
+    """If _run_macos returns 1 (e.g. meet.new redirect failed), _run_bot
+    must propagate that — not unconditionally return 0. CI scripts and
+    shell pipelines rely on the exit code to detect join failures.
+    """
+    def fake_macos_fail(meeting_url=None, force=False):
+        return 1
+
+    def fake_linux_fail(meeting_url, force=False):
+        return 1
+
+    saved_env = os.environ.get("OPERATOR_BOT")
+    try:
+        os.environ.pop("OPERATOR_BOT", None)
+        with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
+            with patched_dispatch(_run_macos=fake_macos_fail, _run_linux=fake_linux_fail):
+                rc = entry._run_bot("pm", [])
+        assert rc == 1, f"expected 1 from failed runner, got {rc}"
+    finally:
+        if saved_env is None:
+            os.environ.pop("OPERATOR_BOT", None)
+        else:
+            os.environ["OPERATOR_BOT"] = saved_env
+    print("PASS  test_run_bot_propagates_platform_runner_exit_code")
+
+
 def test_run_bot_unknown_flag_returns_2():
     saved_env = os.environ.get("OPERATOR_BOT")
     try:
@@ -564,6 +590,7 @@ if __name__ == "__main__":
         test_main_run_without_name_returns_2,
         test_main_run_unknown_bot_returns_2,
         test_run_bot_parses_url_and_flags_and_sets_env,
+        test_run_bot_propagates_platform_runner_exit_code,
         test_run_bot_unknown_flag_returns_2,
         test_run_bot_no_preflight_flag_bypasses_readiness,
         test_run_bot_aborts_when_preflight_returns_nonzero,
