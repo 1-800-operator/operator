@@ -1,22 +1,22 @@
-# Brainchild
+# Operator
 
-> Brainchild is an open-source CLI tool that drops AI participants into your Google Meet. Install via pip, configure via YAML, run from your terminal.
+> Operator is an open-source CLI tool that drops AI participants into your Google Meet. Install via pip, configure via YAML, run from your terminal.
 
 Joins, reads chat, replies via an LLM with tool access (Linear, GitHub, and
 other MCP servers you wire up), and leaves when everyone else does.
 
 ```bash
-brainchild run pm                                        # open a fresh Meet
-brainchild run pm https://meet.google.com/xxx-yyyy-zzz   # join a specific Meet
-brainchild try pm                                        # terminal test-drive, no Meet
-brainchild                                               # show available agents
+operator run pm                                        # open a fresh Meet
+operator run pm https://meet.google.com/xxx-yyyy-zzz   # join a specific Meet
+operator try pm                                        # terminal test-drive, no Meet
+operator                                               # show available agents
 ```
 
-`pm` is a sample bot under `agents/`. Drop in `brainchild build` to create your own.
+`pm` is a sample bot under `agents/`. Drop in `operator build` to create your own.
 
 ## Privacy & logs
 
-Brainchild writes a detailed diagnostic log to **`/tmp/brainchild.log`** on every
+Operator writes a detailed diagnostic log to **`/tmp/operator.log`** on every
 run. For now, this file contains:
 
 - The Meet URL the bot joined (a capability token — anyone with it can join).
@@ -28,20 +28,20 @@ run. For now, this file contains:
 directory — treat it like any other local artifact. macOS typically clears
 `/tmp` on reboot; Linux may not. Delete it manually if it matters.
 
-Chat history also lands in `~/.brainchild/history/<slug>.jsonl` — that's the
+Chat history also lands in `~/.operator/history/<slug>.jsonl` — that's the
 durable record the bot replays from between turns. Same sensitivity profile.
 
 ### Never commit these
 
-API keys live in a single `.env` at `~/.brainchild/.env`, shared across all
+API keys live in a single `.env` at `~/.operator/.env`, shared across all
 bots. The following files hold secrets or logged-in Google session state and
 must stay local:
 
-- `~/.brainchild/.env` — API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, …)
+- `~/.operator/.env` — API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, …)
 - `credentials.json` — Google OAuth client secrets
 - `token.json` — Google OAuth access/refresh tokens
-- `~/.brainchild/auth_state.json` — Playwright storage state (Google session cookies)
-- `~/.brainchild/browser_profile/` — persistent Chrome profile (Google session cookies)
+- `~/.operator/auth_state.json` — Playwright storage state (Google session cookies)
+- `~/.operator/browser_profile/` — persistent Chrome profile (Google session cookies)
 
 All of the above are ignored by `.gitignore`. If you see one show up in
 `git status` untracked, something has gone wrong — don't `git add .` blindly.
@@ -50,20 +50,20 @@ See `docs/security.md` for the full threat model.
 ## Voice mode
 
 Each bot has a `voice` setting under `agent:`. It controls how much
-detail brainchild puts into the *system's* messages (the sterile
+detail operator puts into the *system's* messages (the sterile
 approval challenge for destructive tools, the optional progress
 narrator). The bot's actual conversational voice — friendly,
 technical, in Spanish, or even pirate — lives in the `personality`
-and `ground_rules` blocks of the bot's config.yaml. Brainchild
+and `ground_rules` blocks of the bot's config.yaml. Operator
 doesn't template persona; the bot speaks for itself.
 
 - **`plain`** — meeting-friendly. The system's approval challenge is
   a one-line summary that hides bulk content (Write body, MultiEdit
   edits) but keeps imperative fields (Bash command, file paths, URLs)
-  verbatim. Brainchild's narrator stays silent — the bot self-narrates
+  verbatim. Operator's narrator stays silent — the bot self-narrates
   in chat in its own voice via a `ground_rules` directive. **Default.**
 - **`technical`** — developer-flavored. The approval challenge is a
-  full parameter dump with head…tail truncation. Brainchild's narrator
+  full parameter dump with head…tail truncation. Operator's narrator
   emits deterministic "Working: …" lines for auto-approved tools.
 
 Switch in `agents/<bot>/config.yaml`:
@@ -76,7 +76,7 @@ agent:
 
 The conversational shape — "Let me check Sentry first, ok?" or "Aye
 matey, time to peek at yer files" — comes from the bot's prompt, not
-from brainchild. So if you set the bot's `personality` to talk like a
+from operator. So if you set the bot's `personality` to talk like a
 pirate, every chat message it sends in plain mode reads like a pirate.
 The system's approval challenge stays neutral underneath as a
 machine-readable safety gate.
@@ -92,7 +92,7 @@ Move the value to `agent.voice` to silence the warning.
 ## MCP permissions
 
 For the `claude` agent (track A), built-in tools (Read, Bash, Write, …) are
-gated by the `permissions` block in `agents/<bot>/config.yaml`. The `brainchild
+gated by the `permissions` block in `agents/<bot>/config.yaml`. The `operator
 build` wizard walks you through the built-in tools as a checklist; tools listed
 under `auto_approve` run silently, anything under `always_ask` (and anything
 not on either list) pauses the bot for a chat confirmation.
@@ -139,8 +139,8 @@ bot starts asking again) but is worth a glance after `claude mcp` upgrades.
 ## Uninstall
 
 ```bash
-uv tool uninstall brainchild   # removes the CLI + PATH shim
-rm -rf ~/.brainchild           # removes agents, history, and .env
+uv tool uninstall operator   # removes the CLI + PATH shim
+rm -rf ~/.operator           # removes agents, history, and .env
 ```
 
 ## More

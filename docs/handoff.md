@@ -6,7 +6,7 @@ This session walked the DevTools-console probe-state-list workflow that was queu
 
 **Carry-overs / blockers:**
 1. **Zoom Implementation risks logged in the inventory** that the adapter must solve when we get there: TipTap/ProseMirror chat input (need `keyboard.type()` not `fill()`); side-panel exclusivity (chat + participants share one slot — adapter must restore chat after roster fetch); enabling captions is a meeting-wide side effect ("Captions will appear in this language for everyone") so should be config-gated, not on by default; build-hashed class names (`g7nkJFrV` on state 1's "Join from browser") will rotate — lock selectors to text + tag, not class; ReactVirtualized rosters need scrolling for >visible-window participant counts (out of scope v1); leave-confirmation modal selectors need an inline probe when the adapter wires `leave()` (one click + `document.querySelector('div[role="dialog"].ReactModal__Content')`).
-2. **`~/.brainchild/history/` still world-readable** — pre-prod acceptable, harden before launch (carries from session 173).
+2. **`~/.operator/history/` still world-readable** — pre-prod acceptable, harden before launch (carries from session 173).
 3. **Phase 14.13.1 (`gh repo create 1-800-operator/operator --public`)** still the next launch-blocking step after the platform-expansion DOM probes are done.
 4. **Zoom probe was done in a 2-person meeting only.** Any state that depends on participant count >2 (gallery layout shifts, virtualized roster scrolling, participant-list pagination) wasn't exercised. Worth one larger-meeting probe pass before shipping the Zoom adapter.
 

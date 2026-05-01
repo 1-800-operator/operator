@@ -32,8 +32,8 @@ Runs in the wizard (`pipeline/google_signin.py`). One-time setup, separate from 
 
 | Action | Page state | Selector(s) | Extract / assert | Failure handling |
 |---|---|---|---|---|
-| Detect existing session | Disk: `~/.brainchild/auth_state.json` | JSON parse → filter `cookies[]` for `name == "SID"` && `domain == ".google.com"` | Boolean: SID cookie present | Return `(detected=False, email=None)` if file absent |
-| Read email cache | Disk: `~/.brainchild/google_account.json` | JSON `data.email`; regex `[\w.+-]+@[\w-]+\.[\w.-]+` | Email string | Return None (non-fatal) |
+| Detect existing session | Disk: `~/.operator/auth_state.json` | JSON parse → filter `cookies[]` for `name == "SID"` && `domain == ".google.com"` | Boolean: SID cookie present | Return `(detected=False, email=None)` if file absent |
+| Read email cache | Disk: `~/.operator/google_account.json` | JSON `data.email`; regex `[\w.+-]+@[\w-]+\.[\w.-]+` | Email string | Return None (non-fatal) |
 | Open sign-in flow | Real Chrome on `accounts.google.com` | Persistent context + real Chrome binary | Poll `_has_google_sid(context)` every 1s for 300s | Timeout → raise; caller keeps old session |
 | Navigate to myaccount | After SID confirmed | `goto("https://myaccount.google.com/")` | Wait `domcontentloaded` (15s) | Skip email capture; continue with None |
 | Extract email | On myaccount.google.com | `a[aria-label*="@"]`; `div[aria-label*="@"]`; `[data-email]`; fallback to body text + regex | First regex match in `aria-label` / `data-email` / `title` / text | Return None |
@@ -55,7 +55,7 @@ Assumes URL is `meet.google.com/<slug>`. UI shows camera + microphone toggles, j
 | Dismiss device-permission modal | Modal over join buttons | `page.get_by_text("Continue without microphone and camera")`; fallback `Escape` | Modal gone | Escape always safe (no-op if no modal) |
 | Turn off camera | Pre-join screen, modal cleared | `page.get_by_role("button", name="Turn off camera")` | Wait 5s | Log warning; proceed |
 | Confirm camera off | After toggle | `[role="button"][data-is-muted="true"][aria-label*="camera"]` | `data-is-muted="true"` | Save debug dump; continue |
-| Fill guest name (Linux only) | Unauthenticated path | `page.get_by_placeholder("Your name")` | Filled with `"Brainchild"` | Skip on signed-in; pass on exception |
+| Fill guest name (Linux only) | Unauthenticated path | `page.get_by_placeholder("Your name")` | Filled with `"Operator"` | Skip on signed-in; pass on exception |
 | Race join buttons | Pre-join, ready | `page.get_by_role("button", name="Join now").or_(ask_join).or_(switch_here).wait_for(timeout=10s)` | Any of three resolves | Signal `no_join_button` |
 | Click `Join now` | Direct entry available | `button[name="Join now"]` | Click; navigate | Try Ask-to-join or Switch-here next |
 | Click `Ask to join` | Host approval gate | `button[name="Ask to join"]` | Click; enter waiting room | Proceed to `_wait_for_admission()` |
@@ -149,7 +149,7 @@ Polled every 2s during the in-meeting hold loop.
 | Drain chat queue | Browser closing | `self._chat_queue` peek loop | Per command: empty list / 0 / [] / None | Caller unblocks immediately |
 | Close context | Post-leave | macOS: rely on `sync_playwright.__exit__`; Linux: `browser.close()` | Teardown | macOS may force-kill Playwright drivers if exit wedges |
 | Wait browser thread | Main thread | `browser_thread.join(timeout=10s)` | Thread exits | Log warning |
-| Clean PID file | Browser thread exit | `~/.brainchild/browser_profile/.brainchild.pid` removed | File gone | Pass on OSError |
+| Clean PID file | Browser thread exit | `~/.operator/browser_profile/.operator.pid` removed | File gone | Pass on OSError |
 
 ---
 

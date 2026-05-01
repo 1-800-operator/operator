@@ -1,4 +1,4 @@
-# Brainchild MVP Bar
+# Operator MVP Bar
 
 *Established: April 12, 2026. Revisit and adjust as needed, but don't expand without a strong reason.*
 
@@ -8,17 +8,17 @@
 
 The only open-source meeting bot that *does things*, not just watches. **"Meetings that produce artifacts, not just words."**
 
-The AI power user's meeting bot — your Claude Code skills, your MCP servers, your model, in every meeting. Brainchild reads Claude Code skills natively, and any markdown skill file, with any model.
+The AI power user's meeting bot — your Claude Code skills, your MCP servers, your model, in every meeting. Operator reads Claude Code skills natively, and any markdown skill file, with any model.
 
 ## The "Aha" Moment
 
-You're in a Google Meet. You type "brainchild, create a ticket for the auth bug Alice just described." It creates the Linear ticket, right there in chat, in front of everyone. Nobody else does this.
+You're in a Google Meet. You type "operator, create a ticket for the auth bug Alice just described." It creates the Linear ticket, right there in chat, in front of everyone. Nobody else does this.
 
 ## Three-Part Differentiation
 
-1. **Action, not access.** OpenUtter/Vexa/Fireflies watch and record — the transcript category. Joinly exposes the meeting *to* agents as middleware — the access category. Brainchild *is* the agent, pre-wired. MCP tool use during a live meeting, producing concrete artifacts (tickets, PRs, docs), is the capability moat.
-2. **Your AI, not a generic bot — and specifically, your Claude Code skills in a meeting.** Brainchild imports `~/.claude/skills/` natively, so the agent knows your codebase conventions, your team's ticket format, your preferences, from day one. Skill files are portable markdown; they work with OpenAI or Anthropic, with any skills directory a user points at. The AI-power-user customization layer, surfaced into meetings — this is the sharpest implicit differentiator and the lead framing for launch.
-3. **Opinionated quickstart, not a framework.** "Choose your fighter → add power-ups → go." Ship ready-to-run agents in `agents/` (see `agents/README.md`) as the "choose your fighter" layer — copy a folder, fill in keys, run. An interactive `python -m brainchild build` wizard writes the config. README reads as Steps 1/2/3. No Docker, no daemon, no managed platform, no $20/mo SaaS. BYOK — paste your key, go. Open source, MIT licensed.
+1. **Action, not access.** OpenUtter/Vexa/Fireflies watch and record — the transcript category. Joinly exposes the meeting *to* agents as middleware — the access category. Operator *is* the agent, pre-wired. MCP tool use during a live meeting, producing concrete artifacts (tickets, PRs, docs), is the capability moat.
+2. **Your AI, not a generic bot — and specifically, your Claude Code skills in a meeting.** Operator imports `~/.claude/skills/` natively, so the agent knows your codebase conventions, your team's ticket format, your preferences, from day one. Skill files are portable markdown; they work with OpenAI or Anthropic, with any skills directory a user points at. The AI-power-user customization layer, surfaced into meetings — this is the sharpest implicit differentiator and the lead framing for launch.
+3. **Opinionated quickstart, not a framework.** "Choose your fighter → add power-ups → go." Ship ready-to-run agents in `agents/` (see `agents/README.md`) as the "choose your fighter" layer — copy a folder, fill in keys, run. An interactive `python -m operator build` wizard writes the config. README reads as Steps 1/2/3. No Docker, no daemon, no managed platform, no $20/mo SaaS. BYOK — paste your key, go. Open source, MIT licensed.
 
 ## What Must Work
 
@@ -30,7 +30,7 @@ You're in a Google Meet. You type "brainchild, create a ticket for the auth bug 
 - **Graceful failure.** When something goes wrong, the bot says so in chat ("I tried but Linear returned an error: ...") rather than hanging, crashing, or silently doing nothing.
 - **BYOMCP doesn't brick the bot.** Users can add their own MCP servers. Untested servers get defensive defaults (result size caps, execution timeouts, conservative confirmation mode). README documents known failure patterns and how to write hints to mitigate them.
 - **Linux works.** Mac + Linux is in the positioning. Dedicated testing session on a real Linux box before launch.
-- **Clean presentation.** Stdout during normal operation is clean and readable (no debug spam, no stack traces for expected errors). Config file has no dead keys or confusing options. The detailed debug log stays in `/tmp/brainchild.log`.
+- **Clean presentation.** Stdout during normal operation is clean and readable (no debug spam, no stack traces for expected errors). Config file has no dead keys or confusing options. The detailed debug log stays in `/tmp/operator.log`.
 - **The 3-step setup is obvious.** A non-expert reader of the README identifies the three steps (choose an agent → add your keys/power-ups → join a meeting) in under 30 seconds. The `agents/` gallery has at least 2 ready-to-run agents at launch — `claude-code` is the canonical example.
 
 ## What Is NOT in the MVP

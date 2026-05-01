@@ -4,11 +4,11 @@
 
 ## Problem
 
-Live run of `brainchild try engineer` in session 126 surfaced three related issues in `agents/engineer/delegate_to_claude_code.py`:
+Live run of `operator try engineer` in session 126 surfaced three related issues in `agents/engineer/delegate_to_claude_code.py`:
 
 1. **Ephemeral, invisible worktrees.** Every delegate call runs `claude -p <task> --worktree`, which creates a fresh git worktree under `.claude/worktrees/<random-name>/`. Engineer reports "confirmed working" but the file lives in a throwaway tree the user never sees.
 2. **No continuity between calls.** Second delegate ("prove it / show the file") spawns a *new* worktree with no knowledge of the first. In the live run the LLM silently pivoted from "show contents of scratch/hello_op.py" to "create scratch/hello_op.py then run it" because the file didn't exist in the new sandbox.
-3. **Hard-pinned to Brainchild's own repo.** Worktrees branch off whatever repo Brainchild was launched from — i.e. `/Users/jojo/Desktop/brainchild/` — which is almost never the repo the user wants to work in.
+3. **Hard-pinned to Operator's own repo.** Worktrees branch off whatever repo Operator was launched from — i.e. `/Users/jojo/Desktop/operator/` — which is almost never the repo the user wants to work in.
 
 Consequence: Engineer is effectively a demo today. It cannot be used to work on a real project.
 
@@ -50,7 +50,7 @@ System prompt is updated so Engineer mentions the workdir to the user when repor
 
 Add to `agents/engineer/config.yaml`:
 
-- Every delegate call requires `repo_path`. On first delegation of a chat, if the user hasn't named a repo, ask: "Which repo should I work in? (absolute path)" Don't guess, don't default to Brainchild's cwd.
+- Every delegate call requires `repo_path`. On first delegation of a chat, if the user hasn't named a repo, ask: "Which repo should I work in? (absolute path)" Don't guess, don't default to Operator's cwd.
 - Remember the most recently named repo; reuse it as the default unless the user names a different one.
 - When reporting results, tell the user the workdir path so they know the changes are in a sandbox, not their working tree.
 
@@ -75,19 +75,19 @@ In `__main__.py`, when the `engineer` agent is selected, shell out to `git -C . 
 
 - **Cross-repo in a single call.** One delegation = one `repo_path`. "Fix X in repo A and Y in repo B" is two calls.
 - **Clone-on-demand from GitHub.** Deferred. User points at repos they already have locally.
-- **Multi-worktree per repo.** One sticky worktree per repo per process lifetime. If user wants a fresh sandbox, restart Brainchild or extend with an explicit "fresh sandbox" signal later.
+- **Multi-worktree per repo.** One sticky worktree per repo per process lifetime. If user wants a fresh sandbox, restart Operator or extend with an explicit "fresh sandbox" signal later.
 - **Auth across repos.** Claude Code inherits env from the delegate subprocess — GitHub PAT etc. already flows through. Private repos behind separate auth are out of scope for v1.
 
 ## Test plan
 
-Smoke-test via `brainchild try engineer`:
+Smoke-test via `operator try engineer`:
 
-1. First delegate in Brainchild's own repo: `"write scratch/hello_op.py"`. Confirm file lands in a worktree, Engineer reports the workdir path.
+1. First delegate in Operator's own repo: `"write scratch/hello_op.py"`. Confirm file lands in a worktree, Engineer reports the workdir path.
 2. Second delegate same session: `"add a comment to scratch/hello_op.py"`. Confirm it edits the *same* file in the *same* worktree (not a new one).
 3. Third delegate at a different repo: `"in ~/code/other-repo, list the top-level files"`. Confirm new worktree under that repo, no interference with the first session.
 4. Back to first repo: `"show scratch/hello_op.py"`. Confirm reuse of the first session/worktree.
 5. `"land those changes"`: confirmation prompt, then `scratch/hello_op.py` appears in the real working tree of the first repo.
-6. Restart Brainchild: `git worktree list` shows the stale trees pruned.
+6. Restart Operator: `git worktree list` shows the stale trees pruned.
 
 ## README updates
 

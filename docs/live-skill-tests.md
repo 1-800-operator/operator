@@ -1,6 +1,6 @@
 # Live tests — claude agent (track A)
 
-*Phase 14.12.2, session 166. Rewritten for track A: claude IS the meeting LLM (no Anthropic outer / claude-code MCP inner split). The use cases that the bundled brainchild skills were packaging are still the things we want to test — we just exercise them via claude's native tools (Read, Grep, Glob, LS, Bash, Write, Edit, WebSearch, WebFetch) plus whatever MCPs the user has wired in `~/.claude.json` (Linear, GitHub, Sentry, etc). Each test routes destructive tool calls through meeting chat for explicit user approval (the PreToolUse hook → permission-bridge IPC → chat round-trip we built in steps 1–5c).*
+*Phase 14.12.2, session 166. Rewritten for track A: claude IS the meeting LLM (no Anthropic outer / claude-code MCP inner split). The use cases that the bundled operator skills were packaging are still the things we want to test — we just exercise them via claude's native tools (Read, Grep, Glob, LS, Bash, Write, Edit, WebSearch, WebFetch) plus whatever MCPs the user has wired in `~/.claude.json` (Linear, GitHub, Sentry, etc). Each test routes destructive tool calls through meeting chat for explicit user approval (the PreToolUse hook → permission-bridge IPC → chat round-trip we built in steps 1–5c).*
 
 ## Use cases under test
 
@@ -30,15 +30,15 @@ The point of session 0 is to gate every other test on the basics — if the hook
 ```bash
 cd /Users/jojo/Desktop/operator
 source venv/bin/activate
-brainchild build       # confirm wizard runs cleanly
+operator build       # confirm wizard runs cleanly
 ```
 
 ### B. Verify track-A claude config is seeded
 
-If `~/.brainchild/agents/claude/config.yaml` was deleted (or never existed), the next `brainchild run claude` will copy the bundled track-A seed into place. Verify with:
+If `~/.operator/agents/claude/config.yaml` was deleted (or never existed), the next `operator run claude` will copy the bundled track-A seed into place. Verify with:
 
 ```bash
-cat ~/.brainchild/agents/claude/config.yaml | head -25
+cat ~/.operator/agents/claude/config.yaml | head -25
 ```
 
 Should show `provider: "claude_cli"` and a `permissions:` block with `auto_approve: [Read, Grep, Glob, LS, WebSearch]` and `always_ask: [Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, Task]`. The `mcp_servers: {}` line is correct — track A's MCP toggles are populated lazily by the wizard from `~/.claude.json`.
@@ -53,7 +53,7 @@ Should return `{"authenticated": true, "source": "oauth"}` or similar. Track A e
 
 ### D. Verify MCPs that the use cases need are reachable in the user's claude
 
-Track A inherits MCP servers from `~/.claude.json` directly — no per-bot wiring in brainchild. Verify the ones we lean on:
+Track A inherits MCP servers from `~/.claude.json` directly — no per-bot wiring in operator. Verify the ones we lean on:
 
 ```bash
 claude mcp list
@@ -64,8 +64,8 @@ You should see at minimum: a Linear server (test 2.1), a GitHub MCP or `gh` CLI 
 ### E. Check the log file is wired
 
 ```bash
-ls -la /tmp/brainchild.log
-tail -3 /tmp/brainchild.log
+ls -la /tmp/operator.log
+tail -3 /tmp/operator.log
 ```
 
 ### F. Captions
@@ -80,7 +80,7 @@ These six gates check that the track-A architecture itself works before we lean 
 
 ### Test 0.1 — Subscription-auth assertion fires
 
-**Setup:** open a fresh Meet, run `brainchild run claude` against it. Ensure `ANTHROPIC_API_KEY` is unset (`unset ANTHROPIC_API_KEY` in the shell where you launched brainchild).
+**Setup:** open a fresh Meet, run `operator run claude` against it. Ensure `ANTHROPIC_API_KEY` is unset (`unset ANTHROPIC_API_KEY` in the shell where you launched operator).
 
 **Trigger phrase (paste into Meet chat):**
 
@@ -89,7 +89,7 @@ These six gates check that the track-A architecture itself works before we lean 
 **Expected behavior:**
 
 - bot replies with a brief greeting
-- `/tmp/brainchild.log` contains `ClaudeCLI subprocess ready: apiKeySource=none, session=<uuid>`
+- `/tmp/operator.log` contains `ClaudeCLI subprocess ready: apiKeySource=none, session=<uuid>`
 
 **Pass signal:** the apiKeySource log line is present. Reply itself doesn't matter.
 
@@ -98,7 +98,7 @@ These six gates check that the track-A architecture itself works before we lean 
 **What I'll grep:**
 
 ```
-grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -10
+grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/operator.log | tail -10
 ```
 
 ---
@@ -123,7 +123,7 @@ grep "ClaudeCLI subprocess ready\|apiKeySource\|TIMING claude_cli_turn" /tmp/bra
 **What I'll grep:**
 
 ```
-grep "PermissionChatHandler\|permission_handler\|PreToolUse" /tmp/brainchild.log | tail -20
+grep "PermissionChatHandler\|permission_handler\|PreToolUse" /tmp/operator.log | tail -20
 ```
 
 ---
@@ -152,7 +152,7 @@ echo "the secret word is pelican" > /tmp/track_a_read_test.txt
 **What I'll grep:**
 
 ```
-grep "PermissionChatHandler: auto-approve" /tmp/brainchild.log | tail -10
+grep "PermissionChatHandler: auto-approve" /tmp/operator.log | tail -10
 ```
 
 ---
@@ -180,7 +180,7 @@ grep "PermissionChatHandler: auto-approve" /tmp/brainchild.log | tail -10
 **What I'll grep:**
 
 ```
-grep "user replied (treated as deny)\|permissionDecision.*deny" /tmp/brainchild.log | tail -10
+grep "user replied (treated as deny)\|permissionDecision.*deny" /tmp/operator.log | tail -10
 ```
 
 ---
@@ -191,7 +191,7 @@ grep "user replied (treated as deny)\|permissionDecision.*deny" /tmp/brainchild.
 
 ```bash
 pgrep -fl 'claude -p --input-format stream-json' | head -5
-# pick the pid that's the brainchild-spawned subprocess (most recent)
+# pick the pid that's the operator-spawned subprocess (most recent)
 kill <pid>
 ```
 
@@ -212,7 +212,7 @@ kill <pid>
 **What I'll grep:**
 
 ```
-grep "subprocess died mid-meeting\|attempting one restart\|synthesized opener" /tmp/brainchild.log | tail -10
+grep "subprocess died mid-meeting\|attempting one restart\|synthesized opener" /tmp/operator.log | tail -10
 ```
 
 ---
@@ -222,12 +222,12 @@ grep "subprocess died mid-meeting\|attempting one restart\|synthesized opener" /
 This test intentionally tries to break the bot. Run it from a separate terminal AFTER you're done with 0.1–0.5 in the current meeting (you'll need to leave + restart).
 
 ```bash
-ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" brainchild run claude
+ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" operator run claude
 ```
 
 **Expected behavior:**
 
-- brainchild starts joining a meeting
+- operator starts joining a meeting
 - on the FIRST user message, `ClaudeCLISubscriptionRequiredError` raises with the message "claude reported apiKeySource='ANTHROPIC_API_KEY'; track A requires subscription auth..."
 - bot does NOT silently bill the user's API account
 
@@ -238,16 +238,16 @@ ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" brainchild run claude
 **What I'll grep:**
 
 ```
-grep "ClaudeCLISubscriptionRequiredError\|apiKeySource" /tmp/brainchild.log | tail -10
+grep "ClaudeCLISubscriptionRequiredError\|apiKeySource" /tmp/operator.log | tail -10
 ```
 
-After this test, restart brainchild WITHOUT the bogus key for the rest of the doc.
+After this test, restart operator WITHOUT the bogus key for the rest of the doc.
 
 ---
 
 ## Session 1 — Engineer flow (~15–20 min)
 
-**Setup:** open a fresh Meet, run `brainchild run claude` against it. Sit alone; 1-on-1 mode auto-engages.
+**Setup:** open a fresh Meet, run `operator run claude` against it. Sit alone; 1-on-1 mode auto-engages.
 
 ### Test 1.1 — Codebase walkthrough
 
@@ -269,7 +269,7 @@ After this test, restart brainchild WITHOUT the bogus key for the rest of the do
 **What I'll grep:**
 
 ```
-grep "TIMING claude_cli_turn\|stream_event.*content_block_delta\|ChatRunner: new message" /tmp/brainchild.log | tail -40
+grep "TIMING claude_cli_turn\|stream_event.*content_block_delta\|ChatRunner: new message" /tmp/operator.log | tail -40
 ```
 
 Plus the JSONL meeting record for the full bot replies.
@@ -348,7 +348,7 @@ EOF
 **What I'll grep:**
 
 ```
-grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'" /tmp/brainchild.log | tail -20
+grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'" /tmp/operator.log | tail -20
 ```
 
 ---
@@ -357,42 +357,42 @@ grep "PermissionChatHandler: asking user about 'Write'\|asking user about 'Bash'
 
 **Trigger phrase:**
 
-> add a `--version` flag to the brainchild CLI that prints the package version. repo path is /Users/jojo/Desktop/operator. don't commit, just leave the change in the working tree.
+> add a `--version` flag to the operator CLI that prints the package version. repo path is /Users/jojo/Desktop/operator. don't commit, just leave the change in the working tree.
 
 **Expected behavior:**
 
-- bot reads `src/brainchild/__main__.py` and figures out where to add `--version` (silent — Read/Grep)
+- bot reads `src/_1_800_operator/__main__.py` and figures out where to add `--version` (silent — Read/Grep)
 - proposes one or more Edits (or a Write) — confirmation prompts arrive, you approve each
-- optionally proposes a Bash run to verify (`python -m brainchild --version`) — you approve
+- optionally proposes a Bash run to verify (`python -m _1_800_operator --version`) — you approve
 - replies with the changed file paths + summary of the change + verification output
 
-**Pass signal:** `git diff` in the operator repo shows a real `--version` flag in `src/brainchild/__main__.py`; running `python -m brainchild --version` prints something (usually `0.1.0`); no worktree was created (track A operates directly on the user's tree).
+**Pass signal:** `git diff` in the operator repo shows a real `--version` flag in `src/_1_800_operator/__main__.py`; running `python -m _1_800_operator --version` prints something (usually `0.1.0`); no worktree was created (track A operates directly on the user's tree).
 
 **Say "done" when:** the bot reports done OR you stop it.
 
 **What I'll grep:**
 
 ```
-grep "PermissionChatHandler: asking user about\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -50
+grep "PermissionChatHandler: asking user about\|TIMING claude_cli_turn" /tmp/operator.log | tail -50
 ```
 
-You can leave the meeting after this test. **Revert the `--version` change** with `git checkout -- src/brainchild/__main__.py` after the session.
+You can leave the meeting after this test. **Revert the `--version` change** with `git checkout -- src/_1_800_operator/__main__.py` after the session.
 
 ---
 
 ## Session 2 — PM/sprint flow (~15 min)
 
-**Setup:** fresh Meet, `brainchild run claude`, captions ON (CC button).
+**Setup:** fresh Meet, `operator run claude`, captions ON (CC button).
 
 ### Test 2.0 — Pre-step: create a fixture Linear ticket
 
 In your Linear workspace, create a new issue with this exact content (you'll point the bot at it in test 2.1):
 
-- **Title:** Add `brainchild list-skills` subcommand to print enabled skills for the current bot
+- **Title:** Add `operator list-skills` subcommand to print enabled skills for the current bot
 - **Description:**
-  > Today users have to `brainchild edit <bot>` and read the YAML to know which skills are wired in. A `brainchild list-skills <bot>` subcommand should print the enabled skill names + which external paths are mounted, so users can confirm without opening the file.
+  > Today users have to `operator edit <bot>` and read the YAML to know which skills are wired in. A `operator list-skills <bot>` subcommand should print the enabled skill names + which external paths are mounted, so users can confirm without opening the file.
   >
-  > Acceptance: `brainchild list-skills claude` prints (1) bundled-library skills currently `enabled: true`, (2) `external_paths` with skill counts per path, (3) any locked-by-MCP entries from session-159 work.
+  > Acceptance: `operator list-skills claude` prints (1) bundled-library skills currently `enabled: true`, (2) `external_paths` with skill counts per path, (3) any locked-by-MCP entries from session-159 work.
 - Don't actually implement it. The ticket just needs to exist.
 
 Copy the ticket URL.
@@ -410,14 +410,14 @@ Copy the ticket URL.
 - replies: Size (XS/S/M/L/XL) + Files to touch + Blockers + Risks + Unknowns
 - no code in the reply
 
-**Pass signal:** size assigned (S or M is realistic); "Files to touch" names `src/brainchild/__main__.py` + `src/brainchild/pipeline/skills.py` or `config.py` (real files); at least one risk/unknown surfaced.
+**Pass signal:** size assigned (S or M is realistic); "Files to touch" names `src/_1_800_operator/__main__.py` + `src/_1_800_operator/pipeline/skills.py` or `config.py` (real files); at least one risk/unknown surfaced.
 
 **Say "done" when:** estimate is posted.
 
 **What I'll grep:**
 
 ```
-grep "PermissionChatHandler: asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -25
+grep "PermissionChatHandler: asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/operator.log | tail -25
 ```
 
 ---
@@ -426,13 +426,13 @@ grep "PermissionChatHandler: asking user about\|stream_event\|TIMING claude_cli_
 
 **Pre-step:** captions still streaming (CC on). Speak out loud (microphone on) for ~90 seconds about this imaginary feature — speak naturally, with pauses:
 
-> "OK so we want to add a stealth mode to brainchild. The idea is when stealth is on, the bot doesn't post an intro message when it joins, it doesn't post the failure banner, and it doesn't show its name in the participant list. The use case is sales calls where the user doesn't want the prospect to know an AI is in the room. Open question: should stealth also disable captions ingestion to be safe? And should we let users turn it on per-meeting via a CLI flag, or per-bot in config? I'm leaning per-meeting — `brainchild run claude --stealth <url>` — so it's an explicit decision each time. Goal would be ship a v1 of this within two weeks."
+> "OK so we want to add a stealth mode to operator. The idea is when stealth is on, the bot doesn't post an intro message when it joins, it doesn't post the failure banner, and it doesn't show its name in the participant list. The use case is sales calls where the user doesn't want the prospect to know an AI is in the room. Open question: should stealth also disable captions ingestion to be safe? And should we let users turn it on per-meeting via a CLI flag, or per-bot in config? I'm leaning per-meeting — `operator run claude --stealth <url>` — so it's an explicit decision each time. Goal would be ship a v1 of this within two weeks."
 
 You can paraphrase, but cover: stealth concept, the three behaviors it disables, the use case, the open question, the goal.
 
 **Trigger phrase (after speaking):**
 
-> turn the last 90 seconds of discussion into a PRD. read the meeting record at ~/.brainchild/history/
+> turn the last 90 seconds of discussion into a PRD. read the meeting record at ~/.operator/history/
 
 **Expected behavior:**
 
@@ -448,7 +448,7 @@ You can paraphrase, but cover: stealth concept, the three behaviors it disables,
 **What I'll grep:**
 
 ```
-grep "Read.*history\|MeetingRecord\|caption" /tmp/brainchild.log | tail -20
+grep "Read.*history\|MeetingRecord\|caption" /tmp/operator.log | tail -20
 ```
 
 Plus the JSONL — I'll check the bot's PRD reply has section headers and quotes real caption text.
@@ -475,7 +475,7 @@ Plus the JSONL — I'll check the bot's PRD reply has section headers and quotes
 **What I'll grep:**
 
 ```
-grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp/brainchild.log | tail -25
+grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp/operator.log | tail -25
 ```
 
 ---
@@ -502,7 +502,7 @@ grep "stream_event\|asking user about 'Bash'\|asking user about 'WebFetch'" /tmp
 **What I'll grep:**
 
 ```
-grep "asking user about\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -25
+grep "asking user about\|TIMING claude_cli_turn" /tmp/operator.log | tail -25
 ```
 
 You can leave the meeting after this test.
@@ -520,7 +520,7 @@ This one has the highest setup cost. ~15 min of prep before the meeting starts.
 **Step 2 — Create a project:**
 
 - Project type: Python
-- Project name: `brainchild-track-a-test`
+- Project name: `operator-track-a-test`
 - Copy the DSN.
 
 **Step 3 — Build the fixture trigger script:**
@@ -615,7 +615,7 @@ If it's missing, add it via Claude Code's mcp commands or the claude.ai connecto
 **What I'll grep:**
 
 ```
-grep "asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/brainchild.log | tail -40
+grep "asking user about\|stream_event\|TIMING claude_cli_turn" /tmp/operator.log | tail -40
 ```
 
 If you optionally want to test phase 5, reply `y` — claude will propose an Edit, chat-gated. Don't go that far unless you want extra coverage; the use-case check is the five-phase shape.
@@ -630,7 +630,7 @@ For each test:
 2. You open the Meet (or use the open one), do any pre-step the test calls for, type the trigger phrase verbatim into Meet chat, approve confirmation prompts as the test instructs.
 3. You watch the bot's reply.
 4. When the reply is complete (or has errored), you tell me **"done"**.
-5. I run the per-test grep against `/tmp/brainchild.log` + read the relevant slice of `~/.brainchild/history/<slug>.jsonl`.
+5. I run the per-test grep against `/tmp/operator.log` + read the relevant slice of `~/.operator/history/<slug>.jsonl`.
 6. I post a summary: did the right tools fire, did the chat round-trip behave, did the reply match the pass signal, any errors, any latency anomalies.
 7. We move to the next test.
 
@@ -649,11 +649,11 @@ If a test fails, I'll flag it in-line and we decide whether to retry, skip, or s
 ## Backup logs to grep manually
 
 ```bash
-# Live tail of the brainchild log
-tail -f /tmp/brainchild.log
+# Live tail of the operator log
+tail -f /tmp/operator.log
 
 # Bot's own replies in this meeting (replace <slug>):
-ls -t ~/.brainchild/history/ | head -3
-tail -f ~/.brainchild/history/<slug>.jsonl | jq 'select(.kind == "chat" and .sender == "claude")'
+ls -t ~/.operator/history/ | head -3
+tail -f ~/.operator/history/<slug>.jsonl | jq 'select(.kind == "chat" and .sender == "claude")'
 ```
 

@@ -1,6 +1,6 @@
 # Permission MCP spike — report
 
-*Phase 14.12.1 deliverable, session 165 (2026-04-26). Validates the host-callable permission contract for track A: brainchild as a Meet-front-end for the user's Claude Code, with inner tool-use confirmations routed through Meet chat.*
+*Phase 14.12.1 deliverable, session 165 (2026-04-26). Validates the host-callable permission contract for track A: operator as a Meet-front-end for the user's Claude Code, with inner tool-use confirmations routed through Meet chat.*
 
 ## Bottom line
 
@@ -87,7 +87,7 @@ The SDK path would be the cleaner architecture *if* track A pivoted to API-key a
 
 3. **Hooks support `permissionDecision: "defer"`** (Claude Code v2.1.89+). Defer surfaces a `deferred_tool_use` event to the calling process via stream-json. Not used here (synchronous bridge already works), but could simplify the IPC layer if we want to push the wait-for-user round-trip into stream-json itself instead of named pipes. Worth considering during 14.12.2 implementation.
 
-4. **`apiKeySource` field in stream-json's system-init event** is the definitive billing signal. brainchild should log this on every inner-claude spawn so we never accidentally ship a config that flips back to API billing. Worth turning into a startup assertion: if `apiKeySource != "none"` and we expected subscription, fail loud.
+4. **`apiKeySource` field in stream-json's system-init event** is the definitive billing signal. operator should log this on every inner-claude spawn so we never accidentally ship a config that flips back to API billing. Worth turning into a startup assertion: if `apiKeySource != "none"` and we expected subscription, fail loud.
 
 5. **Sub-agent dispatch sees the full sub-agent prompt in our hook** (we logged it during probe 2b: `{"description": "Write two test files", "prompt": "Create two files. First, use Write to create..."}`). So we can render *what* the sub-agent will do in chat for the user to gate, even though we lose visibility once it runs.
 
@@ -101,11 +101,11 @@ Build `pipeline/providers/claude_cli.py` that implements `LLMProvider` with the 
 
 1. **One `claude -p` subprocess per LLM turn**, invoked with `--settings <tempfile.json>` containing a PreToolUse hook pointing to a `pipeline/permission_bridge.py` script we ship.
 
-2. **Named-pipe IPC** between the bridge and the brainchild parent: bridge writes the tool_use details to a request pipe, blocks on a response pipe; chat_runner reads the request, posts the confirmation prompt to Meet chat using the same `_request_confirmation` flow we already have, awaits user reply, writes the decision to the response pipe.
+2. **Named-pipe IPC** between the bridge and the operator parent: bridge writes the tool_use details to a request pipe, blocks on a response pipe; chat_runner reads the request, posts the confirmation prompt to Meet chat using the same `_request_confirmation` flow we already have, awaits user reply, writes the decision to the response pipe.
 
 3. **Worktree sandboxing as the second line of defense.** Every track-A run gets its own per-session `.claude/worktrees/<adjective-noun>/` worktree (already supported via `--worktree`). Sub-agent opacity is contained because anything written goes into the sandbox.
 
-4. **Subscription-auth assertion at startup.** Read the system-init event's `apiKeySource` from stream-json and fail loud if it's not `"none"`. This catches any environment-variable leak (e.g., if `ANTHROPIC_API_KEY` ever ends up in the env brainchild passes to its subprocess) before it bills the user's API budget.
+4. **Subscription-auth assertion at startup.** Read the system-init event's `apiKeySource` from stream-json and fail loud if it's not `"none"`. This catches any environment-variable leak (e.g., if `ANTHROPIC_API_KEY` ever ends up in the env operator passes to its subprocess) before it bills the user's API budget.
 
 5. **Defer the `defer` decision pattern** to a future iteration. Synchronous IPC works today. If hook-spawn-per-tool-call latency becomes a problem (it shouldn't — the bridge script is ~10ms), revisit `defer` to push the wait into stream-json events.
 
@@ -121,13 +121,13 @@ Spike findings reduce 14.12.2's estimate from "2–3 days" to roughly **1.5–2 
 - Migration: drop bundled MCPs from claude bot, retire dead Chrome preflight: 1 hour
 - Tests: 2 hours
 
-The unknown is the system-prompt augmentation — passing brainchild's track-A `personality` + `ground_rules` into `claude -p`'s system prompt without conflicting with the user's `~/.claude/CLAUDE.md`. Several flags exist (`--system-prompt`, `--append-system-prompt`, `--append-system-prompt-file`); choosing the right one will need a small experiment but probably not its own spike.
+The unknown is the system-prompt augmentation — passing operator's track-A `personality` + `ground_rules` into `claude -p`'s system prompt without conflicting with the user's `~/.claude/CLAUDE.md`. Several flags exist (`--system-prompt`, `--append-system-prompt`, `--append-system-prompt-file`); choosing the right one will need a small experiment but probably not its own spike.
 
 ## Open questions for 14.12.2
 
 1. Does the subprocess-spawn-per-LLM-turn pattern work cleanly for streaming replies, or do we want a long-lived `--input-format stream-json` session with one process per meeting? The latter is more ergonomic but ties us to Anthropic's stream-json input contract more deeply. Recommend: spike both during 14.12.2 implementation, default to whichever has lower complexity.
 
-2. How does the inner-claude session interact with brainchild's meeting record JSONL? Today brainchild builds prompts from `MeetingRecord.tail(n)`. Under track A, do we still curate the prompt or do we trust inner-claude's own context loop (with the meeting record fed as either `--add-dir` or as the user-message stream)?
+2. How does the inner-claude session interact with operator's meeting record JSONL? Today operator builds prompts from `MeetingRecord.tail(n)`. Under track A, do we still curate the prompt or do we trust inner-claude's own context loop (with the meeting record fed as either `--add-dir` or as the user-message stream)?
 
 3. Does `--worktree` work with `claude -p` cleanly (the current `delegate_to_claude_code` MCP uses it, so almost certainly yes — but the parent invocation hasn't been tested)?
 

@@ -1,6 +1,6 @@
 # Top 10 Claude-in-a-Meeting Use Cases
 
-*Phase 15.10.3 deliverable, session 159. Doubles as the test script for Phase 14.8(e) — a brand-new user runs `brainchild run claude <fresh-meet-url>` against this list — and as raw material for the second hero-framing post of Phase 16.4 (launch).*
+*Phase 15.10.3 deliverable, session 159. Doubles as the test script for Phase 14.8(e) — a brand-new user runs `operator run claude <fresh-meet-url>` against this list — and as raw material for the second hero-framing post of Phase 16.4 (launch).*
 
 ## What "meeting use case" means here
 
@@ -14,7 +14,7 @@ A meeting changes the constraints:
 - **Output should land somewhere shared.** A diff, a Linear comment, a PR review, a Drive doc — not a local-only artifact.
 - **Context is collaborative.** Other people in the meeting will redirect mid-flight ("not that file, the other one"), so the bot needs to handle interjections gracefully.
 
-The ten use cases below are the highest-frequency Claude Code workflows from the research, **filtered for meeting fit** and **weighted by how well Brainchild's flagship `claude` agent can serve them today** (delegation via the bundled `claude-code` MCP, plus the user's auto-imported MCPs — typically Linear, GitHub, Sentry, Calendar, Drive, sometimes Figma/Slack).
+The ten use cases below are the highest-frequency Claude Code workflows from the research, **filtered for meeting fit** and **weighted by how well Operator's flagship `claude` agent can serve them today** (delegation via the bundled `claude-code` MCP, plus the user's auto-imported MCPs — typically Linear, GitHub, Sentry, Calendar, Drive, sometimes Figma/Slack).
 
 Ordering: roughly meeting-frequency × value. The first three are the ones every bug-standup / code-review / sprint-triage call will hit; the last three are higher-leverage but trigger less often.
 
@@ -130,13 +130,13 @@ Designer + dev meeting. The designer drops a Figma URL. The bot generates the en
 
 Stakeholder discussion. PM + eng + design talking through a feature. At the end, "draft a PRD from what we just talked about."
 
-**Trigger phrase:** `@claude turn the last 20 minutes into a PRD` (works because Brainchild's caption pipeline is on by default for the claude agent, so the bot has been listening).
+**Trigger phrase:** `@claude turn the last 20 minutes into a PRD` (works because Operator's caption pipeline is on by default for the claude agent, so the bot has been listening).
 
 **MCPs exercised:** `linear` (file as ticket draft) or `drive` (save as Doc); `gmail` (notify stakeholders, optional).
 
 **Pass/fail signal:** PRD posted (or linked) with: problem statement, goals, non-goals, proposed approach, acceptance criteria, open questions. Every claim should be traceable to something said in the call — if the bot invents a goal nobody mentioned, that's a fail.
 
-This one stretches Claude Code's typical surface (it leans on captions, which is Brainchild-specific) but matches a real meeting workflow stakeholders ask for repeatedly.
+This one stretches Claude Code's typical surface (it leans on captions, which is Operator-specific) but matches a real meeting workflow stakeholders ask for repeatedly.
 
 ---
 
@@ -154,11 +154,11 @@ Release review meeting or end-of-sprint demo. "What shipped this week?"
 
 ## What didn't make the cut (and why)
 
-- **Documentation generation (JSDoc / docstrings).** High-frequency in solo work, but not a meeting trigger — nobody calls a meeting to add docstrings. Better fit for `brainchild edit` + Claude Code locally.
+- **Documentation generation (JSDoc / docstrings).** High-frequency in solo work, but not a meeting trigger — nobody calls a meeting to add docstrings. Better fit for `operator edit` + Claude Code locally.
 - **Resume previous session / `--continue`.** Pure CLI ergonomics, no meeting analogue.
-- **Run on a schedule (Routines / GitHub Actions).** Cron-shaped, not meeting-shaped. The Brainchild equivalent is the scheduled-agent layer, separate from the in-meeting bot.
+- **Run on a schedule (Routines / GitHub Actions).** Cron-shaped, not meeting-shaped. The Operator equivalent is the scheduled-agent layer, separate from the in-meeting bot.
 - **Pipe in / pipe out (Unix utility mode).** Solo-at-terminal use case; useless when the trigger is voice-or-chat in a meeting.
-- **Image analysis / "what does this screenshot show?"** Plausible meeting use case (someone screen-shares an error), but Brainchild's chat panel doesn't currently surface images to the LLM, so this is gated on Phase 17+ work. Park.
+- **Image analysis / "what does this screenshot show?"** Plausible meeting use case (someone screen-shares an error), but Operator's chat panel doesn't currently surface images to the LLM, so this is gated on Phase 17+ work. Park.
 - **Custom subagent invocation (`/agents`).** Power-user feature; abstract too much for a meeting trigger. The functionality folds into use cases #1, #4, #6 implicitly when the user has those subagents configured.
 - **Worktree management (`--worktree`).** Use case #4 already covers the meeting-relevant slice (delegate-and-land); manual worktree juggling is solo-CLI work.
 
@@ -166,7 +166,7 @@ Release review meeting or end-of-sprint demo. "What shipped this week?"
 
 ## How to use this list
 
-**As the Phase 14.8(e) test script.** Run `brainchild run claude <fresh-meet-url>` on a clean second mac. For each of the ten cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #8 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
+**As the Phase 14.8(e) test script.** Run `operator run claude <fresh-meet-url>` on a clean second mac. For each of the ten cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #8 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
 
 **As launch-campaign material (Phase 16.4 second hero post).** The header framing — "Claude Code in your Google Meet" — is already locked. This list is the proof points: ten concrete, named meeting moments where the bot earns its seat. Pick the three highest-fit to your demo audience and lead with them.
 
