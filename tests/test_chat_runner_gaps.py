@@ -256,6 +256,67 @@ def test_handle_confirmation_affirmative_executes():
     print("PASS  test_handle_confirmation_affirmative_executes")
 
 
+def test_handle_confirmation_correction_path_llm_failure_closes_turn_and_notifies():
+    """If send_tool_result raises during the correction branch, the turn
+    heartbeat must close and the user must get a fallback chat line.
+
+    Previously the path logged + returned, leaking _turn_start_ts (so the
+    next turn's heartbeat would report stale elapsed time) and leaving
+    the user with no acknowledgment of their declined-tool reply.
+    """
+    mcp = MagicMock()
+    mcp.get_openai_tools.return_value = []
+    runner, _, llm = make_runner(mcp=mcp)
+    runner._pending_tool_call = {"id": "c-fail", "name": "srv__foo", "arguments": {}}
+    runner._turn_start_ts = time.time() - 0.1
+    runner._turn_count = 1
+    llm.send_tool_result.side_effect = RuntimeError("provider down")
+    sent = []
+    runner._send = lambda text, kind="chat": sent.append(text)
+
+    runner._handle_confirmation("no make it priority high")
+
+    assert runner._turn_start_ts is None, \
+        "Failed correction path must close the turn heartbeat"
+    assert any("couldn't reach the model" in s for s in sent), \
+        f"User must get a fallback line; got {sent}"
+    print("PASS  test_handle_confirmation_correction_path_llm_failure_closes_turn_and_notifies")
+
+
+def test_handle_confirmation_negation_with_affirmative_token_is_correction():
+    """'ok no don't do that' must NOT execute the tool.
+
+    The affirmative word set ({yes, ok, sure, ...}) and the phrase matchers
+    ('go ahead', 'do it') previously matched anywhere in the message, so a
+    negated reply containing 'ok' or 'do it' was misread as approval. The
+    negation gate ({no, nope, nah, stop, cancel, don't, dont, 'do not'})
+    must veto approval and route the reply to the correction branch.
+    """
+    cases = [
+        "ok no don't do that",
+        "yes don't",
+        "go ahead no actually wait",
+        "sure, but do not run it",
+        "approve? nah, cancel that",
+    ]
+    for text in cases:
+        mcp = MagicMock()
+        mcp.get_openai_tools.return_value = []
+        runner, _, llm = make_runner(mcp=mcp)
+        runner._pending_tool_call = {"id": "c-neg", "name": "srv__foo", "arguments": {}}
+        llm.send_tool_result.return_value = {"type": "text", "content": "let me try again"}
+        executed = []
+        runner._execute_and_respond = lambda tc: executed.append(tc)
+        runner._send = lambda text, kind="chat": None
+
+        runner._handle_confirmation(text)
+
+        assert executed == [], f"Tool must not execute for {text!r}"
+        assert llm.send_tool_result.called, \
+            f"Negated reply {text!r} must route to correction branch"
+    print("PASS  test_handle_confirmation_negation_with_affirmative_token_is_correction")
+
+
 def test_handle_confirmation_non_affirmative_is_correction_not_cancel():
     """Non-affirmative text → re-prompts LLM with correction signpost, NOT cancellation."""
     mcp = MagicMock()
@@ -626,6 +687,64 @@ def test_send_discards_own_message_on_connector_failure():
     print("PASS  test_send_discards_own_message_on_connector_failure")
 
 
+def test_send_serializes_concurrent_calls():
+    """_send: lock serializes connector.send_chat across threads.
+
+    Track A spawns the progress narrator on the provider pump thread,
+    which can call _send concurrently with the main poll loop. Playwright's
+    sync API is single-threaded by contract, so concurrent send_chat must
+    not interleave. We assert the lock is held while inside send_chat.
+    """
+    import threading as _t
+    runner, connector, _ = make_runner()
+    rec = MagicMock()
+    runner._record = rec
+
+    inside_send_at_call = []
+
+    def fake_send_chat(text):
+        # Lock must be held by the calling thread while we're inside
+        # send_chat. acquire(blocking=False) returning False means it's
+        # held somewhere — under our caller, that's correct.
+        acquired = runner._send_lock.acquire(blocking=False)
+        inside_send_at_call.append(not acquired)
+        if acquired:
+            runner._send_lock.release()
+        return f"id-{text}"
+
+    connector.send_chat.side_effect = fake_send_chat
+
+    threads = [_t.Thread(target=runner._send, args=(f"msg-{i}",)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(inside_send_at_call), \
+        "_send_lock must be held during connector.send_chat (got an interleaving)"
+    assert connector.send_chat.call_count == 8
+    print("PASS  test_send_serializes_concurrent_calls")
+
+
+def test_send_does_not_append_record_when_send_chat_fails():
+    """_send: failed send must not pollute the meeting record.
+
+    If we appended before send_chat and the send raised, the record would
+    hold a phantom assistant message the user never received — and the
+    LLM's next-turn replay would treat it as said. Record-append must
+    happen only after a successful send.
+    """
+    runner, connector, _ = make_runner()
+    rec = MagicMock()
+    runner._record = rec
+    connector.send_chat.side_effect = RuntimeError("chat panel gone")
+
+    runner._send("phantom message")
+
+    rec.append.assert_not_called()
+    print("PASS  test_send_does_not_append_record_when_send_chat_fails")
+
+
 # ===========================================================================
 # M7 — Phase 15.7.2 proactive failure banner
 # ===========================================================================
@@ -734,6 +853,8 @@ if __name__ == "__main__":
         test_request_confirmation_renders_all_args_and_truncates_long_values,
         test_request_confirmation_no_truncation_on_short_args,
         test_handle_confirmation_affirmative_executes,
+        test_handle_confirmation_negation_with_affirmative_token_is_correction,
+        test_handle_confirmation_correction_path_llm_failure_closes_turn_and_notifies,
         test_handle_confirmation_non_affirmative_is_correction_not_cancel,
         test_pending_confirmation_messages_tagged_in_record,
         # M3
@@ -753,6 +874,8 @@ if __name__ == "__main__":
         # M6
         test_send_tracks_own_message_and_appends_record,
         test_send_discards_own_message_on_connector_failure,
+        test_send_does_not_append_record_when_send_chat_fails,
+        test_send_serializes_concurrent_calls,
         # M7
         test_failure_banner_silent_when_no_mcp,
         test_failure_banner_silent_when_no_failures,

@@ -150,6 +150,14 @@ class ChatRunner:
         self._narration_buffer: list[tuple[str, dict]] = []
         self._narration_lock = threading.Lock()
         self._narration_auto_approve: set[str] = set()
+        # Serializes _send across threads. Playwright's sync API is
+        # single-threaded by contract; under track A the progress
+        # narrator (provider pump thread) and the main poll loop both
+        # call _send, so concurrent connector.send_chat would race.
+        # The lock also keeps _own_messages add + send_chat + record
+        # append atomic, which prevents a partial-state observer from
+        # the read loop seeing one without the other.
+        self._send_lock = threading.Lock()
 
     def _wire_track_a_permissions(self):
         """If the LLM provider is ClaudeCLIProvider, plug in the chat handler.
@@ -763,9 +771,22 @@ class ChatRunner:
         lower = text.lower()
         words = set(re.findall(r"\b\w+\b", lower))
 
-        affirmative = bool(words & {
+        affirmative_match = bool(words & {
             "yes", "ok", "sure", "approve", "confirmed", "yep", "yeah"
         }) or "go ahead" in lower or "do it" in lower
+        # Negation gate: "ok no", "yes don't", "go ahead no actually"
+        # otherwise count as approval because an affirmative token is
+        # present. If any negation is also present, fall through to the
+        # correction branch and let the LLM disambiguate. Contractions
+        # are matched via substring because `\b\w+\b` splits "don't"
+        # into {don, t}.
+        has_negative = (
+            bool(words & {"no", "nope", "nah", "stop", "cancel"})
+            or "don't" in lower
+            or "dont" in lower
+            or "do not" in lower
+        )
+        affirmative = affirmative_match and not has_negative
 
         tc = self._pending_tool_call
 
@@ -790,7 +811,11 @@ class ChatRunner:
                     on_paragraph=self._streaming_callback(),
                 )
             except Exception as e:
+                # Without this branch the heartbeat would leak (turn never
+                # closes) and the user would be left silent after declining.
                 log.warning(f"ChatRunner: correction result call failed: {e}")
+                self._send("Got your reply — but I couldn't reach the model to follow up.")
+                self._emit_turn_done(failed=True)
                 return
 
             self._dispatch_result(result)
@@ -1006,21 +1031,25 @@ class ChatRunner:
         newlines etc.) doesn't break the comparison.
         """
         text_normalized = text.strip()
-        self._own_messages.add(text_normalized)
-        if self._record is not None:
-            self._record.append(sender=config.AGENT_NAME, text=text, kind=kind)
-        try:
-            msg_id = self._connector.send_chat(text)
-        except Exception as e:
-            log.error(f"ChatRunner: send_chat failed: {e}")
-            self._own_messages.discard(text_normalized)
-            return
-        if msg_id:
-            self._seen_ids.add(msg_id)
-        # Bookkeeping for the progress narrator: any user-facing send
-        # resets the silence timer so the narrator only speaks during
-        # actually quiet stretches.
-        self._last_send_time = time.time()
+        with self._send_lock:
+            self._own_messages.add(text_normalized)
+            try:
+                msg_id = self._connector.send_chat(text)
+            except Exception as e:
+                log.error(f"ChatRunner: send_chat failed: {e}")
+                self._own_messages.discard(text_normalized)
+                return
+            # Record only after successful send — otherwise the LLM's next
+            # turn replays a phantom assistant message the user never
+            # received.
+            if self._record is not None:
+                self._record.append(sender=config.AGENT_NAME, text=text, kind=kind)
+            if msg_id:
+                self._seen_ids.add(msg_id)
+            # Bookkeeping for the progress narrator: any user-facing send
+            # resets the silence timer so the narrator only speaks during
+            # actually quiet stretches.
+            self._last_send_time = time.time()
 
     def _record_mcp_outcome(
         self,
