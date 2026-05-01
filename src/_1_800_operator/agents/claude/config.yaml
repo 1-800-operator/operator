@@ -1,0 +1,108 @@
+# Claude — track A. Claude Code IS the meeting LLM (run via the `claude`
+# CLI under your Claude Max subscription). MCP servers and skills are
+# inherited live from your ~/.claude/ setup; this file just toggles them
+# on/off and configures meeting-scope permissions + voice.
+#
+# Requires the `claude` CLI installed and logged in — `operator run claude`
+# hard-fails without it.
+
+agent:
+  name: "Claude"
+  trigger_phrase: "@claude"
+  first_contact_hint: "(First time talking to {first_name} — greet them by name once, then drop it.)"
+  tagline: "Claude Code, in your meeting — your full setup, gated by chat confirmation"
+  intro_on_join: true
+  # Voice — controls how the bot communicates across three surfaces:
+  # progress narrator, confirmation prompts, and reply content.
+  #   plain     — meeting-friendly. Translates tool names and args into
+  #               plain English. e.g. "Want me to grab the Sentry issue?
+  #               (yes/no)". Reply content steered toward everyday
+  #               language by the ground_rules directive below.
+  #   technical — developer-flavored. Tool names verbatim with full
+  #               parameter dump in confirmation prompts. Reply content
+  #               keeps file:line citations and code blocks. Useful when
+  #               you want full transparency over readability.
+  voice: plain
+
+llm:
+  # Track A: claude is the LLM. No model / history_messages — claude picks
+  # its own model and owns its own context window.
+  provider: "claude_cli"
+
+# Captions on by default — Claude listens to spoken conversation so chat
+# questions like "what did we just decide?" or "draft a commit for what I
+# just described" have the transcript as context. Flip to false to make
+# Claude only see chat messages.
+transcript:
+  captions_enabled: true
+
+# Permission policy — meeting-scope tunable on top of (a) operator's
+# PreToolUse hook (internal plumbing, always on) and (b) your native
+# ~/.claude/settings.json rules (compose automatically via Claude Code's
+# settings hierarchy).
+#
+# auto_approve: tools that run silently with no chat confirmation.
+# always_ask:   tools that always pause for "yes/no" in meeting chat.
+# Anything else → defaults to "ask in chat" (never silent).
+#
+# Edit this block via `operator edit claude` for per-tool tightening.
+# Custom hook layering is not exposed here — the engineer / pm bots cover
+# that via their delegate_to_claude_code path.
+permissions:
+  auto_approve:
+    - Read
+    - Grep
+    - Glob
+    - LS
+    - WebSearch
+    # ToolSearch loads MCP tool schemas on demand — pure metadata, no side
+    # effects. Without auto-approving it the user gets a stray "Run
+    # ToolSearch?" prompt every time the model first reaches for a tool from
+    # any deferred MCP server (Sentry, Linear, etc).
+    - ToolSearch
+  always_ask:
+    - Bash
+    - Write
+    - Edit
+    - MultiEdit
+    - NotebookEdit
+    - WebFetch
+    - Task
+  # Both lists support fnmatch glob patterns — `mcp__sentry__get_*`
+  # auto-approves every read tool from the Sentry MCP server. always_ask
+  # is checked first, so an explicit deny pattern beats a broad allow.
+  # See README → "MCP permissions" for the full pattern syntax.
+
+# MCP servers — toggle-only overlay under track A. The slim `enabled` flag
+# is the user's authored truth; command/args/env are rediscovered fresh
+# every boot from cwd-aware `discover_all_mcps()`. JSON-keyed servers
+# (~/.claude.json#mcpServers + .mcp.json) flow `enabled: false` into the
+# inner CLI's `disabledMcpjsonServers` so the disable actually stops the
+# CLI from auto-loading them. claude.ai-hosted servers (Gmail/Drive/
+# Linear etc. from `claude mcp list`) have no known runtime disable knob
+# today, so toggling them off in operator hides them from operator's
+# banner + preflight but the CLI still loads them — cosmetic until we
+# find a CLI surface or add an LLM-side guard.
+#
+# The list is empty in the shipped config; on first boot operator reads
+# the user's ~/.claude.json + `claude mcp list` and writes a toggle entry
+# per server here, all defaulted to enabled.
+mcp_servers: {}
+
+# Skills — under track A, per-skill enable/disable is not yet supported by
+# Claude Code (open feature request: github.com/anthropics/claude-code/issues/43928).
+# This block is a placeholder: claude loads everything from ~/.claude/skills/
+# automatically. The shape stays compatible with config.py's parser.
+skills:
+  enabled: []
+  external_paths:
+    - ~/.claude/skills
+  progressive_disclosure: true
+
+# Personality / ground rules — USER additions to the system prompt.
+# The framework voice + always-on rules (the multi-paragraph block that
+# tells the inner Claude it's in a Meet, response shape, self-narration
+# rules, etc.) lives in `framework.py:FRAMEWORK_SYSTEM_PROMPT` and is
+# composed under the hood. Anything below is appended on top.
+personality: ""
+ground_rules: ""

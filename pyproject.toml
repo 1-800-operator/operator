@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "brainchild"
+name = "1-800-operator"
 dynamic = ["version"]
 description = "Chat-based AI meeting participant for Google Meet — joins, reads chat, replies via an LLM with MCP tool access."
 readme = "README.md"
@@ -43,26 +43,26 @@ dependencies = [
 ]
 
 [project.scripts]
-brainchild = "brainchild.__main__:main"
+operator = "_1_800_operator.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/jojoshapiro/brainchild"
-Repository = "https://github.com/jojoshapiro/brainchild"
+Homepage = "https://github.com/1-800-operator/operator"
+Repository = "https://github.com/1-800-operator/operator"
 
 [tool.hatch.version]
-path = "src/brainchild/__init__.py"
+path = "src/_1_800_operator/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/brainchild"]
+packages = ["src/_1_800_operator"]
 # Hatchling's default already bundles non-.py files that live inside the
 # declared package dir, so agents/**/*.{yaml,md,txt,env.example} ship
 # automatically. `force-include` was tried and caused duplicate zip entries.
 # Verify after any future build-backend change: `python -m zipfile -l
-# dist/brainchild-*.whl | grep agents/` must list pm, engineer, designer.
+# dist/1_800_operator-*.whl | grep agents/` must list pm, engineer, designer.
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/brainchild",
+    "src/_1_800_operator",
     "README.md",
     "LICENSE",
     "SECURITY.md",

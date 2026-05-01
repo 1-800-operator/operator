@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Operator — provisional launcher.
+# Resolves its own symlink so it works when installed on $PATH,
+# then activates the repo venv and dispatches to __main__.py.
+set -e
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Preserve the user's invocation cwd: the `claude` agent's path-based
+# CLAUDE.md mirror resolves `./CLAUDE.md` against `Path.cwd()` to match
+# Claude Code's project-scope semantics. Activating the venv from
+# $REPO_DIR is fine, but we exec python from the user's cwd so `./`
+# means what they expect.
+USER_CWD="$PWD"
+cd "$REPO_DIR"
+# shellcheck disable=SC1091
+source venv/bin/activate
+cd "$USER_CWD"
+export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python -m _1_800_operator "$@"
