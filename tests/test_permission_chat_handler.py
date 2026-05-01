@@ -7,7 +7,7 @@ chat-routing logic.
 
 Run:
     source venv/bin/activate
-    BRAINCHILD_BOT=claude python tests/test_permission_chat_handler.py
+    OPERATOR_BOT=claude python tests/test_permission_chat_handler.py
 """
 import os
 import sys
@@ -16,7 +16,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.permission_chat_handler import (
+from _1_800_operator.pipeline.permission_chat_handler import (
     PermissionChatHandler,
     _is_yes,
     _format_confirmation,

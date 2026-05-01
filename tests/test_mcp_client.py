@@ -15,7 +15,7 @@ import tempfile
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 # ── Setup: write a minimal MCP server to a temp file ──────────────────
 # This server exposes two tools: "echo" (returns its input) and "fail" (always errors).
@@ -73,7 +73,7 @@ _server_file.write(_SERVER_CODE)
 _server_file.close()
 
 # ── Patch config.MCP_SERVERS before importing MCPClient ───────────────
-from brainchild import config
+from _1_800_operator import config
 config.MCP_SERVERS = {
     "test": {
         "command": sys.executable,
@@ -82,7 +82,7 @@ config.MCP_SERVERS = {
     }
 }
 
-from brainchild.pipeline.mcp_client import MCPClient, MCPToolError
+from _1_800_operator.pipeline.mcp_client import MCPClient, MCPToolError
 
 passed = 0
 failed = 0
@@ -163,7 +163,7 @@ except MCPToolError as e:
 
 # ── Test 6: Runtime failure backoff ───────────────────────────────────
 print("\n6. Runtime failure backoff")
-from brainchild.pipeline.mcp_client import RUNTIME_FAILURE_THRESHOLD
+from _1_800_operator.pipeline.mcp_client import RUNTIME_FAILURE_THRESHOLD
 
 # Reset counter state so prior failing tests don't pollute this one.
 client._consecutive_errors.clear()

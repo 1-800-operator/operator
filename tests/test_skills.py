@@ -4,7 +4,7 @@ Run: python tests/test_skills.py
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 import logging
 import tempfile
@@ -22,7 +22,7 @@ def _write_skill(folder: Path, name: str, description: str, body: str = "do the 
 
 
 def test_happy_path_single_folder():
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "commit"
@@ -36,7 +36,7 @@ def test_happy_path_single_folder():
 
 
 def test_parent_dir_scan():
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         parent = Path(tmp)
@@ -49,7 +49,7 @@ def test_parent_dir_scan():
 
 
 def test_missing_path_warns_no_crash(caplog_list):
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
     skills = load_skills(
         None,
         external_paths=["/nonexistent/path/that/does/not/exist"],
@@ -61,7 +61,7 @@ def test_missing_path_warns_no_crash(caplog_list):
 
 
 def test_malformed_yaml_skipped(caplog_list):
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "bad"
@@ -75,7 +75,7 @@ def test_malformed_yaml_skipped(caplog_list):
 
 
 def test_missing_fields_skipped(caplog_list):
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "incomplete"
@@ -88,7 +88,7 @@ def test_missing_fields_skipped(caplog_list):
 
 
 def test_duplicate_last_wins(caplog_list):
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         a = Path(tmp) / "a" / "commit"
@@ -103,7 +103,7 @@ def test_duplicate_last_wins(caplog_list):
 
 
 def test_deep_nesting_ignored():
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         parent = Path(tmp)
@@ -115,7 +115,7 @@ def test_deep_nesting_ignored():
 
 
 def test_allowed_tools_warn(caplog_list):
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "with-tools"
@@ -133,8 +133,8 @@ def test_allowed_tools_warn(caplog_list):
 
 def test_llm_inject_skills_menu():
     """Progressive mode puts the menu (names + descriptions) in the system prompt, not the bodies."""
-    from brainchild.pipeline.llm import LLMClient
-    from brainchild.pipeline.skills import Skill
+    from _1_800_operator.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.skills import Skill
 
     llm = LLMClient(MagicMock())
     base = llm._system_prompt
@@ -151,8 +151,8 @@ def test_llm_inject_skills_menu():
 
 def test_llm_inject_skills_full():
     """Non-progressive mode inlines the full skill body."""
-    from brainchild.pipeline.llm import LLMClient
-    from brainchild.pipeline.skills import Skill
+    from _1_800_operator.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.skills import Skill
 
     llm = LLMClient(MagicMock())
     skills = [Skill(name="x", description="d", body="FULL BODY TEXT")]
@@ -163,8 +163,8 @@ def test_llm_inject_skills_full():
 
 def test_load_skill_tool_only_when_progressive_with_skills():
     """_tools_for_llm exposes load_skill iff progressive_disclosure AND skills loaded."""
-    from brainchild.pipeline.chat_runner import ChatRunner, LOAD_SKILL_TOOL
-    from brainchild.pipeline.skills import Skill
+    from _1_800_operator.pipeline.chat_runner import ChatRunner, LOAD_SKILL_TOOL
+    from _1_800_operator.pipeline.skills import Skill
 
     # No skills — no load_skill tool (even when MCP is absent, we return None).
     runner = ChatRunner(connector=MagicMock(), llm=MagicMock(), mcp_client=None, skills=[])
@@ -195,8 +195,8 @@ def test_call_rate_sanity():
     should count a slash-invoke. This is the regression hook for watching whether
     the model over-calls load_skill. Real call-rate is provider-driven — we only
     verify our local counters don't increment on unrelated messages here."""
-    from brainchild.pipeline.chat_runner import ChatRunner
-    from brainchild.pipeline.skills import Skill
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.skills import Skill
 
     runner = ChatRunner(
         connector=MagicMock(), llm=MagicMock(), mcp_client=None,
@@ -227,8 +227,8 @@ def test_call_rate_sanity():
 
 
 def test_slash_invocation_counts_as_load():
-    from brainchild.pipeline.chat_runner import ChatRunner
-    from brainchild.pipeline.skills import Skill
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.skills import Skill
 
     runner = ChatRunner(
         connector=MagicMock(), llm=MagicMock(), mcp_client=None,
@@ -256,7 +256,7 @@ def test_slash_invocation_counts_as_load():
 
 def test_no_frontmatter_skipped(caplog_list):
     """File that doesn't start with '---' is skipped with a 'missing frontmatter' warning."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "no-fm"
@@ -270,7 +270,7 @@ def test_no_frontmatter_skipped(caplog_list):
 
 def test_unterminated_frontmatter_skipped(caplog_list):
     """'---' opens but is never closed → skipped with 'unterminated frontmatter' warning."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "unterminated"
@@ -284,7 +284,7 @@ def test_unterminated_frontmatter_skipped(caplog_list):
 
 def test_non_dict_frontmatter_skipped(caplog_list):
     """Frontmatter that parses as a list (or any non-mapping) is skipped."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "listy"
@@ -298,7 +298,7 @@ def test_non_dict_frontmatter_skipped(caplog_list):
 
 def test_allowed_tools_string_parses_comma_split():
     """allowed-tools declared as a comma-separated string is split and loaded."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "string-tools"
@@ -314,7 +314,7 @@ def test_allowed_tools_string_parses_comma_split():
 
 def test_empty_parent_folder_warns(caplog_list):
     """Parent folder with no SKILL.md anywhere → warns 'no SKILL.md found' and returns []."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         parent = Path(tmp)
@@ -356,7 +356,7 @@ def _run_with_caplog(test_fn):
 
 def test_enabled_filters_to_named_subset():
     """enabled_names keeps only the named subset; non-matching discovered skills drop."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -371,7 +371,7 @@ def test_enabled_filters_to_named_subset():
 
 def test_enabled_preserves_declared_order():
     """Output order matches enabled_names order, not filesystem order."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -384,7 +384,7 @@ def test_enabled_preserves_declared_order():
 
 def test_enabled_none_returns_all(caplog_list):
     """None means 'return all discovered' — wizard scan mode."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -397,7 +397,7 @@ def test_enabled_none_returns_all(caplog_list):
 
 def test_enabled_unknown_name_warns_and_drops(caplog_list):
     """Enabled name with no matching candidate WARNs once and is dropped."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -410,7 +410,7 @@ def test_enabled_unknown_name_warns_and_drops(caplog_list):
 
 def test_relative_external_path_warns_and_skips(caplog_list):
     """Relative external_paths entry is CWD-dependent → WARN + skip."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     skills = load_skills(
         None,
@@ -425,13 +425,13 @@ def test_relative_external_path_warns_and_skips(caplog_list):
 
 def test_tilde_external_path_expands(caplog_list):
     """Tilde-prefixed entries expand to $HOME. Nonexistent ones still WARN."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     # Use a guaranteed-nonexistent subpath so we test the expansion path
     # without polluting the user's real ~/.
     skills = load_skills(
         None,
-        external_paths=["~/.brainchild-test-dir-that-does-not-exist-92837"],
+        external_paths=["~/.operator-test-dir-that-does-not-exist-92837"],
         shared_library_dir=Path("/nonexistent-test-lib"),
     )
     assert skills == []
@@ -443,7 +443,7 @@ def test_tilde_external_path_expands(caplog_list):
 
 def test_shared_library_scanned_first(caplog_list):
     """Shared library is scanned before external_paths; external_paths override."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         lib = Path(tmp) / "library"
@@ -463,7 +463,7 @@ def test_shared_library_scanned_first(caplog_list):
 
 def test_shared_library_skills_without_external():
     """Library-only skills are selectable via enabled_names."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         lib = Path(tmp) / "library"
@@ -479,7 +479,7 @@ def test_project_scope_skills_walked_via_cwd():
     Code skills surface without needing a config edit. Mirrors the cwd-aware
     walk we do for project-scope MCPs.
     """
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         proj = Path(tmp)
@@ -499,7 +499,7 @@ def test_project_scope_skills_override_external_on_collision():
     """Project scope wins on name collision (last-wins, project comes after
     external in source order). Mirrors project-scope MCP precedence.
     """
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         ext = Path(tmp) / "external"
@@ -520,7 +520,7 @@ def test_project_scope_skills_override_external_on_collision():
 
 def test_empty_external_paths_with_missing_library():
     """No library, no external_paths → empty result, no crash."""
-    from brainchild.pipeline.skills import load_skills
+    from _1_800_operator.pipeline.skills import load_skills
 
     with tempfile.TemporaryDirectory() as tmp:
         fake_lib = Path(tmp) / "never-created"

@@ -29,11 +29,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.providers.claude_cli import (
+from _1_800_operator.pipeline.providers.claude_cli import (
     ClaudeCLIProvider,
     ClaudeCLINotFoundError,
 )
-from brainchild.pipeline.providers.openai import OpenAIProvider  # noqa: F401  (import side effects: registers in __init__)
+from _1_800_operator.pipeline.providers.openai import OpenAIProvider  # noqa: F401  (import side effects: registers in __init__)
 
 
 def _skip_if_no_claude():
@@ -216,8 +216,8 @@ def test_permission_handler_deny():
 
 def test_build_provider_selects_claude_cli(monkeypatch_attrs):
     """build_provider() returns a ClaudeCLIProvider when config.LLM_PROVIDER == 'claude_cli'."""
-    from brainchild import config
-    from brainchild.pipeline.providers import build_provider
+    from _1_800_operator import config
+    from _1_800_operator.pipeline.providers import build_provider
 
     saved = {k: getattr(config, k) for k in monkeypatch_attrs}
     try:

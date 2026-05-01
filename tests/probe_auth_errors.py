@@ -41,7 +41,7 @@ PROBES = [
         "name": "linear-mcp-remote",
         "command": "npx",
         "args": ["-y", "mcp-remote", "https://mcp.linear.app/sse"],
-        "env": {"MCP_REMOTE_CONFIG_DIR": "/tmp/brainchild_probe_empty_cache"},
+        "env": {"MCP_REMOTE_CONFIG_DIR": "/tmp/operator_probe_empty_cache"},
         "tool": "list_teams",
         "tool_args": {},
         "cwd": REPO,

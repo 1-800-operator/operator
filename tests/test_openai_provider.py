@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import openai
 
-from brainchild.pipeline.providers import (
+from _1_800_operator.pipeline.providers import (
     OpenAIProvider,
     ContextOverflowError,
     ProviderResponse,
@@ -62,7 +62,7 @@ def test_system_prompt_prepended_as_system_message():
     client.chat.completions.create.return_value = _openai_response(content="ok")
 
     provider.complete(
-        system="You are Brainchild.",
+        system="You are Operator.",
         messages=[{"role": "user", "content": "hi"}],
         model="gpt-4o",
         max_tokens=60,
@@ -70,7 +70,7 @@ def test_system_prompt_prepended_as_system_message():
 
     kwargs = client.chat.completions.create.call_args.kwargs
     sent = kwargs["messages"]
-    assert sent[0] == {"role": "system", "content": "You are Brainchild."}
+    assert sent[0] == {"role": "system", "content": "You are Operator."}
     assert sent[1] == {"role": "user", "content": "hi"}
     assert kwargs["model"] == "gpt-4o"
     assert kwargs["max_tokens"] == 60

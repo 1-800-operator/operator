@@ -19,11 +19,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.picker import Choice, select_many
-from brainchild.pipeline.setup import (
+from _1_800_operator.pipeline.picker import Choice, select_many
+from _1_800_operator.pipeline.setup import (
     WizardState,
     _mcp_choice,
     _required_mcps_from_skills,
@@ -113,7 +113,7 @@ def _no_shared_library():
     """Redirect DEFAULT_SHARED_LIBRARY to a nonexistent path so the
     aggregator doesn't pick up the real user library during tests.
     """
-    from brainchild.pipeline import skills as skills_mod
+    from _1_800_operator.pipeline import skills as skills_mod
     original = skills_mod.DEFAULT_SHARED_LIBRARY
     skills_mod.DEFAULT_SHARED_LIBRARY = Path("/nonexistent-test-lib-918")
     try:

@@ -12,14 +12,14 @@ the late-bind fix changes — the JS observer hasn't moved.
 import os
 import sys
 
-# config.py hard-exits at import time if BRAINCHILD_BOT is unset; the adapter
+# config.py hard-exits at import time if OPERATOR_BOT is unset; the adapter
 # import below pulls it in transitively. Pin a bundled agent so the test is
 # self-contained instead of requiring the CLI wrapper.
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.connectors.macos_adapter import MacOSAdapter
+from _1_800_operator.connectors.macos_adapter import MacOSAdapter
 
 
 def _make_adapter():

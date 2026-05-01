@@ -13,7 +13,7 @@ whose `command`/`args` can't actually resolve on a clean install:
     because `npx -y <pkg>@<ver>` is resolved at subprocess time by node;
     version pinning is validated instead.
 
-Scope: every MCP in every `src/brainchild/agents/*/config.yaml`,
+Scope: every MCP in every `src/_1_800_operator/agents/*/config.yaml`,
 INCLUDING `enabled: false` blocks. If we ship the definition, it has to
 work — otherwise the wizard flips it on and the user hits a boot error.
 
@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import yaml  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BUNDLED_AGENTS_DIR = REPO_ROOT / "src" / "brainchild" / "agents"
+BUNDLED_AGENTS_DIR = REPO_ROOT / "src" / "_1_800_operator" / "agents"
 
 
 def _iter_bundled_configs():
@@ -78,7 +78,7 @@ def _classify_command(cmd: str, args: list) -> tuple[str, str]:
             return "fail", (
                 f"python script args[0]={first!r} is a relative path. "
                 f"Relative paths resolve against CWD which changes once "
-                f"brainchild is installed via `uv tool install`. Use "
+                f"operator is installed via `uv tool install`. Use "
                 f"`-m <module>` form instead."
             )
         if not os.path.exists(first):

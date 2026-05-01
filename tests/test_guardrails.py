@@ -11,10 +11,10 @@ Run:
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 from unittest.mock import MagicMock
-from brainchild.pipeline.guardrails import is_text_file_path, validate_tool_result
+from _1_800_operator.pipeline.guardrails import is_text_file_path, validate_tool_result
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def test_validate_low_nonprintable():
 # ---------------------------------------------------------------------------
 
 def test_mcp_blocks_binary_path():
-    from brainchild.pipeline.mcp_client import MCPClient, MCPToolError
+    from _1_800_operator.pipeline.mcp_client import MCPClient, MCPToolError
 
     client = MCPClient()
     # Register a fake server and tool
@@ -185,7 +185,7 @@ def test_mcp_blocks_binary_path():
 # ---------------------------------------------------------------------------
 
 def test_mcp_allows_text_path():
-    from brainchild.pipeline.mcp_client import MCPClient
+    from _1_800_operator.pipeline.mcp_client import MCPClient
 
     client = MCPClient()
     handle = MagicMock()
@@ -206,7 +206,7 @@ def test_mcp_allows_text_path():
 # ---------------------------------------------------------------------------
 
 def test_mcp_allows_extensionless():
-    from brainchild.pipeline.mcp_client import MCPClient
+    from _1_800_operator.pipeline.mcp_client import MCPClient
 
     client = MCPClient()
     handle = MagicMock()
@@ -227,13 +227,13 @@ def test_mcp_allows_extensionless():
 # ---------------------------------------------------------------------------
 
 def test_llm_blocks_binary_result():
-    from brainchild.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.llm import LLMClient
 
     provider = MagicMock()
     llm = LLMClient(provider)
 
     # Seed an in-flight tool call in the scratchpad
-    from brainchild.pipeline.providers import ProviderResponse, ToolCall
+    from _1_800_operator.pipeline.providers import ProviderResponse, ToolCall
     llm._scratch = [{
         "role": "assistant",
         "content": None,
@@ -264,12 +264,12 @@ def test_llm_blocks_binary_result():
 # ---------------------------------------------------------------------------
 
 def test_llm_passes_clean_result():
-    from brainchild.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.llm import LLMClient
 
     provider = MagicMock()
     llm = LLMClient(provider)
 
-    from brainchild.pipeline.providers import ProviderResponse, ToolCall
+    from _1_800_operator.pipeline.providers import ProviderResponse, ToolCall
     llm._scratch = [{
         "role": "assistant",
         "content": None,
@@ -360,7 +360,7 @@ def test_validate_tab_newline_cr_not_counted_as_nonprintable():
 def test_log_rejection_emits_warning_with_context():
     """log_rejection must emit a WARNING carrying stage, tool, reason, and args."""
     import logging
-    from brainchild.pipeline.guardrails import log_rejection
+    from _1_800_operator.pipeline.guardrails import log_rejection
 
     # Capture records from the guardrails logger at WARNING level.
     captured = []
@@ -369,7 +369,7 @@ def test_log_rejection_emits_warning_with_context():
         def emit(self, record):
             captured.append(record)
 
-    guard_log = logging.getLogger("brainchild.pipeline.guardrails")
+    guard_log = logging.getLogger("_1_800_operator.pipeline.guardrails")
     h = _Handler(level=logging.WARNING)
     saved_level = guard_log.level
     guard_log.setLevel(logging.WARNING)

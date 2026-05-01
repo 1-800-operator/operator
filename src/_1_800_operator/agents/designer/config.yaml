@@ -67,7 +67,7 @@ mcp_servers:
     # and logged in. If not, this URL is surfaced in the status screen.
     credentials_url: "https://docs.claude.com/en/docs/claude-code/overview"
     command: "python"
-    args: ["-m", "operator.agents.engineer.claude_code"]
+    args: ["-m", "_1_800_operator.agents.engineer.claude_code"]
     env:
       # bypassPermissions = auto-approve every tool (incl. Bash). acceptEdits =
       # file edits auto-run, Bash is blocked. Operator confirm-gates each

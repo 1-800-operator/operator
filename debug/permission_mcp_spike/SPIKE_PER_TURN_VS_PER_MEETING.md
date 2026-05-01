@@ -44,7 +44,7 @@ process cleanly.
 
 ## What the latency numbers mean for a real meeting
 
-A typical Brainchild meeting averages 5–15 LLM turns once you count tool-call
+A typical Operator meeting averages 5–15 LLM turns once you count tool-call
 chains and follow-up clarifications. Modeling both at 10 turns:
 
 - **Per-turn (A):** ~54s of pure LLM latency, ~5s minimum response time on
@@ -87,7 +87,7 @@ queue-based) — once that scaffolding exists the marginal cost of B drops.
 | Subprocess crashes mid-meeting | Next turn just spawns a new one — invisible to user. | Need to detect, restart, and re-feed history (claude doesn't expose its session memory to us, so we must rebuild from JSONL). |
 | Dead inner-claude (hung) | Bounded by 120s timeout, parent moves on. | Long-lived hang requires separate watchdog; tearing down the process discards in-flight context. |
 | Auth re-login mid-meeting | Caught at next spawn. | Caught only at restart, which we'd trigger ourselves. |
-| Brainchild parent crashes / restart | No state to lose; spawn fresh on next turn. | Subprocess orphaned (claude detects parent EOF and exits) — full meeting context lost; must rebuild from JSONL on restart. |
+| Operator parent crashes / restart | No state to lose; spawn fresh on next turn. | Subprocess orphaned (claude detects parent EOF and exits) — full meeting context lost; must rebuild from JSONL on restart. |
 | Sandbox / cwd handling | Set per spawn — easy to give each turn a fresh worktree. | Set once at spawn — harder to swap mid-meeting. Probably fine since worktree is meeting-scoped anyway. |
 
 ## Prompt-curation question (resolved by choice)

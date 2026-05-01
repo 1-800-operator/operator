@@ -23,12 +23,12 @@ Run:
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 import time
 from unittest.mock import MagicMock
-from brainchild import config
-from brainchild.pipeline.mcp_client import MCPToolError
+from _1_800_operator import config
+from _1_800_operator.pipeline.mcp_client import MCPToolError
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ from brainchild.pipeline.mcp_client import MCPToolError
 
 def make_runner():
     """Build a ChatRunner with a mock MCP. Caller sets execute_tool behavior."""
-    from brainchild.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     connector = MagicMock()
     llm = MagicMock()

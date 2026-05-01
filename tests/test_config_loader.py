@@ -2,7 +2,7 @@
 Unit tests for Component A — Config loader (Boundary depth).
 
 Covers `config.py`'s behavior at import time:
-  1. Missing BRAINCHILD_BOT → SystemExit(2)
+  1. Missing OPERATOR_BOT → SystemExit(2)
   2. Unknown bot name → SystemExit(2) listing available bots
   3. Happy-path yaml → agent/llm/skills/transcript fields parse with defaults
   4. SYSTEM_PROMPT = personality + "\\n\\n" + ground_rules; absent blocks drop out
@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-REAL_CONFIG_PY = REPO_ROOT / "src" / "brainchild" / "config.py"
+REAL_CONFIG_PY = REPO_ROOT / "src" / "_1_800_operator" / "config.py"
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +37,9 @@ REAL_CONFIG_PY = REPO_ROOT / "src" / "brainchild" / "config.py"
 
 def load_config(yaml_text: str, bot: str = "testbot", env: dict | None = None,
                 extra_bots: list[str] | None = None):
-    """Load config.py fresh against a tmp ~/.brainchild/agents/<bot>/config.yaml.
+    """Load config.py fresh against a tmp ~/.operator/agents/<bot>/config.yaml.
 
-    Redirects HOME to a tmp dir so `Path.home() / ".brainchild" / "agents"` in
+    Redirects HOME to a tmp dir so `Path.home() / ".operator" / "agents"` in
     the loader resolves inside the sandbox — the real user dir stays untouched.
 
     Returns (module, exc) — module is the loaded config module (or None if
@@ -47,7 +47,7 @@ def load_config(yaml_text: str, bot: str = "testbot", env: dict | None = None,
     """
     tmp = Path(tempfile.mkdtemp())
     try:
-        agents_root = tmp / ".brainchild" / "agents"
+        agents_root = tmp / ".operator" / "agents"
         (agents_root / bot).mkdir(parents=True)
         (agents_root / bot / "config.yaml").write_text(yaml_text)
         for extra in (extra_bots or []):
@@ -55,10 +55,10 @@ def load_config(yaml_text: str, bot: str = "testbot", env: dict | None = None,
             (agents_root / extra / "config.yaml").write_text("agent: {name: x}\nllm: {provider: openai, model: m}")
 
         full_env = dict(env or {})
-        saved = {k: os.environ.get(k) for k in list(full_env.keys()) + ["BRAINCHILD_BOT", "HOME"]}
+        saved = {k: os.environ.get(k) for k in list(full_env.keys()) + ["OPERATOR_BOT", "HOME"]}
         try:
-            if "BRAINCHILD_BOT" not in full_env:
-                full_env["BRAINCHILD_BOT"] = bot
+            if "OPERATOR_BOT" not in full_env:
+                full_env["OPERATOR_BOT"] = bot
             full_env["HOME"] = str(tmp)
             for k, v in full_env.items():
                 if v is None:
@@ -93,14 +93,14 @@ llm:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: missing BRAINCHILD_BOT → SystemExit(2)
+# Test 1: missing OPERATOR_BOT → SystemExit(2)
 # ---------------------------------------------------------------------------
 
-def test_missing_brainchild_bot_exits():
-    """Loading config without BRAINCHILD_BOT set must exit with code 2."""
-    _, code = load_config(MIN_YAML, env={"BRAINCHILD_BOT": ""})
+def test_missing_operator_bot_exits():
+    """Loading config without OPERATOR_BOT set must exit with code 2."""
+    _, code = load_config(MIN_YAML, env={"OPERATOR_BOT": ""})
     assert code == 2, f"Expected SystemExit(2), got {code}"
-    print("PASS  test_missing_brainchild_bot_exits")
+    print("PASS  test_missing_operator_bot_exits")
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +108,9 @@ def test_missing_brainchild_bot_exits():
 # ---------------------------------------------------------------------------
 
 def test_unknown_bot_exits():
-    """BRAINCHILD_BOT=<nonexistent> exits with code 2."""
+    """OPERATOR_BOT=<nonexistent> exits with code 2."""
     _, code = load_config(MIN_YAML, bot="realbot",
-                          env={"BRAINCHILD_BOT": "ghost"},
+                          env={"OPERATOR_BOT": "ghost"},
                           extra_bots=["other"])
     assert code == 2, f"Expected SystemExit(2), got {code}"
     print("PASS  test_unknown_bot_exits")
@@ -124,7 +124,7 @@ def test_happy_path_parses_fields():
     """Minimal yaml populates agent/llm fields; optional fields get defaults."""
     mod, _ = load_config(MIN_YAML)
     assert mod.AGENT_NAME == "Test Bot"
-    assert mod.TRIGGER_PHRASE == "@brainchild"       # default
+    assert mod.TRIGGER_PHRASE == "@operator"       # default
     assert mod.FIRST_CONTACT_HINT == ""             # default
     assert mod.AGENT_TAGLINE == ""                  # default
     assert mod.LLM_PROVIDER == "openai"
@@ -169,12 +169,12 @@ def test_claude_md_imports_mounted_into_system_prompt():
         prev_cwd = os.getcwd()
         os.chdir(tmp / "proj")
         try:
-            agents_root = tmp / ".brainchild" / "agents"
+            agents_root = tmp / ".operator" / "agents"
             (agents_root / "testbot").mkdir(parents=True)
             (agents_root / "testbot" / "config.yaml").write_text(yaml_text)
-            saved = {k: os.environ.get(k) for k in ("BRAINCHILD_BOT", "HOME")}
+            saved = {k: os.environ.get(k) for k in ("OPERATOR_BOT", "HOME")}
             try:
-                os.environ["BRAINCHILD_BOT"] = "testbot"
+                os.environ["OPERATOR_BOT"] = "testbot"
                 os.environ["HOME"] = str(tmp)
                 spec = importlib.util.spec_from_file_location(
                     f"config_test_md_{id(tmp)}", REAL_CONFIG_PY
@@ -319,7 +319,7 @@ def test_relativize_home_renders_tilde():
     mod, _ = load_config(MIN_YAML)
     home = os.path.expanduser("~")
     assert mod.relativize_home(home) == "~"
-    assert mod.relativize_home(home + "/code/brainchild") == "~/code/brainchild"
+    assert mod.relativize_home(home + "/code/operator") == "~/code/operator"
     assert mod.relativize_home("/var/log/syslog") == "/var/log/syslog"
     assert mod.relativize_home("") == ""
     assert mod.relativize_home(None) is None
@@ -394,7 +394,7 @@ def test_skills_legacy_paths_migrates_in_memory():
     tmp = Path(_tempfile.mkdtemp())
     try:
         # Seed sandboxed HOME + agent config + a tilde-reachable skill.
-        agents_root = tmp / ".brainchild" / "agents" / "testbot"
+        agents_root = tmp / ".operator" / "agents" / "testbot"
         agents_root.mkdir(parents=True)
         agents_root.joinpath("config.yaml").write_text(MIN_YAML + """
 skills:
@@ -408,9 +408,9 @@ skills:
             "---\nname: prd-drafter\ndescription: draft a PRD.\n---\nbody\n"
         )
 
-        saved = {k: os.environ.get(k) for k in ("BRAINCHILD_BOT", "HOME")}
+        saved = {k: os.environ.get(k) for k in ("OPERATOR_BOT", "HOME")}
         try:
-            os.environ["BRAINCHILD_BOT"] = "testbot"
+            os.environ["OPERATOR_BOT"] = "testbot"
             os.environ["HOME"] = str(tmp)
             spec = importlib.util.spec_from_file_location(f"config_legacy_{id(tmp)}", REAL_CONFIG_PY)
             mod = importlib.util.module_from_spec(spec)
@@ -450,7 +450,7 @@ def test_skills_absent_block_defaults_empty():
 
 if __name__ == "__main__":
     tests = [
-        test_missing_brainchild_bot_exits,
+        test_missing_operator_bot_exits,
         test_unknown_bot_exits,
         test_happy_path_parses_fields,
         test_system_prompt_composition,

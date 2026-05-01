@@ -14,7 +14,7 @@ import time
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 os.environ.setdefault("NO_COLOR", "1")  # strip ANSI so substring asserts are stable
 
 
@@ -30,8 +30,8 @@ def _capture_stderr(fn, *args, **kwargs):
 
 
 def test_mcp_rollup_all_pass():
-    from brainchild import config
-    from brainchild.__main__ import _emit_mcp_rollup
+    from _1_800_operator import config
+    from _1_800_operator.__main__ import _emit_mcp_rollup
 
     config.MCP_SERVERS = {"linear": {}, "github": {}}
     mcp = MagicMock()
@@ -46,8 +46,8 @@ def test_mcp_rollup_all_pass():
 
 
 def test_mcp_rollup_mixed_with_oauth_hint():
-    from brainchild import config
-    from brainchild.__main__ import _emit_mcp_rollup
+    from _1_800_operator import config
+    from _1_800_operator.__main__ import _emit_mcp_rollup
 
     config.MCP_SERVERS = {"linear": {}, "sentry": {}}
     mcp = MagicMock()
@@ -58,13 +58,13 @@ def test_mcp_rollup_mixed_with_oauth_hint():
     out = _capture_stderr(_emit_mcp_rollup, mcp)
     assert "linear ✓" in out
     assert "sentry ✗" in out
-    assert "brainchild auth sentry" in out, "oauth failure must surface remediation command"
+    assert "operator auth sentry" in out, "oauth failure must surface remediation command"
     print("✓ MCP roll-up surfaces oauth remediation")
 
 
 def test_mcp_rollup_missing_creds():
-    from brainchild import config
-    from brainchild.__main__ import _emit_mcp_rollup
+    from _1_800_operator import config
+    from _1_800_operator.__main__ import _emit_mcp_rollup
 
     config.MCP_SERVERS = {"github": {}}
     mcp = MagicMock()
@@ -79,8 +79,8 @@ def test_mcp_rollup_missing_creds():
 
 
 def test_mcp_rollup_silent_when_no_mcp_client():
-    from brainchild import config
-    from brainchild.__main__ import _emit_mcp_rollup
+    from _1_800_operator import config
+    from _1_800_operator.__main__ import _emit_mcp_rollup
 
     config.MCP_SERVERS = {"linear": {}}
     out = _capture_stderr(_emit_mcp_rollup, None)
@@ -90,8 +90,8 @@ def test_mcp_rollup_silent_when_no_mcp_client():
 
 def test_turn_done_metadata_only():
     """The heartbeat closer must NEVER include message bodies or tool args."""
-    from brainchild.pipeline import chat_runner
-    from brainchild.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline import chat_runner
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     runner = ChatRunner.__new__(ChatRunner)
     runner._turn_count = 7
@@ -108,7 +108,7 @@ def test_turn_done_metadata_only():
 
 def test_turn_done_idempotent():
     """Calling twice must not double-print — _turn_start_ts is drained."""
-    from brainchild.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     runner = ChatRunner.__new__(ChatRunner)
     runner._turn_count = 1
@@ -123,7 +123,7 @@ def test_turn_done_idempotent():
 
 
 def test_turn_done_failed_branch():
-    from brainchild.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     runner = ChatRunner.__new__(ChatRunner)
     runner._turn_count = 3

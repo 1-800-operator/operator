@@ -38,18 +38,18 @@ def _run_with_config(yaml_text: str):
     """
     import subprocess
     with tempfile.TemporaryDirectory() as td:
-        agents_dir = Path(td) / ".brainchild" / "agents" / "testbot"
+        agents_dir = Path(td) / ".operator" / "agents" / "testbot"
         agents_dir.mkdir(parents=True)
         (agents_dir / "config.yaml").write_text(yaml_text)
-        # Patch BRAINCHILD_BOT and HOME so config.py finds our temp config.
+        # Patch OPERATOR_BOT and HOME so config.py finds our temp config.
         env = {
             **os.environ,
-            "BRAINCHILD_BOT": "testbot",
+            "OPERATOR_BOT": "testbot",
             "HOME": str(td),
             "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "src"),
         }
         result = subprocess.run(
-            [sys.executable, "-c", "from brainchild import config"],
+            [sys.executable, "-c", "from _1_800_operator import config"],
             env=env,
             capture_output=True,
             text=True,
@@ -174,15 +174,15 @@ permissions:
     print("✓ all errors surfaced in one message")
 
 
-def test_error_message_points_at_brainchild_edit():
+def test_error_message_points_at_operator_edit():
     yaml_text = _BASE_VALID_CONFIG + """
 permissions:
   always_ask:
   - {bad: dict}
 """
     code, err = _run_with_config(yaml_text)
-    assert "brainchild edit" in err, err
-    print("✓ error message mentions brainchild edit")
+    assert "operator edit" in err, err
+    print("✓ error message mentions operator edit")
 
 
 if __name__ == "__main__":
@@ -195,5 +195,5 @@ if __name__ == "__main__":
     test_captions_enabled_must_be_bool()
     test_mcp_server_block_must_be_mapping()
     test_multiple_errors_surfaced_together()
-    test_error_message_points_at_brainchild_edit()
+    test_error_message_points_at_operator_edit()
     print("\nAll config validation tests passed.")

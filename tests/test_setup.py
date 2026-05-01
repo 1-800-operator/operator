@@ -1,4 +1,4 @@
-"""Tests for `brainchild build` wizard (pipeline/setup.py).
+"""Tests for `operator build` wizard (pipeline/setup.py).
 
 Covers the individual helpers rather than end-to-end prompting — the rich
 prompts are easy to wire interactively but noisy to mock at scale, and the
@@ -15,12 +15,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-# pipeline.setup does not from brainchild import config.py, but some sibling imports might
-# — set a safe default so tests never fail on missing BRAINCHILD_BOT.
+# pipeline.setup does not from _1_800_operator import config.py, but some sibling imports might
+# — set a safe default so tests never fail on missing OPERATOR_BOT.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild.pipeline import setup as wizard  # noqa: E402
+from _1_800_operator.pipeline import setup as wizard  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ def test_mcp_enabled_flip_round_trip():
 def _make_state(name: str, mode: str = "edit", **overrides) -> "wizard.WizardState":
     """Build a minimally-valid WizardState for write/reveal tests."""
     bot_cfg = overrides.pop("bot_cfg", None) or {
-        "agent": {"name": name.capitalize(), "trigger_phrase": "@brainchild"},
+        "agent": {"name": name.capitalize(), "trigger_phrase": "@operator"},
         "llm": {"provider": "anthropic", "model": "x"},
         "mcp_servers": {},
     }
@@ -215,7 +215,7 @@ def test_from_scratch_write_creates_bundle():
         wizard._AGENTS_DIR = sandbox
         try:
             bot_cfg = {
-                "agent": {"name": "Fresh", "trigger_phrase": "@brainchild", "tagline": "t"},
+                "agent": {"name": "Fresh", "trigger_phrase": "@operator", "tagline": "t"},
                 "llm": {"provider": "anthropic", "model": "x"},
                 "mcp_servers": {"notion": {"enabled": True, "command": "npx", "args": []}},
             }
@@ -296,10 +296,10 @@ def test_reveal_swaps_portrait():
             # Pre-create the portrait file that _reveal will read.
             target = sandbox / "fresh"
             target.mkdir()
-            from brainchild.pipeline import face
+            from _1_800_operator.pipeline import face
             (target / "portrait.txt").write_text(face.render("fresh") + "\n", encoding="utf-8")
 
-            from brainchild.pipeline import build_card
+            from _1_800_operator.pipeline import build_card
             state = _make_state("fresh", mode="new")
             assert state.portrait == "placeholder"
             state.portrait = build_card.PLACEHOLDER_PORTRAIT
@@ -317,7 +317,7 @@ def test_reveal_swaps_portrait():
 def test_picker_select_one_with_key_source():
     """select_one navigates with UP/DOWN and returns the chosen Choice."""
     import readchar
-    from brainchild.pipeline.picker import Choice, select_one
+    from _1_800_operator.pipeline.picker import Choice, select_one
     choices = [Choice(label=f"item{i}", value=i) for i in range(3)]
     keys = [readchar.key.DOWN, readchar.key.DOWN, readchar.key.ENTER]
     picked = select_one("pick", choices, key_source=keys)
@@ -328,7 +328,7 @@ def test_picker_select_one_with_key_source():
 def test_picker_select_many_with_key_source():
     """select_many navigates with UP/DOWN, toggles with SPACE, confirms with ENTER."""
     import readchar
-    from brainchild.pipeline.picker import Choice, select_many
+    from _1_800_operator.pipeline.picker import Choice, select_many
     choices = [Choice(label=f"item{i}") for i in range(3)]
     # Start at 0, toggle item0 on, move down, toggle item1 on, confirm.
     keys = [
@@ -344,7 +344,7 @@ def test_picker_select_many_with_key_source():
 
 def test_picker_cancels_on_q():
     """select_one raises PickerCancelled when 'q' is pressed."""
-    from brainchild.pipeline.picker import Choice, PickerCancelled, select_one
+    from _1_800_operator.pipeline.picker import Choice, PickerCancelled, select_one
     choices = [Choice(label="x")]
     raised = False
     try:
@@ -485,7 +485,7 @@ def test_collect_env_refs_empty_when_no_mcps():
 
 def test_build_card_render_panel_mode():
     """render returns a plain white Panel with the given title and icon colorization."""
-    from brainchild.pipeline import build_card
+    from _1_800_operator.pipeline import build_card
     from rich.panel import Panel
 
     out = build_card.render(
@@ -511,7 +511,7 @@ def test_build_card_render_panel_mode():
 
 def test_build_card_empty_bullets_show_placeholder():
     """Empty power_ups/skills render as the '—' placeholder in the body rows."""
-    from brainchild.pipeline import build_card
+    from _1_800_operator.pipeline import build_card
 
     rows = build_card._compose_body(
         name="X", tagline="t", portrait=build_card.PLACEHOLDER_PORTRAIT,
@@ -527,7 +527,7 @@ def test_build_card_empty_bullets_show_placeholder():
 def test_wrap_cells_hard_splits_oversized_token():
     """A single token wider than the width is split on code-point boundaries,
     not dropped or overflowing."""
-    from brainchild.pipeline import build_card
+    from _1_800_operator.pipeline import build_card
     long_word = "x" * 25
     out = build_card._wrap_cells(long_word, 10)
     # All rows ≤ 10 cells; concatenation reconstructs the input.
@@ -538,7 +538,7 @@ def test_wrap_cells_hard_splits_oversized_token():
     print("  wrap_cells hard-splits wide token: PASS")
 
 
-# ── _maybe_reset_to_bundled — `brainchild build` reset-with-backup ──────
+# ── _maybe_reset_to_bundled — `operator build` reset-with-backup ──────
 
 
 def _seed_reset_fixture(tmp: Path, name: str = "claude") -> tuple[Path, Path]:
@@ -616,7 +616,7 @@ def test_reset_to_bundled_writes_backup_and_replaces_when_confirmed():
 
 
 def test_edit_preset_skips_reset_when_reset_allowed_false():
-    """`brainchild edit <name>` passes reset_allowed=False so users get
+    """`operator edit <name>` passes reset_allowed=False so users get
     surgical access to the wizard without the destructive gate firing.
     `_edit_preset(name, reset_allowed=False)` should never call
     `_maybe_reset_to_bundled` even when user-scope differs from bundled."""
@@ -665,7 +665,7 @@ def test_edit_preset_skips_reset_when_reset_allowed_false():
 
 
 def test_run_target_agent_unknown_returns_1():
-    """`brainchild edit <missing>` should fail-fast with a clear message
+    """`operator edit <missing>` should fail-fast with a clear message
     rather than dropping into the picker."""
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:

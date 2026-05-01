@@ -1,5 +1,5 @@
 """
-Opens the Brainchild browser profile to myaccount.google.com and takes a screenshot.
+Opens the Operator browser profile to myaccount.google.com and takes a screenshot.
 If authenticated, you'll see the Google account page. If not, you'll see a sign-in page.
 
 Usage:
@@ -10,9 +10,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild import config
+from _1_800_operator import config
 
 BROWSER_PROFILE = config.BROWSER_PROFILE_DIR
 OUTPUT = os.path.join(os.path.dirname(__file__), "..", "debug", "auth_check.png")

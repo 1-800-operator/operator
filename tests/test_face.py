@@ -8,11 +8,11 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-# face module doesn't from brainchild import config, but set BRAINCHILD_BOT so any accidental
+# face module doesn't from _1_800_operator import config, but set OPERATOR_BOT so any accidental
 # transitive import doesn't fail the suite on agent discovery.
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild.pipeline import face
+from _1_800_operator.pipeline import face
 
 
 def test_determinism():

@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "claude")
+os.environ.setdefault("OPERATOR_BOT", "claude")
 
-from brainchild.mcp_servers import transcript_server
+from _1_800_operator.mcp_servers import transcript_server
 
 
 def _write_fixture(entries):

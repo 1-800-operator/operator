@@ -9,10 +9,10 @@ Covers:
      ~/.mcp-auth doesn't exist at all.
   3. MCPClient.connect_all skips spawn for auth=oauth servers whose cache
      is absent, recording kind="oauth_needed" with a fix that names
-     `brainchild auth <name>`, and still attempts spawn for servers
+     `operator auth <name>`, and still attempts spawn for servers
      whose cache is present.
   4. ChatRunner._post_mcp_failure_banner renders the oauth_needed kind
-     with the `brainchild auth <name>` call-to-action inline.
+     with the `operator auth <name>` call-to-action inline.
 
 Uses a tmpdir + monkey-patched Path.home so real ~/.mcp-auth is untouched.
 
@@ -28,11 +28,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild import config
-from brainchild.pipeline import mcp_client as mcp_mod
-from brainchild.pipeline.mcp_client import (
+from _1_800_operator import config
+from _1_800_operator.pipeline import mcp_client as mcp_mod
+from _1_800_operator.pipeline.mcp_client import (
     MCPClient,
     _mcp_remote_cache_dir,
     _oauth_cache_exists,
@@ -48,7 +48,7 @@ def _with_fake_home(fn):
     def wrapper():
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            with patch("brainchild.pipeline.oauth_cache.Path.home", return_value=tmp_path):
+            with patch("_1_800_operator.pipeline.oauth_cache.Path.home", return_value=tmp_path):
                 fn(tmp_path)
     wrapper.__name__ = fn.__name__
     return wrapper
@@ -136,7 +136,7 @@ def test_connect_all_skips_spawn_when_oauth_cache_missing():
         }
         spawn_attempts = []
 
-        with patch("brainchild.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
+        with patch("_1_800_operator.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
              patch.object(config, "MCP_SERVERS", fake_servers):
             client = MCPClient()
             client._start_loop = lambda: None  # skip event-loop startup
@@ -147,7 +147,7 @@ def test_connect_all_skips_spawn_when_oauth_cache_missing():
         assert "linear" in client.startup_failures
         info = client.startup_failures["linear"]
         assert info["kind"] == "oauth_needed", info
-        assert "brainchild auth linear" in info["fix"]
+        assert "operator auth linear" in info["fix"]
         assert info["auth_url"] == "https://mcp.linear.app/mcp"
         assert discovered == []
     print("PASS  test_connect_all_skips_spawn_when_oauth_cache_missing")
@@ -177,7 +177,7 @@ def test_connect_all_spawns_when_oauth_cache_present():
         }
         spawn_attempts = []
 
-        with patch("brainchild.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
+        with patch("_1_800_operator.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
              patch.object(config, "MCP_SERVERS", fake_servers):
             client = MCPClient()
             client._start_loop = lambda: None
@@ -208,7 +208,7 @@ def test_connect_all_env_auth_ignores_cache_path():
         }
         spawn_attempts = []
 
-        with patch("brainchild.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
+        with patch("_1_800_operator.pipeline.oauth_cache.Path.home", return_value=tmp_path), \
              patch.object(config, "MCP_SERVERS", fake_servers):
             client = MCPClient()
             client._start_loop = lambda: None
@@ -224,9 +224,9 @@ def test_connect_all_env_auth_ignores_cache_path():
 # ---------------------------------------------------------------------------
 
 def test_banner_renders_oauth_needed_with_auth_command():
-    """oauth_needed → fragment inlines `brainchild auth <name>` so user can act."""
-    # Import late so the module's BRAINCHILD_BOT default applies.
-    from brainchild.pipeline.chat_runner import ChatRunner
+    """oauth_needed → fragment inlines `operator auth <name>` so user can act."""
+    # Import late so the module's OPERATOR_BOT default applies.
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     connector = MagicMock()
     llm = MagicMock()
@@ -234,7 +234,7 @@ def test_banner_renders_oauth_needed_with_auth_command():
     mcp.startup_failures = {
         "linear": {
             "kind": "oauth_needed",
-            "fix": "run `brainchild auth linear` once to authorize — token is cached after",
+            "fix": "run `operator auth linear` once to authorize — token is cached after",
             "auth_url": "https://mcp.linear.app/mcp",
             "raw": "oauth cache missing",
         }
@@ -246,7 +246,7 @@ def test_banner_renders_oauth_needed_with_auth_command():
     assert len(sent) == 1, sent
     line = sent[0]
     assert "linear didn't load" in line
-    assert "brainchild auth linear" in line
+    assert "operator auth linear" in line
     assert line.endswith("Ask for details.")
     print("PASS  test_banner_renders_oauth_needed_with_auth_command")
 

@@ -18,14 +18,14 @@ import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-# Make the brainchild package importable
+# Make the operator package importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from brainchild.connectors.captions_js import (  # noqa: E402
+from _1_800_operator.connectors.captions_js import (  # noqa: E402
     CAPTION_OBSERVER_JS,
     enable_captions,
 )
 
-PROFILE = Path.home() / ".brainchild" / "browser_profile"
+PROFILE = Path.home() / ".operator" / "browser_profile"
 OUT = Path(__file__).parent / "headless_captions.png"
 
 LISTEN_SECONDS = 30

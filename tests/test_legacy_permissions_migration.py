@@ -18,26 +18,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src
 
 
 def _load_config_with_yaml(yaml_text):
-    """Boot brainchild.config with a temporary ~/.brainchild/agents/fakebot/config.yaml.
+    """Boot _1_800_operator.config with a temporary ~/.operator/agents/fakebot/config.yaml.
 
-    Overrides $HOME so config.py's `Path.home() / ".brainchild" / "agents"`
-    points at our scratch dir. Wipes any cached brainchild.config module so
+    Overrides $HOME so config.py's `Path.home() / ".operator" / "agents"`
+    points at our scratch dir. Wipes any cached _1_800_operator.config module so
     each call gets a clean read.
     """
     tmp = tempfile.mkdtemp()
-    bot_dir = Path(tmp) / ".brainchild" / "agents" / "fakebot"
+    bot_dir = Path(tmp) / ".operator" / "agents" / "fakebot"
     bot_dir.mkdir(parents=True)
     (bot_dir / "config.yaml").write_text(textwrap.dedent(yaml_text))
     # Empty .env so resolver finds no leaked secrets from the test machine.
-    (Path(tmp) / ".brainchild" / ".env").write_text("")
+    (Path(tmp) / ".operator" / ".env").write_text("")
 
-    os.environ["BRAINCHILD_BOT"] = "fakebot"
+    os.environ["OPERATOR_BOT"] = "fakebot"
     os.environ["HOME"]           = tmp
 
     for mod_name in list(sys.modules):
-        if mod_name == "brainchild.config":
+        if mod_name == "_1_800_operator.config":
             del sys.modules[mod_name]
-    return importlib.import_module("brainchild.config")
+    return importlib.import_module("_1_800_operator.config")
 
 
 def test_legacy_read_tools_translate_to_auto_approve():
@@ -135,9 +135,9 @@ def test_chat_runner_needs_confirmation_uses_unified_lists():
         personality: ""
     """)
     # Re-import chat_runner so it picks up the freshly-loaded config.
-    if "brainchild.pipeline.chat_runner" in sys.modules:
-        del sys.modules["brainchild.pipeline.chat_runner"]
-    from brainchild.pipeline.chat_runner import ChatRunner
+    if "_1_800_operator.pipeline.chat_runner" in sys.modules:
+        del sys.modules["_1_800_operator.pipeline.chat_runner"]
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     runner = ChatRunner.__new__(ChatRunner)  # bypass __init__
 

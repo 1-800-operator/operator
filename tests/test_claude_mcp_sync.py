@@ -19,12 +19,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "claude")
+os.environ.setdefault("OPERATOR_BOT", "claude")
 
 import yaml
 
-from brainchild import __main__ as bm
-from brainchild.pipeline.claude_code_import import ImportedMCP
+from _1_800_operator import __main__ as bm
+from _1_800_operator.pipeline.claude_code_import import ImportedMCP
 
 
 def _write_cfg(tmpdir: Path, payload: dict) -> Path:
@@ -42,9 +42,9 @@ def _read_cfg(cfg_path: Path) -> dict:
 def _run_sync_with(tmpdir: Path, discovered: list[ImportedMCP]):
     """Patch _AGENTS_DIR + discover_all_mcps, run sync."""
     with patch.object(bm, "_AGENTS_DIR", tmpdir / "agents"), \
-         patch("brainchild.pipeline.claude_code_import.discover_all_mcps",
+         patch("_1_800_operator.pipeline.claude_code_import.discover_all_mcps",
                return_value=(discovered, 0)), \
-         patch("brainchild.pipeline.claude_code_import.append_env_placeholders",
+         patch("_1_800_operator.pipeline.claude_code_import.append_env_placeholders",
                return_value=[]):
         bm._sync_claude_imports()
 

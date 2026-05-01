@@ -1,5 +1,5 @@
 """
-Entry point for the Brainchild test harness.
+Entry point for the Operator test harness.
 Imports shared utilities from utils.py.
 """
 

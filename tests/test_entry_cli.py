@@ -16,7 +16,7 @@ Covers `__main__.py`:
     - unknown bot/subcommand → returns 2
     - known bot → _run_bot(name, rest)
   _run_bot arg parsing
-    - url + --force parsed; sets BRAINCHILD_BOT
+    - url + --force parsed; sets OPERATOR_BOT
   _run_try validation
     - unknown bot → returns 2 before any heavy imports
 
@@ -44,8 +44,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 # script (the `if __name__ == "__main__"` guard is skipped).
 import importlib.util
 _SPEC = importlib.util.spec_from_file_location(
-    "brainchild_entry",
-    Path(__file__).resolve().parent.parent / "src" / "brainchild" / "__main__.py",
+    "operator_entry",
+    Path(__file__).resolve().parent.parent / "src" / "_1_800_operator" / "__main__.py",
 )
 entry = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(entry)
@@ -86,7 +86,7 @@ def tmp_agents_dir(bots):
 @contextmanager
 def patched_argv(argv_after_prog):
     saved = sys.argv
-    sys.argv = ["brainchild"] + list(argv_after_prog)
+    sys.argv = ["operator"] + list(argv_after_prog)
     try:
         yield
     finally:
@@ -256,7 +256,7 @@ def test_main_try_without_name_returns_2():
 
 
 def test_main_auth_dispatches_with_name():
-    """`brainchild auth <mcp>` routes to _run_auth with the mcp name."""
+    """`operator auth <mcp>` routes to _run_auth with the mcp name."""
     spy = MagicMock(return_value=0)
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["auth", "linear"]), patched_dispatch(_run_auth=spy):
@@ -313,7 +313,7 @@ def test_main_unknown_bot_returns_2():
 
 
 def test_main_bare_known_bot_rejected_with_run_hint():
-    """Phase 15.8: bare `brainchild <known-bot>` hard-fails with a pointed hint."""
+    """Phase 15.8: bare `operator <known-bot>` hard-fails with a pointed hint."""
     spy = MagicMock(return_value=0)
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["pm"]), patched_dispatch(_run_bot=spy):
@@ -323,13 +323,13 @@ def test_main_bare_known_bot_rejected_with_run_hint():
     assert rc == 2
     assert spy.call_count == 0
     out = buf.getvalue()
-    assert "brainchild run pm" in out
+    assert "operator run pm" in out
     assert "no longer supported" in out
     print("PASS  test_main_bare_known_bot_rejected_with_run_hint")
 
 
 def test_main_run_known_bot_dispatches_to_run_bot():
-    """`brainchild run <name> <url>` → _run_bot(name, [url])."""
+    """`operator run <name> <url>` → _run_bot(name, [url])."""
     spy = MagicMock(return_value=0)
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["run", "pm", "https://meet.google.com/abc-defg-hij"]), \
@@ -341,19 +341,19 @@ def test_main_run_known_bot_dispatches_to_run_bot():
 
 
 def test_main_run_without_name_returns_2():
-    """`brainchild run` with no name prints usage and exits 2."""
+    """`operator run` with no name prints usage and exits 2."""
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["run"]):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = entry.main()
     assert rc == 2
-    assert "Usage: brainchild run" in buf.getvalue()
+    assert "Usage: operator run" in buf.getvalue()
     print("PASS  test_main_run_without_name_returns_2")
 
 
 def test_main_run_unknown_bot_returns_2():
-    """`brainchild run <unknown>` errors with 'Unknown bot'."""
+    """`operator run <unknown>` errors with 'Unknown bot'."""
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["run", "ghost"]):
             buf = io.StringIO()
@@ -369,22 +369,22 @@ def test_main_run_unknown_bot_returns_2():
 # ---------------------------------------------------------------------------
 
 def test_run_bot_parses_url_and_flags_and_sets_env():
-    """_run_bot parses url + --force; sets BRAINCHILD_BOT before dispatching."""
+    """_run_bot parses url + --force; sets OPERATOR_BOT before dispatching."""
     captured = {}
     def fake_macos(meeting_url=None, force=False):
         captured["platform"] = "macos"
         captured["url"] = meeting_url
         captured["force"] = force
-        captured["env"] = os.environ.get("BRAINCHILD_BOT")
+        captured["env"] = os.environ.get("OPERATOR_BOT")
     def fake_linux(meeting_url, force=False):
         captured["platform"] = "linux"
         captured["url"] = meeting_url
         captured["force"] = force
-        captured["env"] = os.environ.get("BRAINCHILD_BOT")
+        captured["env"] = os.environ.get("OPERATOR_BOT")
 
-    saved_env = os.environ.get("BRAINCHILD_BOT")
+    saved_env = os.environ.get("OPERATOR_BOT")
     try:
-        os.environ.pop("BRAINCHILD_BOT", None)
+        os.environ.pop("OPERATOR_BOT", None)
         with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
             with patched_dispatch(_run_macos=fake_macos, _run_linux=fake_linux):
                 rc = entry._run_bot(
@@ -397,14 +397,14 @@ def test_run_bot_parses_url_and_flags_and_sets_env():
         assert captured["env"] == "pm"
     finally:
         if saved_env is None:
-            os.environ.pop("BRAINCHILD_BOT", None)
+            os.environ.pop("OPERATOR_BOT", None)
         else:
-            os.environ["BRAINCHILD_BOT"] = saved_env
+            os.environ["OPERATOR_BOT"] = saved_env
     print("PASS  test_run_bot_parses_url_and_flags_and_sets_env")
 
 
 def test_run_bot_unknown_flag_returns_2():
-    saved_env = os.environ.get("BRAINCHILD_BOT")
+    saved_env = os.environ.get("OPERATOR_BOT")
     try:
         with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
             buf = io.StringIO()
@@ -414,9 +414,9 @@ def test_run_bot_unknown_flag_returns_2():
         assert "Unknown flag" in buf.getvalue()
     finally:
         if saved_env is None:
-            os.environ.pop("BRAINCHILD_BOT", None)
+            os.environ.pop("OPERATOR_BOT", None)
         else:
-            os.environ["BRAINCHILD_BOT"] = saved_env
+            os.environ["OPERATOR_BOT"] = saved_env
     print("PASS  test_run_bot_unknown_flag_returns_2")
 
 
@@ -435,34 +435,34 @@ def test_run_bot_no_preflight_flag_bypasses_readiness():
     def fake_macos(meeting_url=None, force=False):
         pass
 
-    saved_env = os.environ.get("BRAINCHILD_BOT")
+    saved_env = os.environ.get("OPERATOR_BOT")
     try:
-        os.environ.pop("BRAINCHILD_BOT", None)
+        os.environ.pop("OPERATOR_BOT", None)
         with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
             # Inject a fake preflight module into sys.modules so the lazy
             # import inside _run_bot picks it up. Same shape as the real
-            # brainchild.pipeline.readiness.
+            # _1_800_operator.pipeline.readiness.
             import types
-            fake_module = types.ModuleType("brainchild.pipeline.readiness")
+            fake_module = types.ModuleType("_1_800_operator.pipeline.readiness")
             fake_module.preflight_mcp_readiness = fake_preflight
             fake_module.PREFLIGHT_OK = 0
-            saved = sys.modules.get("brainchild.pipeline.readiness")
-            sys.modules["brainchild.pipeline.readiness"] = fake_module
+            saved = sys.modules.get("_1_800_operator.pipeline.readiness")
+            sys.modules["_1_800_operator.pipeline.readiness"] = fake_module
             try:
                 with patched_dispatch(_run_macos=fake_macos, _run_linux=fake_macos):
                     rc = entry._run_bot("pm", ["--no-preflight"])
             finally:
                 if saved is not None:
-                    sys.modules["brainchild.pipeline.readiness"] = saved
+                    sys.modules["_1_800_operator.pipeline.readiness"] = saved
                 else:
-                    sys.modules.pop("brainchild.pipeline.readiness", None)
+                    sys.modules.pop("_1_800_operator.pipeline.readiness", None)
         assert rc == 0
         assert preflight_called == [], "preflight must not run with --no-preflight"
     finally:
         if saved_env is None:
-            os.environ.pop("BRAINCHILD_BOT", None)
+            os.environ.pop("OPERATOR_BOT", None)
         else:
-            os.environ["BRAINCHILD_BOT"] = saved_env
+            os.environ["OPERATOR_BOT"] = saved_env
     print("PASS  test_run_bot_no_preflight_flag_bypasses_readiness")
 
 
@@ -476,31 +476,31 @@ def test_run_bot_aborts_when_preflight_returns_nonzero():
     def fake_macos(meeting_url=None, force=False):
         dispatched.append("macos")
 
-    saved_env = os.environ.get("BRAINCHILD_BOT")
+    saved_env = os.environ.get("OPERATOR_BOT")
     try:
-        os.environ.pop("BRAINCHILD_BOT", None)
+        os.environ.pop("OPERATOR_BOT", None)
         with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
             import types
-            fake_module = types.ModuleType("brainchild.pipeline.readiness")
+            fake_module = types.ModuleType("_1_800_operator.pipeline.readiness")
             fake_module.preflight_mcp_readiness = fake_preflight
             fake_module.PREFLIGHT_OK = 0
-            saved = sys.modules.get("brainchild.pipeline.readiness")
-            sys.modules["brainchild.pipeline.readiness"] = fake_module
+            saved = sys.modules.get("_1_800_operator.pipeline.readiness")
+            sys.modules["_1_800_operator.pipeline.readiness"] = fake_module
             try:
                 with patched_dispatch(_run_macos=fake_macos, _run_linux=fake_macos):
                     rc = entry._run_bot("pm", [])
             finally:
                 if saved is not None:
-                    sys.modules["brainchild.pipeline.readiness"] = saved
+                    sys.modules["_1_800_operator.pipeline.readiness"] = saved
                 else:
-                    sys.modules.pop("brainchild.pipeline.readiness", None)
+                    sys.modules.pop("_1_800_operator.pipeline.readiness", None)
         assert rc == 2
         assert dispatched == [], "dispatch must not run after preflight abort"
     finally:
         if saved_env is None:
-            os.environ.pop("BRAINCHILD_BOT", None)
+            os.environ.pop("OPERATOR_BOT", None)
         else:
-            os.environ["BRAINCHILD_BOT"] = saved_env
+            os.environ["OPERATOR_BOT"] = saved_env
     print("PASS  test_run_bot_aborts_when_preflight_returns_nonzero")
 
 
@@ -509,7 +509,7 @@ def test_run_bot_aborts_when_preflight_returns_nonzero():
 # ---------------------------------------------------------------------------
 
 def test_run_try_unknown_bot_returns_2():
-    """Unknown bot must bail early — before any `from brainchild import config` can fire."""
+    """Unknown bot must bail early — before any `from _1_800_operator import config` can fire."""
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -520,16 +520,16 @@ def test_run_try_unknown_bot_returns_2():
 
 
 # ---------------------------------------------------------------------------
-# Package-import smoke test — `[project.scripts] brainchild = "brainchild.__main__:main"`
+# Package-import smoke test — `[project.scripts] operator = "_1_800_operator.__main__:main"`
 # wires pip's console script to this exact import path, so it must succeed
 # cleanly with no side effects beyond the documented Popen monkeypatch.
 # ---------------------------------------------------------------------------
 
 def test_package_import_exposes_main():
-    """`import brainchild.__main__` works and `main` is a zero-arg callable."""
+    """`import _1_800_operator.__main__` works and `main` is a zero-arg callable."""
     import importlib
-    mod = importlib.import_module("brainchild.__main__")
-    assert callable(mod.main), "brainchild.__main__.main is not callable"
+    mod = importlib.import_module("_1_800_operator.__main__")
+    assert callable(mod.main), "_1_800_operator.__main__.main is not callable"
     import inspect
     sig = inspect.signature(mod.main)
     assert len(sig.parameters) == 0, f"main() must take no args, got {sig}"

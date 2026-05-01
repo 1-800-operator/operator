@@ -4,11 +4,11 @@ Run: python tests/test_permission_matcher.py
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "claude")
+os.environ.setdefault("OPERATOR_BOT", "claude")
 
 from unittest.mock import MagicMock
 
-from brainchild.pipeline.permission_chat_handler import (
+from _1_800_operator.pipeline.permission_chat_handler import (
     _matches_any,
     PermissionChatHandler,
 )

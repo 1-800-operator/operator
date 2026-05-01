@@ -4,18 +4,18 @@ Run: python tests/test_chat_hardening.py
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild import config
+from _1_800_operator import config
 import re
 
 
 def test_history_cap():
     """LLMClient should replay at most HISTORY_MESSAGES entries from the record."""
     from unittest.mock import MagicMock
-    from brainchild.pipeline.llm import LLMClient
-    from brainchild.pipeline.meeting_record import MeetingRecord
-    from brainchild.pipeline.providers import ProviderResponse
+    from _1_800_operator.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.meeting_record import MeetingRecord
+    from _1_800_operator.pipeline.providers import ProviderResponse
 
     record = MeetingRecord(slug=None)  # in-memory
     llm = LLMClient(MagicMock(), record=record)
@@ -46,7 +46,7 @@ def test_meeting_record_tail_roundtrip(tmp_dir=None):
     """MeetingRecord should persist and tail back in order."""
     import tempfile
     from pathlib import Path
-    from brainchild.pipeline.meeting_record import MeetingRecord
+    from _1_800_operator.pipeline.meeting_record import MeetingRecord
 
     with tempfile.TemporaryDirectory() as tmp:
         r = MeetingRecord(slug="test-slug", root=Path(tmp), meta={"meet_url": "https://meet.google.com/test-slug"})
@@ -83,8 +83,8 @@ def test_meeting_record_tail_roundtrip(tmp_dir=None):
 def test_first_contact_hint():
     """FIRST_CONTACT_HINT is appended to a participant's first in-session message only."""
     from unittest.mock import MagicMock
-    from brainchild.pipeline.llm import LLMClient
-    from brainchild.pipeline.meeting_record import MeetingRecord
+    from _1_800_operator.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.meeting_record import MeetingRecord
 
     record = MeetingRecord(slug=None)
     llm = LLMClient(MagicMock(), record=record)
@@ -115,7 +115,7 @@ def test_first_contact_hint():
 
 
 def test_slug_from_url():
-    from brainchild.pipeline.meeting_record import slug_from_url
+    from _1_800_operator.pipeline.meeting_record import slug_from_url
     assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == "pgy-qauk-frn"
     assert slug_from_url("https://meet.google.com/abc-defg-hij?pli=1") == "abc-defg-hij"
     assert slug_from_url("") == "unknown-meeting"
@@ -137,7 +137,7 @@ def test_trigger_phrase_gating():
 
     no_match = [
         "what time is it",
-        "let's discuss the brainchild role",  # bare word shouldn't match "@brainchild"
+        "let's discuss the operator role",  # bare word shouldn't match "@operator"
     ]
     for text in no_match:
         assert trigger not in text.lower(), f"Should not match: {text!r}"

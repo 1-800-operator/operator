@@ -22,7 +22,7 @@ Architecture:
        claude proceeds (allow) or aborts the tool (deny)
 
 The parent reads the pipe, simulates "user said yes/no" by writing the
-decision back. In production brainchild this round-trip is Meet chat ↔
+decision back. In production operator this round-trip is Meet chat ↔
 user reply. Here we just hardcode "allow" to validate the wiring.
 
 Captures:
@@ -143,7 +143,7 @@ def main():
                 print(f"[parent] [{t_req:.2f}s] tool_use request: {tool_name} input={json.dumps(tool_input)[:120]}")
 
                 # Decision: allow everything for the happy-path probe.
-                # In production brainchild this is the chat round-trip.
+                # In production operator this is the chat round-trip.
                 decision = {
                     "permissionDecision": "allow",
                     "permissionDecisionReason": f"probe: auto-approved {tool_name}",

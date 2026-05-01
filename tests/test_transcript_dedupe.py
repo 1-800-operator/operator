@@ -14,8 +14,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.meeting_record import MeetingRecord
-from brainchild.pipeline.transcript import TranscriptFinalizer, _strip_prior_prefix
+from _1_800_operator.pipeline.meeting_record import MeetingRecord
+from _1_800_operator.pipeline.transcript import TranscriptFinalizer, _strip_prior_prefix
 
 
 def test_strip_exact_prefix():

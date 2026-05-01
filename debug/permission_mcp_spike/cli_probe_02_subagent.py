@@ -3,7 +3,7 @@
 Question: when inner-claude dispatches a sub-agent via the Task tool, do
 the sub-agent's inner tool_use events fire OUR PreToolUse hook?
 
-This matters: brainchild's claude bot will routinely produce sub-agent
+This matters: operator's claude bot will routinely produce sub-agent
 dispatches (Plan / Explore / general-purpose). If those run with
 parent's permission mode but skip our hook, the bot can silently write
 files via sub-agents while we think we're gating writes.

@@ -14,7 +14,7 @@ and test_chat_hardening suites:
 Run: source venv/bin/activate && python tests/test_chat_runner_gaps.py
 """
 import os
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 import sys
 import threading
@@ -23,9 +23,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from unittest.mock import MagicMock
 
-from brainchild import config
-from brainchild.pipeline.chat_runner import ChatRunner, LOAD_SKILL_TOOL
-from brainchild.pipeline.skills import Skill
+from _1_800_operator import config
+from _1_800_operator.pipeline.chat_runner import ChatRunner, LOAD_SKILL_TOOL
+from _1_800_operator.pipeline.skills import Skill
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ def test_group_mode_requires_trigger():
 def test_auto_leave_after_grace():
     """Once peers seen and now alone for ALONE_EXIT_GRACE_SECONDS → connector.leave()."""
     # Patch to short windows so the test runs sub-second.
-    import brainchild.pipeline.chat_runner as cr
+    import _1_800_operator.pipeline.chat_runner as cr
     orig_grace = config.ALONE_EXIT_GRACE_SECONDS
     orig_interval = cr.PARTICIPANT_CHECK_INTERVAL
     orig_poll = cr.POLL_INTERVAL
@@ -214,7 +214,7 @@ def test_request_confirmation_renders_all_args_and_truncates_long_values():
     assert long_body not in msg, "Full long value leaked through untruncated"
     assert "…" in msg, f"Expected head…tail ellipsis, got: {msg}"
     # Log-pointer present so the user can cross-reference
-    assert "/tmp/brainchild.log" in msg
+    assert "/tmp/operator.log" in msg
     # Short values survive unchanged
     assert "ENG-123" in msg
     print("PASS  test_request_confirmation_renders_all_args_and_truncates_long_values")
@@ -233,7 +233,7 @@ def test_request_confirmation_no_truncation_on_short_args():
     }
     runner._request_confirmation(tc)
     msg = sent[0][0]
-    assert "/tmp/brainchild.log" not in msg, f"Unexpected log pointer: {msg}"
+    assert "/tmp/operator.log" not in msg, f"Unexpected log pointer: {msg}"
     assert "…" not in msg, f"Unexpected truncation marker: {msg}"
     print("PASS  test_request_confirmation_no_truncation_on_short_args")
 
@@ -289,7 +289,7 @@ def test_pending_confirmation_messages_tagged_in_record():
         [],
     ]
 
-    import brainchild.pipeline.chat_runner as cr
+    import _1_800_operator.pipeline.chat_runner as cr
     orig_poll = cr.POLL_INTERVAL
     cr.POLL_INTERVAL = 0.05
     try:
@@ -417,7 +417,7 @@ def test_intro_on_join_posts_and_drains_buffer():
     runner, _, llm = make_runner()
     # Simulate the pre-intro phase: _intro_posted is False until _intro_ready fires.
     runner._intro_posted = False
-    runner._intro_text = "Hi, I'm the brainchild."
+    runner._intro_text = "Hi, I'm the operator."
     runner._intro_ready.set()
     runner._pre_intro_buffer = [
         {"text": "first", "one_on_one": True},
@@ -431,7 +431,7 @@ def test_intro_on_join_posts_and_drains_buffer():
 
     # Drive one _loop iteration manually by invoking the drain block.
     # Easier: call _loop in a thread and stop it.
-    import brainchild.pipeline.chat_runner as cr
+    import _1_800_operator.pipeline.chat_runner as cr
     orig_poll = cr.POLL_INTERVAL
     cr.POLL_INTERVAL = 0.05
     try:
@@ -440,7 +440,7 @@ def test_intro_on_join_posts_and_drains_buffer():
         cr.POLL_INTERVAL = orig_poll
 
     assert runner._intro_posted is True, "intro should be marked posted"
-    assert sent == ["Hi, I'm the brainchild."], f"Expected intro sent once, got {sent}"
+    assert sent == ["Hi, I'm the operator."], f"Expected intro sent once, got {sent}"
     assert dispatched == [("first", True), ("second", True)], \
         f"Expected buffered msgs dispatched in order, got {dispatched}"
     assert runner._pre_intro_buffer == []
@@ -460,7 +460,7 @@ def test_intro_failure_skips_post_but_still_drains():
     dispatched = []
     runner._dispatch_user_message = lambda t, o: dispatched.append((t, o))
 
-    import brainchild.pipeline.chat_runner as cr
+    import _1_800_operator.pipeline.chat_runner as cr
     orig_poll = cr.POLL_INTERVAL
     cr.POLL_INTERVAL = 0.05
     try:
@@ -500,13 +500,13 @@ def test_intro_waits_for_human_in_empty_room():
     """
     runner, _, _ = make_runner(participant_counts=[1, 1, 2])
     runner._intro_posted = False
-    runner._intro_text = "Hi, I'm the brainchild."
+    runner._intro_text = "Hi, I'm the operator."
     runner._intro_ready.set()
 
     sent = []
     runner._send = lambda text, kind="chat": sent.append(text)
 
-    import brainchild.pipeline.chat_runner as cr
+    import _1_800_operator.pipeline.chat_runner as cr
     orig_poll = cr.POLL_INTERVAL
     orig_interval = cr.PARTICIPANT_CHECK_INTERVAL
     cr.POLL_INTERVAL = 0.05
@@ -518,7 +518,7 @@ def test_intro_waits_for_human_in_empty_room():
         cr.PARTICIPANT_CHECK_INTERVAL = orig_interval
 
     assert runner._intro_posted is True, "intro should post after a human is seen"
-    assert sent == ["Hi, I'm the brainchild."], \
+    assert sent == ["Hi, I'm the operator."], \
         f"Expected intro sent exactly once after participant appeared, got {sent}"
     print("PASS  test_intro_waits_for_human_in_empty_room")
 

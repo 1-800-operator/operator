@@ -16,9 +16,9 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild.pipeline import chrome_preflight, google_signin  # noqa: E402
+from _1_800_operator.pipeline import chrome_preflight, google_signin  # noqa: E402
 
 
 def _write_auth_state(path: Path, *, with_sid: bool = True) -> None:

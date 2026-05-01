@@ -1,6 +1,6 @@
 """Headless Meet probe — full join flow.
 
-Builds on headless_meet_invited.py: same brainchild profile + headless,
+Builds on headless_meet_invited.py: same operator profile + headless,
 but actually clicks through the mic/cam modal and the Join now button,
 then screenshots the in-meeting state.
 
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-PROFILE = Path.home() / ".brainchild" / "browser_profile"
+PROFILE = Path.home() / ".operator" / "browser_profile"
 OUT = Path(__file__).parent
 PRE = OUT / "headless_join_pre.png"
 POST_MODAL = OUT / "headless_join_modal.png"

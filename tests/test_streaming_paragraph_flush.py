@@ -9,7 +9,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.providers.base import flush_paragraphs
+from _1_800_operator.pipeline.providers.base import flush_paragraphs
 
 
 def _collect():

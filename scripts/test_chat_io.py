@@ -17,10 +17,10 @@ import time
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
-from brainchild import config  # noqa: E402
-from brainchild.connectors.macos_adapter import MacOSAdapter  # noqa: E402
+from _1_800_operator import config  # noqa: E402
+from _1_800_operator.connectors.macos_adapter import MacOSAdapter  # noqa: E402
 
 
 def main():
@@ -58,7 +58,7 @@ def main():
 
     # --- Test 2: send_chat() posts a message ---
     print("\n=== TEST 2: send_chat() ===")
-    test_msg = "echo test from brainchild"
+    test_msg = "echo test from operator"
     print(f"  Sending: {test_msg!r}")
     adapter.send_chat(test_msg)
     print("  send_chat() returned (check meeting chat to confirm).")

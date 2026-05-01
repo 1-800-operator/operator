@@ -14,10 +14,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.skills import Skill, _parse_skill_md, load_skills
+from _1_800_operator.pipeline.skills import Skill, _parse_skill_md, load_skills
 
 
 def _write_skill(tmp: Path, name: str, frontmatter_extra: str = "") -> Path:
@@ -100,7 +100,7 @@ def test_mcp_required_unexpected_type_ignored():
 def test_bundled_skills_declare_deps_correctly():
     """All five MCP-dependent bundled skills declare their server in mcp-required;
     the three discussion-only skills declare nothing."""
-    src = Path(__file__).resolve().parent.parent / "src" / "brainchild" / "skills"
+    src = Path(__file__).resolve().parent.parent / "src" / "_1_800_operator" / "skills"
     expected = {
         "design-handoff-spec": ["figma"],
         "design-review-feedback": ["figma"],

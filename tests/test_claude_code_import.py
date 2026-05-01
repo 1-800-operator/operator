@@ -33,7 +33,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.claude_code_import import (
+from _1_800_operator.pipeline.claude_code_import import (
     ImportedMCP,
     _classify_transport,
     _slugify_mcp_name,
@@ -53,19 +53,19 @@ from brainchild.pipeline.claude_code_import import (
 # ---------------------------------------------------------------------------
 
 def _with_fake_home(fn):
-    """Run fn(tmp_home: Path) with ~/.claude.json, ~/.claude/, ~/.brainchild/
+    """Run fn(tmp_home: Path) with ~/.claude.json, ~/.claude/, ~/.operator/
     all sandboxed under a fresh temp dir.
     """
     def wrapper():
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             with patch(
-                "brainchild.pipeline.claude_code_import.Path.home",
+                "_1_800_operator.pipeline.claude_code_import.Path.home",
                 return_value=home,
             ):
                 # Re-patch module-level constants derived from Path.home() at
                 # import time — they won't pick up the patched Path.home.
-                import brainchild.pipeline.claude_code_import as mod
+                import _1_800_operator.pipeline.claude_code_import as mod
                 # Bust the per-process `claude mcp list` cache so each test
                 # sees a fresh mock invocation instead of whatever a prior
                 # test (or the real CLI) populated.
@@ -290,7 +290,7 @@ def test_discover_hosted_mcps_parses_claude_mcp_list():
         "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ! Needs authentication\n"
         "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected\n"
     )
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok(stdout)):
         mcps = discover_hosted_mcps_via_cli()
     names = [m.name for m in mcps]
@@ -305,21 +305,21 @@ def test_discover_hosted_mcps_parses_claude_mcp_list():
 
 
 def test_discover_hosted_mcps_returncode_nonzero_returns_empty():
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok("", returncode=1)):
         assert discover_hosted_mcps_via_cli() == []
     print("PASS  test_discover_hosted_mcps_returncode_nonzero_returns_empty")
 
 
 def test_discover_hosted_mcps_file_not_found_returns_empty():
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                side_effect=FileNotFoundError):
         assert discover_hosted_mcps_via_cli() == []
     print("PASS  test_discover_hosted_mcps_file_not_found_returns_empty")
 
 
 def test_discover_hosted_mcps_timeout_returns_empty():
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=10)):
         assert discover_hosted_mcps_via_cli() == []
     print("PASS  test_discover_hosted_mcps_timeout_returns_empty")
@@ -333,7 +333,7 @@ def test_discover_hosted_mcps_parses_http_annotation():
         "sentry: https://mcp.sentry.dev/mcp (HTTP) - ✓ Connected\n"
         "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected\n"
     )
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok(stdout)):
         mcps = discover_hosted_mcps_via_cli()
     names = [m.name for m in mcps]
@@ -349,7 +349,7 @@ def test_discover_hosted_mcps_skips_malformed_lines():
         "ok-entry: https://x/sse - Connected\n"
         "another garbage line without the expected shape\n"
     )
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok(stdout)):
         mcps = discover_hosted_mcps_via_cli()
     assert [m.name for m in mcps] == ["ok-entry"]
@@ -366,7 +366,7 @@ def test_discover_mcp_health_classifies_status():
         "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ! Needs authentication\n"
         "sentry: https://mcp.sentry.dev/mcp (HTTP) - ✗ Failed to connect\n"
     )
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok(stdout)):
         records = discover_mcp_health()
     assert len(records) == 3
@@ -380,10 +380,10 @@ def test_discover_mcp_health_classifies_status():
 
 
 def test_discover_mcp_health_returns_empty_on_cli_failure():
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                side_effect=FileNotFoundError):
         assert discover_mcp_health() == []
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok("", returncode=1)):
         assert discover_mcp_health() == []
     print("PASS  test_discover_mcp_health_returns_empty_on_cli_failure")
@@ -400,7 +400,7 @@ def test_discover_all_merges_both_sources(home):
     (home / ".claude.json").write_text(json.dumps(json_cfg))
 
     cli_stdout = "claude.ai Linear: https://mcp.linear.app/sse - ✓ Connected\n"
-    with patch("brainchild.pipeline.claude_code_import.subprocess.run",
+    with patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                return_value=_run_ok(cli_stdout)):
         mcps, wrapped = discover_all_mcps()
 
@@ -428,8 +428,8 @@ def test_discover_all_picks_up_project_mcp_json(home):
         }))
         # No CLI hosted MCPs
         with (
-            patch("brainchild.pipeline.claude_code_import.Path.cwd", return_value=cwd),
-            patch("brainchild.pipeline.claude_code_import.subprocess.run",
+            patch("_1_800_operator.pipeline.claude_code_import.Path.cwd", return_value=cwd),
+            patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                   return_value=_run_ok("")),
         ):
             mcps, wrapped = discover_all_mcps()
@@ -455,8 +455,8 @@ def test_discover_all_dedups_user_scope_over_project_mcp_json(home):
             "mcpServers": {"shared": {"command": "project-cmd", "args": []}}
         }))
         with (
-            patch("brainchild.pipeline.claude_code_import.Path.cwd", return_value=cwd),
-            patch("brainchild.pipeline.claude_code_import.subprocess.run",
+            patch("_1_800_operator.pipeline.claude_code_import.Path.cwd", return_value=cwd),
+            patch("_1_800_operator.pipeline.claude_code_import.subprocess.run",
                   return_value=_run_ok("")),
         ):
             mcps, _ = discover_all_mcps()
@@ -508,7 +508,7 @@ def test_read_user_claude_md_walks_project_scope_too(home):
 
 @_with_fake_home
 def test_normalize_path_for_storage_prefers_home_then_cwd_then_absolute(home):
-    from brainchild.pipeline.claude_code_import import normalize_path_for_storage
+    from _1_800_operator.pipeline.claude_code_import import normalize_path_for_storage
     cwd = home / "proj"
     cwd.mkdir()
     # Under HOME → ~/...
@@ -536,7 +536,7 @@ def test_discover_claude_md_sources_returns_labels_in_walk_order(home):
     # All three sources present. Caller (e.g. wizard) needs the labels
     # to render accurate provenance — without this the prompt hardcodes
     # ~/.claude/CLAUDE.md regardless of which scopes actually exist.
-    from brainchild.pipeline.claude_code_import import discover_claude_md_sources
+    from _1_800_operator.pipeline.claude_code_import import discover_claude_md_sources
     (home / ".claude").mkdir(exist_ok=True)
     (home / ".claude" / "CLAUDE.md").write_text("USER\n")
     proj = home / "proj"
@@ -553,7 +553,7 @@ def test_discover_claude_md_sources_returns_labels_in_walk_order(home):
 
 @_with_fake_home
 def test_discover_claude_md_sources_empty_when_nothing_present(home):
-    from brainchild.pipeline.claude_code_import import discover_claude_md_sources
+    from _1_800_operator.pipeline.claude_code_import import discover_claude_md_sources
     proj = home / "empty"
     proj.mkdir()
     assert discover_claude_md_sources(cwd=proj) == []
@@ -582,7 +582,7 @@ def test_append_env_placeholders_creates_file_if_missing():
         assert added == ["BAR", "FOO"]
         content = env_file.read_text()
         assert "# BAR=" in content and "# FOO=" in content
-        assert "# Added by brainchild" in content
+        assert "# Added by operator" in content
     print("PASS  test_append_env_placeholders_creates_file_if_missing")
 
 
@@ -686,7 +686,7 @@ if __name__ == "__main__":
     # Bust the per-process `claude mcp list` cache before every test so
     # tests that mock subprocess.run see a fresh shell-out instead of
     # whatever a prior test (or the real CLI on this machine) cached.
-    import brainchild.pipeline.claude_code_import as _cci_mod
+    import _1_800_operator.pipeline.claude_code_import as _cci_mod
     for t in tests:
         _cci_mod._CLAUDE_MCP_LIST_CACHE = None
         try:

@@ -1,6 +1,6 @@
-"""Headless Meet probe — bot invited as guest, signed in via brainchild profile.
+"""Headless Meet probe — bot invited as guest, signed in via operator profile.
 
-Variant of headless_meet_baseline.py: uses brainchild's existing persistent
+Variant of headless_meet_baseline.py: uses operator's existing persistent
 profile (already signed into heyoperator2026@gmail.com) but with
 headless=True. Tests whether Meet's anti-bot heuristics block the bot
 when it has a valid Google session AND has been invited to the meeting.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-PROFILE = Path.home() / ".brainchild" / "browser_profile"
+PROFILE = Path.home() / ".operator" / "browser_profile"
 OUT = Path(__file__).parent / "headless_invited.png"
 
 

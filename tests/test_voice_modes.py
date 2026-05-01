@@ -1,7 +1,7 @@
 """
 Tests for the voice mode redesign.
 
-Architectural shape: brainchild emits a sterile, neutral confirmation
+Architectural shape: operator emits a sterile, neutral confirmation
 prompt regardless of voice. The bot's persona (set via personality +
 ground_rules) is responsible for the conversational preamble that
 appears in chat before the system's prompt. This keeps customization
@@ -30,16 +30,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src
 
 def _load_config(yaml_text):
     tmp = tempfile.mkdtemp()
-    bot_dir = Path(tmp) / ".brainchild" / "agents" / "fakebot"
+    bot_dir = Path(tmp) / ".operator" / "agents" / "fakebot"
     bot_dir.mkdir(parents=True)
     (bot_dir / "config.yaml").write_text(textwrap.dedent(yaml_text))
-    (Path(tmp) / ".brainchild" / ".env").write_text("")
-    os.environ["BRAINCHILD_BOT"] = "fakebot"
+    (Path(tmp) / ".operator" / ".env").write_text("")
+    os.environ["OPERATOR_BOT"] = "fakebot"
     os.environ["HOME"]           = tmp
     for mod in list(sys.modules):
-        if mod == "brainchild.config":
+        if mod == "_1_800_operator.config":
             del sys.modules[mod]
-    return importlib.import_module("brainchild.config")
+    return importlib.import_module("_1_800_operator.config")
 
 
 def _yaml(voice_line=""):
@@ -91,8 +91,8 @@ def test_legacy_permission_verbosity_translates():
 
 def test_url_imperative_field_never_collapsed_in_terse():
     """The Sentry URL bug: terse mode must keep URLs verbatim, not collapse to (89 B)."""
-    from brainchild.pipeline.permission_chat_handler import _format_terse
-    long_url = "https://brainchild-3z.sentry.io/issues/7441991509/events/" + "x" * 50
+    from _1_800_operator.pipeline.permission_chat_handler import _format_terse
+    long_url = "https://operator-3z.sentry.io/issues/7441991509/events/" + "x" * 50
     out = _format_terse("mcp__sentry__get_sentry_resource", {"url": long_url})
     assert long_url in out, f"URL was collapsed to size hint: {out!r}"
     assert "B)" not in out, f"URL hidden as size hint: {out!r}"
@@ -106,9 +106,9 @@ def test_format_confirmation_plain_mode():
     this sterile prompt arrives.
     """
     _load_config(_yaml("voice: plain"))
-    if "brainchild.pipeline.permission_chat_handler" in sys.modules:
-        del sys.modules["brainchild.pipeline.permission_chat_handler"]
-    from brainchild.pipeline.permission_chat_handler import _format_confirmation
+    if "_1_800_operator.pipeline.permission_chat_handler" in sys.modules:
+        del sys.modules["_1_800_operator.pipeline.permission_chat_handler"]
+    from _1_800_operator.pipeline.permission_chat_handler import _format_confirmation
     out = _format_confirmation("Bash", {"command": "ls /tmp"})
     assert out.startswith("Run? Bash:")
     assert "ls /tmp" in out
@@ -118,9 +118,9 @@ def test_format_confirmation_plain_mode():
 def test_format_confirmation_technical_mode():
     """Technical voice produces a multi-line 'Run X?\\n  • ...' parameter dump."""
     _load_config(_yaml("voice: technical"))
-    if "brainchild.pipeline.permission_chat_handler" in sys.modules:
-        del sys.modules["brainchild.pipeline.permission_chat_handler"]
-    from brainchild.pipeline.permission_chat_handler import _format_confirmation
+    if "_1_800_operator.pipeline.permission_chat_handler" in sys.modules:
+        del sys.modules["_1_800_operator.pipeline.permission_chat_handler"]
+    from _1_800_operator.pipeline.permission_chat_handler import _format_confirmation
     out = _format_confirmation("Bash", {"command": "ls /tmp"})
     assert out.startswith("Run Bash?")
     assert "command:" in out
@@ -128,13 +128,13 @@ def test_format_confirmation_technical_mode():
 
 
 def test_no_persona_templating_remains():
-    """The brainchild templating layer must NOT carry per-tool English phrases.
+    """The operator templating layer must NOT carry per-tool English phrases.
 
     If `_format_plain`, `_friendly_mcp_name`, or `_MCP_SERVER_FRIENDLY`
     come back, persona customization (pirate, Spanish, etc.) breaks
     again. They live in the bot's prompt now, not in Python.
     """
-    import brainchild.pipeline.permission_chat_handler as h
+    import _1_800_operator.pipeline.permission_chat_handler as h
     for forbidden in ("_format_plain", "_friendly_mcp_name",
                       "_MCP_SERVER_FRIENDLY", "_MCP_VERB_FRIENDLY"):
         assert not hasattr(h, forbidden), (
@@ -144,11 +144,11 @@ def test_no_persona_templating_remains():
 
 
 def test_narrator_silent_in_plain_mode():
-    """Plain voice → brainchild narrator stays silent; bot self-narrates."""
+    """Plain voice → operator narrator stays silent; bot self-narrates."""
     _load_config(_yaml("voice: plain"))
-    if "brainchild.pipeline.chat_runner" in sys.modules:
-        del sys.modules["brainchild.pipeline.chat_runner"]
-    from brainchild.pipeline.chat_runner import ChatRunner
+    if "_1_800_operator.pipeline.chat_runner" in sys.modules:
+        del sys.modules["_1_800_operator.pipeline.chat_runner"]
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
 
     runner = ChatRunner.__new__(ChatRunner)
     runner._narration_auto_approve = {"Read"}
@@ -161,7 +161,7 @@ def test_narrator_silent_in_plain_mode():
 
     assert not runner._send.called, (
         "Plain voice should let the bot self-narrate via prompt — "
-        "brainchild's narrator must stay silent."
+        "operator's narrator must stay silent."
     )
 
 

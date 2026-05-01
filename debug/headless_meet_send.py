@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-PROFILE = Path.home() / ".brainchild" / "browser_profile"
+PROFILE = Path.home() / ".operator" / "browser_profile"
 OUT = Path(__file__).parent
 PRE = OUT / "headless_send_pre.png"
 CHAT = OUT / "headless_send_chat.png"

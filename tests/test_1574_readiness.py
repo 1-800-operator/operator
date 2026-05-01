@@ -37,7 +37,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.readiness import (
+from _1_800_operator.pipeline.readiness import (
     STATUS_GLYPH,
     _missing_env_vars,
     _probe_claude_code,
@@ -54,7 +54,7 @@ def _with_fake_home(fn):
     def wrapper():
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            with patch("brainchild.pipeline.oauth_cache.Path.home", return_value=tmp_path):
+            with patch("_1_800_operator.pipeline.oauth_cache.Path.home", return_value=tmp_path):
                 fn(tmp_path)
     wrapper.__name__ = fn.__name__
     return wrapper
@@ -205,7 +205,7 @@ def test_oauth_server_needed_when_cache_absent(home):
     report = report_mcp_readiness(servers)
     rec = report["linear"]
     assert rec["status"] == "oauth_needed", rec
-    assert "brainchild auth linear" in rec["fix"], rec
+    assert "operator auth linear" in rec["fix"], rec
     assert rec["auth_url"] == "https://mcp.linear.app/mcp", rec
     assert rec["fix_url"] == "https://linear.app/settings/account/security", rec
     print("PASS  test_oauth_server_needed_when_cache_absent")
@@ -223,8 +223,8 @@ def test_claude_code_ok_when_binaries_and_logged_in():
             "credentials_url": "https://docs.claude.com/en/docs/claude-code/overview",
         }
     }
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run",
                return_value=_run_ok(json.dumps({"loggedIn": True}))):
         report = report_mcp_readiness(servers)
     assert report["claude-code"]["status"] == "ok", report
@@ -234,7 +234,7 @@ def test_claude_code_ok_when_binaries_and_logged_in():
 def test_claude_code_prereq_missing_when_git_absent():
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which",
                side_effect=lambda name: None if name == "git" else "/usr/bin/claude"):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
@@ -247,7 +247,7 @@ def test_claude_code_prereq_missing_when_git_absent():
 def test_claude_code_prereq_missing_when_claude_absent():
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which",
                side_effect=lambda name: "/usr/bin/git" if name == "git" else None):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
@@ -259,8 +259,8 @@ def test_claude_code_prereq_missing_when_claude_absent():
 def test_claude_code_prereq_missing_when_not_logged_in():
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run",
                return_value=_run_ok(json.dumps({"loggedIn": False}))):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
@@ -272,8 +272,8 @@ def test_claude_code_prereq_missing_when_not_logged_in():
 def test_claude_code_prereq_missing_when_auth_status_nonzero():
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run",
                return_value=_run_ok("", returncode=2)):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
@@ -285,8 +285,8 @@ def test_claude_code_prereq_missing_when_auth_status_nonzero():
 def test_claude_code_prereq_missing_on_malformed_json():
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run",
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run",
                return_value=_run_ok("not-json")):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
@@ -300,8 +300,8 @@ def test_claude_code_prereq_missing_on_timeout():
                                "credentials_url": "https://docs.claude.com/x"}}
     def _raise_timeout(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=5)
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run", side_effect=_raise_timeout):
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run", side_effect=_raise_timeout):
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
     assert rec["status"] == "prereq_missing", rec
@@ -313,8 +313,8 @@ def test_claude_code_skips_auth_probe_when_disabled():
     """check_claude_code_auth=False returns ok on binary presence alone."""
     servers = {"claude-code": {"enabled": True, "env": {},
                                "credentials_url": "https://docs.claude.com/x"}}
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
-         patch("brainchild.pipeline.readiness.subprocess.run") as run_mock:
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value="/usr/bin/fake"), \
+         patch("_1_800_operator.pipeline.readiness.subprocess.run") as run_mock:
         report = report_mcp_readiness(servers, check_claude_code_auth=False)
         assert not run_mock.called, "auth probe should not spawn subprocess when disabled"
     assert report["claude-code"]["status"] == "ok", report

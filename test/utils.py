@@ -1,5 +1,5 @@
 """
-Shared utilities for the Brainchild pipeline.
+Shared utilities for the Operator pipeline.
 """
 
 

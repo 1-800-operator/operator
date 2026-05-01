@@ -14,11 +14,11 @@ Run: python tests/test_916_disabled_mcp_error.py
 import os
 import sys
 
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild import config
-from brainchild.pipeline.mcp_client import (
+from _1_800_operator import config
+from _1_800_operator.pipeline.mcp_client import (
     MCPClient,
     MCPToolError,
     disabled_server_for_tool,
@@ -81,7 +81,7 @@ def test_execute_tool_raises_actionable_error_for_disabled_server():
             msg = str(e)
             assert "linear" in msg, f"error should name the disabled server: {msg!r}"
             assert "disabled" in msg.lower(), f"error should explain state: {msg!r}"
-            assert "brainchild build" in msg or "enabled: true" in msg, (
+            assert "operator build" in msg or "enabled: true" in msg, (
                 f"error should carry remediation: {msg!r}"
             )
         else:
@@ -114,7 +114,7 @@ def test_execute_tool_preserves_generic_error_for_truly_unknown_tool():
 
 def test_config_loader_populates_disabled_dict():
     """config.py surfaces every `enabled: false` server in DISABLED_MCP_SERVERS."""
-    # BRAINCHILD_BOT=pm loaded at import time; pm ships with several disabled
+    # OPERATOR_BOT=pm loaded at import time; pm ships with several disabled
     # MCPs today (github, and all the 15.7.5 scaffolded ones: slack, salesforce,
     # playwright, sentry). We don't assert a specific name list (that would
     # couple this test to config.yaml edits); we just verify the dict is

@@ -29,7 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from brainchild.pipeline.readiness import (
+from _1_800_operator.pipeline.readiness import (
     PREFLIGHT_OK,
     PREFLIGHT_USER_ABORT,
     preflight_mcp_readiness,
@@ -163,7 +163,7 @@ def test_oauth_needed_y_with_run_auth_failure_continues():
     assert rc == PREFLIGHT_OK, rc
     joined = "\n".join(outputs)
     assert "not authorized" in joined, joined
-    assert "brainchild auth linear" in joined, joined
+    assert "operator auth linear" in joined, joined
     print("PASS  test_oauth_needed_y_with_run_auth_failure_continues")
 
 
@@ -175,7 +175,7 @@ def test_prereq_missing_default_continues(monkey_shutil=None):
     from unittest.mock import patch
     outputs: list[str] = []
     # Force claude-code into prereq_missing by stubbing shutil.which to None.
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value=None):
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value=None):
         rc = preflight_mcp_readiness(
             {"claude-code": {"enabled": True, "env": {},
                              "credentials_url": "https://docs.claude.com/x"}},
@@ -192,7 +192,7 @@ def test_prereq_missing_default_continues(monkey_shutil=None):
 def test_prereq_missing_n_aborts():
     from unittest.mock import patch
     outputs: list[str] = []
-    with patch("brainchild.pipeline.readiness.shutil.which", return_value=None):
+    with patch("_1_800_operator.pipeline.readiness.shutil.which", return_value=None):
         rc = preflight_mcp_readiness(
             {"claude-code": {"enabled": True, "env": {},
                              "credentials_url": "https://docs.claude.com/x"}},

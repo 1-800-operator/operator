@@ -19,7 +19,7 @@ import textwrap
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault("BRAINCHILD_BOT", "pm")
+os.environ.setdefault("OPERATOR_BOT", "pm")
 
 # ── Mock server: speaks just enough MCP to initialize, then ignores SIGTERM ──
 
@@ -82,7 +82,7 @@ _server_file.close()
 
 # ── Patch config before importing MCPClient ──────────────────────────────
 
-from brainchild import config
+from _1_800_operator import config
 config.MCP_SERVERS = {
     "stubborn": {
         "command": sys.executable,
@@ -91,7 +91,7 @@ config.MCP_SERVERS = {
     }
 }
 
-from brainchild.pipeline.mcp_client import MCPClient
+from _1_800_operator.pipeline.mcp_client import MCPClient
 
 passed = 0
 failed = 0
