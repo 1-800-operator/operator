@@ -19,8 +19,6 @@ Probed against `https://us05web.zoom.us/j/<id>?pwd=...` in Chrome (signed-in ope
 | 4c.2 — Caption language modal | ✅ done | First-run only. "Captions will appear in this language for everyone" — meeting-wide side effect. |
 | 4c.3 — Caption rendering | ✅ done | `.lt-subtitle-wrap` + `.live-transcription-subtitle__item`. **Native scrape (Option A) viable** for Zoom. Speaker is initials-only; no aria-live; no scrolling history. |
 | 4d — Participants count + roster | ✅ done | Count exposed in toolbar button aria-label; full roster in `#participants-ul` with `[role="application"][aria-label="<Name> (Me\|Host),computer audio <state>,video <state>"]`. |
-| 4e — Reactions menu (raise hand) | ⏳ deferred | Non-critical — picks up next session. |
-| 5 — Leave confirmation | ⏳ deferred | Non-critical — picks up next session. |
 
 **Architectural findings worth carrying forward (not just selector tables):**
 - **TipTap/ProseMirror chat input** (state 4b) breaks Meet-style `page.fill()`. Adapter needs a per-connector text-input strategy: Meet uses `fill()`, Zoom uses `keyboard.type()` against the focused contenteditable (or paste-via-clipboard).
@@ -110,7 +108,7 @@ The bottom toolbar after entering the meeting. The bot joined **without audio or
 | **Leave** | `button[aria-label="Leave"].footer-button__button` text="Leave" | Stable. Equivalent to Meet's leave call action. |
 | **Open chat panel** | `button[aria-label="open the chat panel"]` text="Chat" | `aria-label` is lowercase. Likely flips to `aria-label="close the chat panel"` when open — confirm in next probe. |
 | **Share screen** | `button.sharing-entry-button-container[aria-label="Share"]` text="Share" | Stable. |
-| **React** | `button[aria-label="React"]` text="React" | Reactions menu (emoji + raise-hand likely live here). |
+| **React** | `button[aria-label="React"]` text="React" | Reactions menu (emoji palette). Bot doesn't use. |
 | **More** | `button.footer-button-base__button` text="More" — **no aria-label** | Use text-content match. Likely contains: Participants, Captions, Recording, Apps, Whiteboard. Need a follow-up probe with this menu open. |
 | **Participants (open panel + count)** | `button[aria-label^="open the participants list pane"].footer-button__button` text="`<N>`Participants" (e.g. `"2Participants"`) | **Surfaces only when count ≥ 2** (when the bot is alone, this button is hidden). The aria-label embeds the count: `"open the participants list pane,[2] particpants"` (sic — Zoom typo `particpants`). Two ways to read count: `aria-label` regex `\[(\d+)\]` or text-content prefix-digits. **For `get_participant_count()` the bot doesn't need to open the panel** — count is in the button itself. If the button is absent, count == 1 (bot only). |
 | **Participants Settings (sub-toggle)** | `button[aria-label="Participants Settings"].footer-participants-button__toggle-button` | Sibling sub-toggle next to the Participants button. Probably opens privacy / lock-meeting actions. Bot doesn't use. |
@@ -119,15 +117,13 @@ The bottom toolbar after entering the meeting. The bot joined **without audio or
 | **Picture-in-picture** | `button#fullscreen-pip-btn[aria-label="Enter Pip"]` text="Pop Out" | Pop video into floating window. Bot doesn't use. |
 | **More menu host (state probe)** | `div[role="group"][aria-label="More meeting control "].dropdown-toggle.btn-group` | Parent of the More button. Adds class `.show` when the dropdown is open — use this as the open/closed state signal (`.dropdown-toggle.show`). |
 | **Captions** | (under More menu — see state 4c) | |
-| **Raise hand** | _not in baseline toolbar; not in More menu_ | Probably inside the React menu (state 4e — pending probe). |
 
 **Common toolbar selector pattern:** all bottom-toolbar buttons share the class prefix `footer-button-base__button` — useful for sanity-checking that an element is a toolbar item. The class `ax-outline` indicates accessibility focus styling.
 
-**Pending sub-state probes** (each one click + re-run script):
-- **4b — Chat panel open:** ✅ partial — input + send + container captured. Still pending: chat history row selectors (need at least one message in chat first).
+**Sub-state probes captured:**
+- **4b — Chat panel open:** ✅ input + send + container + history row selectors captured.
 - **4c — More menu open:** ✅ captured (see below).
 - **4d — Participants surface:** ✅ both count and roster captured (see below).
-- **4e — Reactions menu open:** confirms whether Raise hand lives there.
 
 ## State 4c — More menu open
 
@@ -210,7 +206,6 @@ Triggered by clicking the toolbar Participants button. Opens a side panel with t
 **Conspicuous absences in this build:** no `Participants`, `Recording`, `Apps`, `Notes`, or `Raise Hand` menu items. Likely host-only or paid-tier features. For the bot:
 - **Participants list** must be sourced from somewhere else — possibly the always-visible gallery (mid-screen video tile names) or a separate panel toggle not yet probed. Add to pending probes (4d).
 - **Recording** absent means Zoom's free guest path forbids client-side recording — fine, the bot doesn't record.
-- **Raise Hand** is probably under the Reactions menu (state 4e).
 
 **Adapter implications:**
 - Click pattern: `button:has-text("More")` to open, then `a.dropdown-item[aria-label="Captions"]` (etc.) for the target item. The dropdown closes automatically on item click.
@@ -251,4 +246,4 @@ Triggered by clicking the toolbar **Chat** button. Panel opens as a docked side 
 
 ## State 5 — Leave / end-of-meeting
 
-_Pending probe — click Leave and capture the confirmation modal (likely "Leave Meeting" / "Cancel")._
+The toolbar **Leave** button (`button[aria-label="Leave"].footer-button__button`) is the only entry point. The confirmation modal that follows was not probed — adapter implementer should capture it inline when wiring `leave()` (one click + `document.querySelector('div[role="dialog"].ReactModal__Content')`). Expected shape: ReactModal with "Leave Meeting" / "Cancel" buttons in Zoom's `zm-btn-legacy` family.
