@@ -235,6 +235,41 @@ def test_concurrent_appends_no_torn_lines():
 # Test 8: race — tail() interleaved with appends never sees a partial entry
 # ---------------------------------------------------------------------------
 
+def test_history_dir_and_jsonl_are_owner_only():
+    """~/.operator/history/ must be 0o700, and JSONL files 0o600 — meeting
+    transcripts can hold sensitive chat / caption content. Belt-and-suspenders
+    over umask: covers legacy installs whose history dir was created
+    world-readable before __main__.main set umask 0o077.
+    """
+    import stat as _stat
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "history"
+        # Pre-create the dir with looser perms to simulate the legacy
+        # install case the defensive chmod is meant to retroactively fix.
+        root.mkdir(mode=0o755)
+        # Pre-create a JSONL file with looser perms too — simulates a
+        # legacy meeting record file from before the umask fix.
+        legacy_file = root / "legacy.jsonl"
+        legacy_file.write_text('{"kind":"meta"}\n', encoding="utf-8")
+        os.chmod(legacy_file, 0o644)
+        assert _stat.S_IMODE(root.stat().st_mode) == 0o755
+        assert _stat.S_IMODE(legacy_file.stat().st_mode) == 0o644
+
+        # Reopen the legacy meeting — defensive chmods should retroactively
+        # tighten the dir + the file we touch.
+        rec = MeetingRecord(slug="legacy", root=root)
+        assert _stat.S_IMODE(root.stat().st_mode) == 0o700, \
+            f"history dir must be 0o700, got {oct(_stat.S_IMODE(root.stat().st_mode))}"
+        assert _stat.S_IMODE(rec.path.stat().st_mode) == 0o600, \
+            f"jsonl file must be 0o600, got {oct(_stat.S_IMODE(rec.path.stat().st_mode))}"
+
+        # And a fresh-slug case lands at 0o600 from the start.
+        rec2 = MeetingRecord(slug="fresh", root=root)
+        rec2.append("alice", "hello")
+        assert _stat.S_IMODE(rec2.path.stat().st_mode) == 0o600
+    print("PASS  test_history_dir_and_jsonl_are_owner_only")
+
+
 def test_tail_during_concurrent_appends():
     """While writers append, repeated tail() calls must never fail to parse or observe torn entries."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -288,6 +323,7 @@ if __name__ == "__main__":
         test_tail_scopes_to_latest_session,
         test_tail_edges,
         test_concurrent_appends_no_torn_lines,
+        test_history_dir_and_jsonl_are_owner_only,
         test_tail_during_concurrent_appends,
     ]
     failures = []

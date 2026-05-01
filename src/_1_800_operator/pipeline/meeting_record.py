@@ -5,9 +5,17 @@ File path: ~/.operator/history/<meet_slug>.jsonl
 One JSON object per line: {"timestamp": float, "sender": str, "text": str, "kind": "chat"}.
 
 Append-only. Local-only. Users can delete ~/.operator/history/ freely.
+
+Permissions: the directory and JSONL files hold meeting transcripts that may
+include sensitive chat / caption content. We harden them owner-only on every
+open: mkdir mode=0o700 + defensive chmod on the dir, chmod 0o600 on the file.
+This covers both fresh installs (umask already enforces these modes via
+__main__.main's umask 0o077) AND legacy installs from before the umask fix
+where the dir/files were created world-readable.
 """
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -55,7 +63,15 @@ class MeetingRecord:
             log.info("MeetingRecord opened in-memory (no slug)")
             return
         self.root = root or DEFAULT_ROOT
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Defensive chmod for legacy installs whose history dir predates
+        # __main__.main's umask 0o077 (session 172 credential-hygiene fix).
+        # mkdir's mode= is a no-op when the dir already exists; this is the
+        # belt that retroactively tightens those.
+        try:
+            os.chmod(self.root, 0o700)
+        except OSError as e:
+            log.warning(f"MeetingRecord: chmod 0o700 on {self.root} failed: {e}")
         self.path = self.root / f"{slug}.jsonl"
         # Write a one-time meta header on first open of a new file so the
         # record is self-describing: `head -1 file.jsonl` reveals the
@@ -83,6 +99,14 @@ class MeetingRecord:
                 f.write(json.dumps(boundary, ensure_ascii=False) + "\n")
         except OSError as e:
             log.warning(f"MeetingRecord session_start write failed: {e}")
+        # Tighten file perms once on open. Covers brand-new files (where
+        # the umask already produced 0o600 — chmod is a no-op then) and
+        # legacy files from before the umask fix that may be world-readable.
+        if self.path.exists():
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError as e:
+                log.warning(f"MeetingRecord: chmod 0o600 on {self.path} failed: {e}")
         log.info(f"MeetingRecord opened {self.path}")
 
     def append(self, sender: str, text: str, kind: str = "chat",
