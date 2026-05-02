@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types as mcp_types
 from mcp.client.stdio import stdio_client
 
 from _1_800_operator import config
@@ -71,6 +71,19 @@ def disabled_server_for_tool(tool_name: str) -> str | None:
 
 # Consecutive tool-call failures per server before we disable it for the session.
 RUNTIME_FAILURE_THRESHOLD = 3
+
+
+def _is_brain_mcp(server_name: str) -> bool:
+    """Return True if `server_name` is the active LLM provider's brain MCP.
+
+    Today: only the `codex` server when LLM_PROVIDER == "codex_mcp".
+    Brain MCPs are exempt from the auto-disable mechanism — losing the
+    brain mid-meeting would silently kill the agent (user types
+    "@codex ..." and gets nothing). Sidekick MCPs (Linear, Sentry, etc.)
+    keep the auto-disable so a chatty failing server doesn't burn through
+    the meeting's tool budget.
+    """
+    return server_name == "codex" and config.LLM_PROVIDER == "codex_mcp"
 
 # Substring signals that an MCP tool-error text is almost certainly an auth
 # failure. Used by record_tool_result's sniff to upgrade a tripped server's
@@ -198,6 +211,12 @@ class MCPClient:
         self._servers: dict[str, _ServerHandle] = {}
         # namespaced_tool_name -> { server_name, mcp_tool }
         self._tools: dict[str, dict] = {}
+        # server_name -> elicitation handler. Inbound MCP `elicitation/create`
+        # requests (server→client) are routed through here. Codex MCP server
+        # uses this to ask "approve this shell command?" before executing.
+        # Handler signature: (server_name: str, params: dict) -> {"decision": ...}.
+        # Late-bind safe: callers may register before or after connect_all().
+        self._elicitation_handlers: dict = {}
         # server_name -> structured failure record (populated by connect_all).
         # Shape: {kind, fix, raw, [vars]} — see _classify_startup_failure.
         # Renamed from `failed_servers` in 15.7.1 so consumers that still
@@ -318,6 +337,21 @@ class MCPClient:
         count = self._consecutive_errors.get(server_name, 0) + 1
         self._consecutive_errors[server_name] = count
         if count >= RUNTIME_FAILURE_THRESHOLD:
+            # Brain MCPs (servers acting as the agent's LLM, like the codex
+            # MCP server when LLM_PROVIDER == "codex_mcp") are exempt from
+            # auto-disable: tripping them would silently kill the meeting
+            # brain. The user would type "@codex ..." and get nothing.
+            # Failures still surface to the LLM call site each turn — the
+            # bot can apologize and the user can retry — but the server
+            # stays callable. Sidekick MCPs (Linear/Sentry/etc.) keep the
+            # auto-disable to protect the meeting from a chatty failure loop.
+            if _is_brain_mcp(server_name):
+                log.warning(
+                    f"MCP server '{server_name}' hit runtime threshold "
+                    f"({count}) — auto-disable BYPASSED because it is the "
+                    f"agent's brain (LLM_PROVIDER={config.LLM_PROVIDER!r})"
+                )
+                return False
             if server_name in self._auth_error_seen:
                 reason = (
                     f"{count} consecutive tool-call failures this session, "
@@ -472,9 +506,44 @@ class MCPClient:
         )
         self._loop_thread.start()
 
+    def last_structured_content(self, server_name) -> dict:
+        """Return the `structuredContent` dict from a server's most recent
+        successful tool call (or empty dict if none yet / server unknown).
+
+        Lets callers read fields the SDK doesn't surface in joined text
+        content (e.g., codex returns `threadId` only in structured content).
+        """
+        handle = self._servers.get(server_name)
+        if handle is None:
+            return {}
+        return handle.last_structured_content
+
+    def set_elicitation_handler(self, server_name, handler):
+        """Register a handler for inbound MCP `elicitation/create` requests.
+
+        Late-bind safe: register before or after `connect_all()`. The handle
+        looks up the current handler each request, so this can be called any
+        time after the MCPClient is constructed.
+
+        Handler signature:
+            handler(server_name: str, params: dict) -> dict
+
+        params is the raw `elicitation/create` request params (the server's
+        full envelope, including any vendor-specific extras like Codex's
+        `codex_command`/`codex_cwd`/`codex_parsed_cmd`).
+
+        Return shape:
+            {"decision": "approved"}                            — single-shot OK
+            {"decision": "abort"}                               — refuse
+            {"decision": {"approved_execpolicy_amendment": ...}}— vendor-specific
+                                                                  remember-this-call
+        Anything else is treated as an invalid response and the call is aborted.
+        """
+        self._elicitation_handlers[server_name] = handler
+
     def _connect_server(self, name, srv_config):
         """Start a server task and wait for tool discovery to complete."""
-        handle = _ServerHandle(name, srv_config, self._loop)
+        handle = _ServerHandle(name, srv_config, self._loop, client=self)
         handle.start()
         self._servers[name] = handle
 
@@ -497,15 +566,24 @@ class _ServerHandle:
     communicate via thread-safe request/response futures.
     """
 
-    def __init__(self, name, srv_config, loop):
+    def __init__(self, name, srv_config, loop, *, client=None):
         self.name = name
         self._srv_config = srv_config
         self._loop = loop
+        # Backref to the parent MCPClient so _dispatch_elicitation can look up
+        # the currently registered handler on each request (late-bind).
+        self._client = client
         self.tools = []  # populated after start()
         self._ready = threading.Event()
         self._error: Exception | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._task: asyncio.Task | None = None
+        # Last `structuredContent` returned by this server's most recent
+        # successful tool call. Lets callers read fields the SDK doesn't
+        # surface in the joined text content (e.g., codex returns a
+        # `threadId` here that the provider needs to thread state across
+        # turns). Empty dict between calls; never None.
+        self.last_structured_content: dict = {}
 
     def start(self, timeout=30):
         """Start the server task and block until tools are discovered."""
@@ -593,7 +671,11 @@ class _ServerHandle:
                 env={**os.environ, **self._srv_config["env"]},
             )
             async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    elicitation_callback=self._dispatch_elicitation,
+                ) as session:
                     await session.initialize()
                     self._session = session
                     tools_result = await session.list_tools()
@@ -609,6 +691,54 @@ class _ServerHandle:
             self._ready.set()  # unblock start()
             log.error(f"MCP server '{self.name}' task error: {e}")
 
+    async def _dispatch_elicitation(self, context, params):
+        """Async shim that routes inbound `elicitation/create` to the registered handler.
+
+        The MCP SDK calls this whenever a server (e.g. `codex mcp-server`) sends
+        an `elicitation/create` request. We hand off to the synchronous handler
+        on the executor so it can block on chat. If no handler is registered
+        for this server, decline with INVALID_REQUEST per the SDK's default.
+        """
+        handler = (
+            self._client._elicitation_handlers.get(self.name)
+            if self._client is not None
+            else None
+        )
+        if handler is None:
+            return mcp_types.ErrorData(
+                code=mcp_types.INVALID_REQUEST,
+                message="Elicitation not supported for this server",
+            )
+        params_dict = params.model_dump() if hasattr(params, "model_dump") else dict(params)
+        try:
+            decision_envelope = await asyncio.get_event_loop().run_in_executor(
+                None, handler, self.name, params_dict
+            )
+        except Exception as e:
+            log.exception(f"MCP server '{self.name}' elicitation handler raised")
+            return mcp_types.ErrorData(
+                code=mcp_types.INTERNAL_ERROR,
+                message=f"Elicitation handler error: {e}",
+            )
+        if not isinstance(decision_envelope, dict) or "decision" not in decision_envelope:
+            log.warning(
+                f"MCP server '{self.name}' elicitation handler returned invalid shape: "
+                f"{type(decision_envelope).__name__}"
+            )
+            return mcp_types.ErrorData(
+                code=mcp_types.INVALID_REQUEST,
+                message="Invalid handler response shape (expected {'decision': ...})",
+            )
+        # Map onto MCP `ElicitResult`. The base `Result` class allows extras
+        # (`extra="allow"` in pydantic config), so the `decision` field is
+        # serialized onto the wire alongside `action`. Codex reads `decision`
+        # and ignores `action`. `action="accept"` is the closest semantic
+        # match for our "we made a decision and it's not 'cancel'" intent.
+        return mcp_types.ElicitResult(
+            action="accept",
+            decision=decision_envelope["decision"],
+        )
+
     async def _execute_tool(self, tool_name, arguments):
         """Execute a tool call on the session (must run on the event loop)."""
         if not self._session:
@@ -618,6 +748,16 @@ class _ServerHandle:
             error_text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
             log.error(f"MCP tool returned error: {error_text}")
             raise MCPToolError(f"Tool error: {error_text}")
+        # Snapshot the structuredContent for callers that need fields the SDK
+        # doesn't surface via joined text (e.g., codex's threadId). Reset to
+        # {} when absent so a stale value from a prior call can't leak.
+        sc = getattr(result, "structuredContent", None)
+        if isinstance(sc, dict):
+            self.last_structured_content = sc
+        elif hasattr(sc, "model_dump"):
+            self.last_structured_content = sc.model_dump()
+        else:
+            self.last_structured_content = {}
         parts = []
         for c in result.content:
             if hasattr(c, "text"):

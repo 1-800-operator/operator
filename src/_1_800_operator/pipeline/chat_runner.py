@@ -240,10 +240,42 @@ class ChatRunner:
         summaries = [_format_terse(name, args) for name, args in buffered]
         self._send("Working: " + "; ".join(summaries))
 
+    def _wire_codex_elicitation(self):
+        """If the LLM provider is CodexMCPProvider, plug in:
+          1. The codex-aware elicitation handler on the codex MCP server,
+             so command-approval requests round-trip through meeting chat.
+          2. The MCPClient backref on the provider, so its threaded
+             `codex` / `codex-reply` calls can reach the running server.
+
+        Late-bind only: must run AFTER `MCPClient.connect_all()` succeeds,
+        because the provider's `_mcp_client` is None until set here. Other
+        providers are unaffected.
+        """
+        from _1_800_operator.pipeline.providers.codex_mcp import CodexMCPProvider
+        from _1_800_operator.pipeline.codex_elicitation_handler import (
+            CodexElicitationChatHandler,
+        )
+        provider = getattr(self._llm, "_provider", None)
+        if not isinstance(provider, CodexMCPProvider):
+            return
+        if self._mcp is None:
+            log.warning(
+                "ChatRunner: codex provider present but MCPClient is None — "
+                "elicitation handler not wired"
+            )
+            return
+        handler = CodexElicitationChatHandler(
+            connector=self._connector, runner=self,
+        )
+        self._mcp.set_elicitation_handler("codex", handler)
+        provider.set_mcp_client(self._mcp)
+        log.info("ChatRunner: codex elicitation handler wired (server='codex')")
+
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
         log.info(f"ChatRunner: joining {meeting_url}")
         self._wire_track_a_permissions()
+        self._wire_codex_elicitation()
         # Open a meeting record for this URL if one wasn't provided.
         if self._record is None:
             slug = slug_from_url(meeting_url)
@@ -1008,7 +1040,7 @@ class ChatRunner:
         per inner tool_use. Reads via seek-and-resume so we don't re-emit
         events on each pass. Exits when `done_event` fires.
         """
-        from _1_800_operator.agents.engineer.claude_code import STREAM_LOG_PATH
+        from _1_800_operator.mcp_servers.claude_code import STREAM_LOG_PATH
         pos = 0
         while True:
             if STREAM_LOG_PATH.exists():

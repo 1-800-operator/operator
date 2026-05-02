@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"019de715-7d73-7410-81e8-546b2d6c5a65"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'cat /tmp/spike_target.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'cat /tmp/spike_target.txt'","aggregated_output":"spike payload: hello from probe 1\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"spike payload: hello from probe 1"}}
+{"type":"turn.completed","usage":{"input_tokens":26172,"cached_input_tokens":24320,"output_tokens":58,"reasoning_output_tokens":0}}

@@ -73,7 +73,14 @@ _BUNDLED_AGENTS_DIR = Path(__file__).resolve().parents[1] / "agents"
 # OPERATOR_BOT gate at import time and the wizard runs before a bot is
 # chosen. If this path changes, update config.ENV_FILE in lockstep.
 _ENV_FILE = Path.home() / ".operator" / ".env"
-_PM_CONFIG = _BUNDLED_AGENTS_DIR / "pm" / "config.yaml"
+# From-scratch baseline. Carries the full MCP gallery (all enabled: false)
+# plus a clean agent skeleton; the wizard fills in the user-named blocks
+# and writes the result under ~/.operator/agents/<name>/.
+_CUSTOM_TEMPLATE = Path(__file__).resolve().parents[1] / "custom_template.yaml"
+
+# `claude` is the only shipped preset — its identity is "your Claude Code
+# setup, in a meeting." Everything else is built via the custom path.
+_PRESET_NAMES = {"claude"}
 
 # Subcommand verbs the CLI reserves — a from-scratch bot can't use them as
 # a name because `operator <reserved>` would never dispatch to the bot.
@@ -126,7 +133,7 @@ class WizardState:
     name: str  # bot name (also dir name under agents/)
     display_name: str
     tagline: str
-    based_on: str  # baseline bot ("pm" for new, preset name for edit)
+    based_on: str  # "custom" for from-scratch, preset name (e.g. "claude") for edit
     portrait: str  # placeholder in custom mode, real portrait in edit mode
     bot_cfg: dict
     enabled_skill_names: list[str] = field(default_factory=list)
@@ -233,7 +240,7 @@ def _validate_name(raw: str) -> tuple[bool, str]:
     if name in RESERVED_NAMES:
         return False, f"'{name}' is a reserved CLI subcommand"
     if name in _existing_bots():
-        return False, f"agents/{name}/ already exists — pick a different name or re-run and choose the preset"
+        return False, f"agents/{name}/ already exists — pick a different name or run `operator edit {name}` to modify it"
     return True, ""
 
 
@@ -270,43 +277,56 @@ def _bot_tagline(name: str) -> str:
 
 
 def _step1_fighter_select() -> WizardState:
-    console.print("[bold]1. Choose your base agent[/bold]\n")
-    bots = _existing_bots()
+    """Choose between the `claude` preset and a from-scratch custom build.
 
+    These are the only two paths v1 ships. Existing custom bots are edited
+    via `operator edit <name>`, which bypasses step 1 entirely; the picker
+    here is just for new builds.
+    """
+    console.print("[bold]1. Choose your base agent[/bold]\n")
+
+    claude_tagline = _bundled_tagline("claude")
     choices: list[Choice] = [
+        Choice(
+            label="claude",
+            value="claude",
+            preview=_preset_preview("claude", claude_tagline),
+        ),
         Choice(
             label="custom",
             value="__custom__",
             preview=_custom_preview(),
         ),
     ]
-    for bot in bots:
-        tag = _bot_tagline(bot)
-        choices.append(Choice(
-            label=bot,
-            value=bot,
-            preview=_preset_preview(bot, tag),
-        ))
 
     picked = select_one("", choices, console=console)
     console.print()
     if picked.value == "__custom__":
         return _from_scratch()
-    if picked.value == "claude":
-        # claude preset is a hard dependency on the Claude Code CLI — the
-        # whole agent identity is "inherit the user's claude-code setup."
-        # Gate selection at the picker so the user fixes the prereq first
-        # rather than discovering it mid-wizard. Option (b) from the plan:
-        # show the preset, block with hint, send back to the gallery.
-        ok, reason = claude_code_installed_and_logged_in()
-        if not ok:
-            console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}")
-            console.print(
-                "  [dim]Install Claude Code (https://claude.ai/code) and run "
-                "`claude login`, then re-run `operator build`.[/dim]\n"
-            )
-            return _step1_fighter_select()
+    # claude preset is a hard dependency on the Claude Code CLI — the
+    # whole agent identity is "inherit the user's claude-code setup."
+    # Gate selection at the picker so the user fixes the prereq first
+    # rather than discovering it mid-wizard.
+    ok, reason = claude_code_installed_and_logged_in()
+    if not ok:
+        console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}")
+        console.print(
+            "  [dim]Install Claude Code (https://claude.ai/code) and run "
+            "`claude login`, then re-run `operator build`.[/dim]\n"
+        )
+        return _step1_fighter_select()
     return _edit_preset(picked.value)
+
+
+def _bundled_tagline(name: str) -> str:
+    """Read tagline from the shipped bundle (not the user copy) so the step
+    1 preview is stable even before `_ensure_user_agents` seeds the user dir.
+    """
+    cfg_path = _BUNDLED_AGENTS_DIR / name / "config.yaml"
+    try:
+        return (_load_yaml(cfg_path).get("agent") or {}).get("tagline", "") or ""
+    except Exception:
+        return ""
 
 
 def _custom_preview() -> RenderableType:
@@ -335,26 +355,22 @@ def _from_scratch() -> WizardState:
     display = name
     trigger = f"@{name}"
 
-    cfg = _load_yaml(_PM_CONFIG)
+    cfg = _load_yaml(_CUSTOM_TEMPLATE)
     cfg.setdefault("agent", {})
     cfg["agent"]["name"] = display
     cfg["agent"]["trigger_phrase"] = trigger
     cfg["agent"]["tagline"] = tagline
 
-    # From-scratch baseline: every MCP block starts disabled. The user
-    # flips on what they want in Step 2.
-    for srv in cfg.get("mcp_servers", {}).values():
-        srv["enabled"] = False
-
-    # system_prompt carries pm's default through — step 4 offers
-    # approve-or-start-blank so users can inherit or replace.
+    # The template ships every MCP block with `enabled: false` already; no
+    # post-load normalization needed here. Re-asserting the default would
+    # only mask a future template-author bug.
 
     return WizardState(
         mode="new",
         name=name,
         display_name=display,
         tagline=tagline,
-        based_on="pm",
+        based_on="custom",
         portrait=build_card.PLACEHOLDER_PORTRAIT,
         bot_cfg=cfg,
     )
@@ -927,17 +943,27 @@ _BUILTIN_TOOLS = [
 def _step_permissions(state: WizardState) -> None:
     """Permission policy — single-screen built-in-tool checklist.
 
-    Same shape for both tracks. Track-A (claude_cli) tool names — Read,
-    Bash, Write, etc. — match exactly; for track-B (openai/anthropic
-    outer LLM) those names won't fire because track-B doesn't use them,
-    so the entries are inert (no harm). Track-B's MCP tools are still
-    gated by the legacy per-MCP read_tools / confirm_tools blocks until
-    the user moves them into the unified permissions list — config.py
-    translates legacy entries at load time, so existing configs keep
-    working unchanged. MCP-tool patterns (e.g. mcp__sentry__get_*) are
-    not surfaced in the wizard; power users edit the YAML directly per
-    README.
+    Same shape for openai / anthropic / claude_cli tracks. Track-A
+    (claude_cli) tool names — Read, Bash, Write, etc. — match exactly;
+    for track-B (openai/anthropic outer LLM) those names won't fire
+    because track-B doesn't use them, so the entries are inert (no
+    harm). Track-B's MCP tools are still gated by the legacy per-MCP
+    read_tools / confirm_tools blocks until the user moves them into
+    the unified permissions list — config.py translates legacy entries
+    at load time, so existing configs keep working unchanged. MCP-tool
+    patterns (e.g. mcp__sentry__get_*) are not surfaced in the wizard;
+    power users edit the YAML directly per README.
+
+    Codex (codex_mcp) is the exception: codex's internal safe-allowlist
+    already filters read-class commands before they reach operator, so a
+    per-tool checklist would be entirely dead code. Codex agents instead
+    expose two radio knobs (approval-policy + sandbox) — see
+    _step_permissions_codex.
     """
+    provider = ((state.bot_cfg.get("llm") or {}).get("provider") or "").strip()
+    if provider == "codex_mcp":
+        return _step_permissions_codex(state)
+
     console.print("[bold]4. Permissions[/bold]")
     console.print(
         "  [dim]Which built-in tools should run silently vs. ask in chat?[/dim]\n"
@@ -1007,6 +1033,80 @@ def _step_permissions(state: WizardState) -> None:
         "  [dim]MCP tools ask by default. To auto-approve specific ones, edit "
         "agents/<bot>/config.yaml — patterns like mcp__sentry__get_* are "
         "supported. See README → MCP permissions.[/dim]"
+    )
+
+
+_CODEX_APPROVAL_CHOICES = [
+    ("on-request", "Codex's model decides when to ask (DEFAULT — recommended for chat use)"),
+    ("never",      "Run every command silently. Fast, but no chat-confirmation safety net."),
+    ("on-failure", "Only ask after a sandbox rejection."),
+    ("untrusted",  "Ask on EVERY non-allowlisted command. Most paranoid; very chatty."),
+]
+_CODEX_SANDBOX_CHOICES = [
+    ("read-only",          "Reads OK, writes blocked at OS level until approved (DEFAULT)."),
+    ("workspace-write",    "Writes within cwd permitted; outside still blocked."),
+    ("danger-full-access", "No sandbox. Use with extreme care."),
+]
+
+
+def _step_permissions_codex(state: WizardState) -> None:
+    """Permissions UI for the codex agent — two radio knobs (no tool list).
+
+    Codex's internal safe-allowlist filters read-class commands before they
+    elicit, so an operator-side auto_approve list is dead code. The
+    meaningful surface is `default_approval_policy` (how aggressively
+    codex's model escalates) and `default_sandbox` (what writes are
+    permitted before approval). See agents/codex/config.yaml for the full
+    knob descriptions.
+    """
+    console.print("[bold]4. Permissions (codex)[/bold]")
+    console.print(
+        "  [dim]Codex's internal allowlist filters read-class commands "
+        "automatically. Pick the approval policy + sandbox for everything "
+        "else.[/dim]\n"
+    )
+
+    state.bot_cfg.setdefault("permissions", {})
+    existing_policy = state.bot_cfg["permissions"].get("default_approval_policy") or "on-request"
+    existing_sandbox = state.bot_cfg["permissions"].get("default_sandbox") or "read-only"
+
+    console.print("  [bold]Approval policy[/bold]")
+    policy_choices = [
+        Choice(label=name, sublabel=note, value=name)
+        for name, note in _CODEX_APPROVAL_CHOICES
+    ]
+    initial_policy_idx = next(
+        (i for i, (n, _) in enumerate(_CODEX_APPROVAL_CHOICES) if n == existing_policy),
+        0,
+    )
+    picked_policy = select_one(
+        "", policy_choices, console=console, initial=initial_policy_idx,
+    )
+    console.print()
+
+    console.print("  [bold]Sandbox[/bold]")
+    sandbox_choices = [
+        Choice(label=name, sublabel=note, value=name)
+        for name, note in _CODEX_SANDBOX_CHOICES
+    ]
+    initial_sandbox_idx = next(
+        (i for i, (n, _) in enumerate(_CODEX_SANDBOX_CHOICES) if n == existing_sandbox),
+        0,
+    )
+    picked_sandbox = select_one(
+        "", sandbox_choices, console=console, initial=initial_sandbox_idx,
+    )
+    console.print()
+
+    state.bot_cfg["permissions"]["default_approval_policy"] = picked_policy.value
+    state.bot_cfg["permissions"]["default_sandbox"] = picked_sandbox.value
+
+    # Clear any legacy claude-vocab lists if the user is editing a misfit config.
+    state.bot_cfg["permissions"].pop("auto_approve", None)
+    state.bot_cfg["permissions"].pop("always_ask", None)
+
+    console.print(
+        f"  ✓ approval-policy: {picked_policy.value}, sandbox: {picked_sandbox.value}"
     )
 
 
@@ -1232,8 +1332,8 @@ def _write_readme(path: Path, name: str, bot_cfg: dict) -> None:
         "Skills and MCPs are independent in this bundle — enabling a skill\n"
         "that references an MCP tool doesn't auto-enable the MCP, and vice\n"
         "versa. If a skill asks for a tool that isn't wired, the model will\n"
-        "either ask for it or degrade gracefully. Re-run `operator build`\n"
-        "and pick this agent as a preset to adjust either list.\n"
+        f"either ask for it or degrade gracefully. Run `operator edit {name}`\n"
+        "to adjust either list.\n"
     )
     path.write_text(body, encoding="utf-8")
 

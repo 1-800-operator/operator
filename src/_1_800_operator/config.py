@@ -104,12 +104,16 @@ def _validate_config(cfg, source: Path) -> None:
     if isinstance(llm, dict):
         provider = llm.get("provider")
         _require_str("llm.provider", provider)
-        if isinstance(provider, str) and provider not in ("openai", "anthropic", "claude_cli"):
+        if isinstance(provider, str) and provider not in (
+            "openai", "anthropic", "claude_cli", "codex_mcp",
+        ):
             errors.append(
-                f"`llm.provider` must be one of openai, anthropic, claude_cli — "
-                f"got {provider!r}."
+                f"`llm.provider` must be one of openai, anthropic, claude_cli, "
+                f"codex_mcp — got {provider!r}."
             )
-        if isinstance(provider, str) and provider != "claude_cli":
+        # claude_cli + codex_mcp own their own model selection; only the
+        # neutral openai/anthropic providers need an explicit model.
+        if isinstance(provider, str) and provider not in ("claude_cli", "codex_mcp"):
             _require_str("llm.model", llm.get("model"))
 
     # transcript (optional block)
@@ -131,6 +135,23 @@ def _validate_config(cfg, source: Path) -> None:
         if isinstance(permissions, dict):
             _require_list_of_str("permissions.auto_approve", permissions.get("auto_approve"))
             _require_list_of_str("permissions.always_ask", permissions.get("always_ask"))
+            # Codex-specific knobs (codex_mcp provider only, but inert
+            # elsewhere). Validate values when present so a typo fails at
+            # load time rather than mid-meeting.
+            _CODEX_POLICY_VALUES = {"never", "on-failure", "on-request", "untrusted"}
+            _CODEX_SANDBOX_VALUES = {"read-only", "workspace-write", "danger-full-access"}
+            policy = permissions.get("default_approval_policy")
+            if policy is not None and policy not in _CODEX_POLICY_VALUES:
+                errors.append(
+                    f"`permissions.default_approval_policy` must be one of "
+                    f"{sorted(_CODEX_POLICY_VALUES)} — got {policy!r}."
+                )
+            sandbox = permissions.get("default_sandbox")
+            if sandbox is not None and sandbox not in _CODEX_SANDBOX_VALUES:
+                errors.append(
+                    f"`permissions.default_sandbox` must be one of "
+                    f"{sorted(_CODEX_SANDBOX_VALUES)} — got {sandbox!r}."
+                )
 
     # skills (optional block)
     skills = cfg.get("skills")
@@ -206,12 +227,26 @@ INTRO_ON_JOIN        = _config["agent"].get("intro_on_join", True)
 
 # LLM
 LLM_PROVIDER           = _config["llm"]["provider"]
-# `model` is required for the openai/anthropic providers; claude_cli ignores
-# it (claude picks its own model) so we accept absence there. `history_messages`
-# governs the JSONL tail size for prompt rebuilds — also meaningless under
-# claude_cli (inner-claude owns its own context loop).
-LLM_MODEL              = _config["llm"].get("model") if LLM_PROVIDER == "claude_cli" else _config["llm"]["model"]
+# `model` is required for the openai/anthropic providers; claude_cli and
+# codex_mcp ignore it (the inner CLI / MCP server picks its own model) so we
+# accept absence there. `history_messages` governs the JSONL tail size for
+# prompt rebuilds — also meaningless under claude_cli / codex_mcp (the inner
+# CLI/server owns its own context loop).
+_BRAIN_PROVIDERS       = ("claude_cli", "codex_mcp")
+LLM_MODEL              = _config["llm"].get("model") if LLM_PROVIDER in _BRAIN_PROVIDERS else _config["llm"]["model"]
 HISTORY_MESSAGES       = _config["llm"].get("history_messages", 40)
+
+# Codex agent — meeting-scope knobs for the codex MCP-server brain. Only
+# meaningful when LLM_PROVIDER == "codex_mcp"; ignored otherwise. Defaults
+# kept conservative: on-request elicits less than untrusted, read-only
+# sandbox blocks accidental writes. Override via `permissions:` block in
+# the agent's config.yaml.
+CODEX_APPROVAL_POLICY  = (_config.get("permissions") or {}).get(
+    "default_approval_policy"
+) if LLM_PROVIDER == "codex_mcp" else None
+CODEX_SANDBOX          = (_config.get("permissions") or {}).get(
+    "default_sandbox"
+) if LLM_PROVIDER == "codex_mcp" else None
 
 # System prompt has two layers, composed under the hood:
 #   1. FRAMEWORK_SYSTEM_PROMPT — operator-defined per-agent voice and
@@ -295,7 +330,11 @@ CLAUDE_MD_IMPORTS_RAW = list(_config.get("claude_md_imports") or [])
 # would double the same content into context. The field is preserved on
 # disk for non-claude bots that may want to use it; for claude_cli it's
 # silently ignored.
-if LLM_PROVIDER == "claude_cli":
+if LLM_PROVIDER in _BRAIN_PROVIDERS:
+    # claude_cli + codex_mcp both run their own CLI as the brain — those
+    # CLIs read project memory (CLAUDE.md / AGENTS.md) themselves on each
+    # invocation. Re-passing it via --append-system-prompt /
+    # developer-instructions would double the same content.
     CLAUDE_MD_BLOCK = ""
 else:
     CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)

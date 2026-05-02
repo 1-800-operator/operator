@@ -209,6 +209,55 @@ except MCPToolError as e:
           str(e))
 
 
+# ── Test 6b: Brain-MCP exemption from auto-disable ────────────────────
+print("\n6b. Brain-MCP exemption from auto-disable")
+# When LLM_PROVIDER == "codex_mcp", the `codex` server is the agent's
+# brain. Tripping it would silently kill the meeting; record_tool_result
+# must bypass the auto-disable.
+from _1_800_operator.pipeline import mcp_client as _mc
+from _1_800_operator import config as _cfg
+
+# Pretend we're running the codex agent for the next few calls.
+_saved_provider = _cfg.LLM_PROVIDER
+_cfg.LLM_PROVIDER = "codex_mcp"
+client._consecutive_errors.clear()
+client.runtime_failures.clear()
+try:
+    # Drive 5 consecutive failures — well past the threshold.
+    for i in range(5):
+        tripped = client.record_tool_result("codex", False, error_text="kaboom")
+        check(f"codex failure {i+1} does NOT trip auto-disable", not tripped)
+    check("codex NOT in runtime_failures after 5 failures",
+          "codex" not in client.runtime_failures)
+
+    # Sidekick servers under the codex agent still trip normally.
+    client._consecutive_errors.clear()
+    for i in range(RUNTIME_FAILURE_THRESHOLD - 1):
+        client.record_tool_result("linear", False)
+    tripped = client.record_tool_result("linear", False, error_text="kaboom")
+    check("sidekick server (linear) still trips normally under codex agent",
+          tripped)
+    check("linear in runtime_failures",
+          "linear" in client.runtime_failures)
+finally:
+    _cfg.LLM_PROVIDER = _saved_provider
+    client.runtime_failures.clear()
+    client._consecutive_errors.clear()
+
+# Under the regular claude_cli / openai / anthropic agents, the `codex`
+# server name has no special treatment. Auto-disable applies as usual.
+_cfg.LLM_PROVIDER = "anthropic"
+try:
+    for i in range(RUNTIME_FAILURE_THRESHOLD - 1):
+        client.record_tool_result("codex", False)
+    tripped = client.record_tool_result("codex", False)
+    check("codex DOES trip when not the agent's brain", tripped)
+finally:
+    _cfg.LLM_PROVIDER = _saved_provider
+    client.runtime_failures.clear()
+    client._consecutive_errors.clear()
+
+
 # ── Test 7: Shutdown ──────────────────────────────────────────────────
 print("\n7. Shutdown")
 try:

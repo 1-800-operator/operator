@@ -7,6 +7,7 @@ from _1_800_operator.pipeline.providers.base import (
 from _1_800_operator.pipeline.providers.openai import OpenAIProvider
 from _1_800_operator.pipeline.providers.anthropic import AnthropicProvider
 from _1_800_operator.pipeline.providers.claude_cli import ClaudeCLIProvider
+from _1_800_operator.pipeline.providers.codex_mcp import CodexMCPProvider
 
 
 def build_provider():
@@ -45,8 +46,30 @@ def build_provider():
             append_system_prompt=config.SYSTEM_PROMPT or None,
             cwd=os.getcwd(),
         )
+    if name == "codex_mcp":
+        # Codex agent: codex IS the LLM, run via the `codex mcp-server`
+        # subprocess under the user's ChatGPT subscription. Plumbed as a
+        # normal MCP server in operator's MCPClient — we don't manage the
+        # subprocess directly. The provider holds the threadId across
+        # turns so chat → `codex(prompt=...)` → `codex-reply(...)` flows
+        # naturally. The system prompt is passed as developer-instructions
+        # on the first call only (codex stores it per-thread).
+        # Late-bind: chat_runner._wire_codex_elicitation calls
+        # set_mcp_client(...) after MCPClient.connect_all() succeeds.
+        import os
+        approval_policy = (
+            getattr(config, "CODEX_APPROVAL_POLICY", None) or "on-request"
+        )
+        sandbox = getattr(config, "CODEX_SANDBOX", None) or "read-only"
+        return CodexMCPProvider(
+            append_developer_instructions=config.SYSTEM_PROMPT or None,
+            approval_policy=approval_policy,
+            sandbox=sandbox,
+            cwd=os.getcwd(),
+        )
     raise ValueError(
-        f"unknown llm.provider: {name!r} (expected 'openai', 'anthropic', or 'claude_cli')"
+        f"unknown llm.provider: {name!r} "
+        f"(expected 'openai', 'anthropic', 'claude_cli', or 'codex_mcp')"
     )
 
 
@@ -58,5 +81,6 @@ __all__ = [
     "OpenAIProvider",
     "AnthropicProvider",
     "ClaudeCLIProvider",
+    "CodexMCPProvider",
     "build_provider",
 ]

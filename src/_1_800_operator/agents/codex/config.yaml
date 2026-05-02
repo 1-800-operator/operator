@@ -1,0 +1,99 @@
+# Codex — agent's brain is the OpenAI Codex CLI run via `codex mcp-server`
+# under your ChatGPT subscription. The codex MCP server is plumbed below
+# under `mcp_servers.codex`; operator's MCPClient owns its lifecycle.
+#
+# Requires the `codex` CLI installed (`npm install -g @openai/codex`) and
+# logged in (`codex login`). `operator run codex` hard-fails without it.
+#
+# Differences vs the claude agent (intentional, scoped to v1):
+#   - No CLAUDE.md / project-memory mirror — codex reads AGENTS.md /
+#     CLAUDE.md from cwd itself, so passing it twice would double context.
+#   - No skills overlay — codex has no `~/.codex/skills/` analogue today.
+#   - Captions disabled — codex's mcp-server mode doesn't yet expose a way
+#     to inherit operator's bundled transcript MCP. v1 codex sees only chat
+#     messages, not spoken audio. Tracking: roadmap → "codex caption parity".
+#   - No fnmatch auto_approve / always_ask lists — codex's internal
+#     safe-allowlist already filters read-class commands before they reach
+#     operator. Only `default_approval_policy` + `default_sandbox` here.
+
+agent:
+  name: "Codex"
+  trigger_phrase: "@codex"
+  first_contact_hint: "(First time talking to {first_name} — greet them by name once, then drop it.)"
+  tagline: "OpenAI Codex CLI in your meeting — sandboxed shell + chat-gated approvals"
+  intro_on_join: true
+  # Voice — controls how the bot communicates across three surfaces:
+  # progress narrator, confirmation prompts, and reply content.
+  #   plain     — meeting-friendly. Confirmation prompts strip the
+  #               `/bin/zsh -lc` wrapper and show the inner command:
+  #               "Run? `echo hi > /tmp/x.txt` in `/tmp`". Reply content
+  #               steered toward everyday language by the system_prompt
+  #               directive.
+  #   technical — full argv dump in confirmation prompts. Reply content
+  #               keeps file:line citations and code blocks. Useful when
+  #               you want full transparency over readability.
+  voice: plain
+
+llm:
+  # Codex IS the LLM. No `model` / `history_messages` — codex picks its
+  # own model and owns its own context window per thread.
+  provider: "codex_mcp"
+
+# Captions DISABLED in v1 — see header note above.
+transcript:
+  captions_enabled: false
+
+# Approval / sandbox knobs for the codex MCP-server brain. Take effect on
+# every `codex(...)` / `codex-reply(...)` call.
+#
+# default_approval_policy:
+#   never        — codex runs every command without asking. Fast but you
+#                  give up the chat-confirmation safety net.
+#   on-request   — codex's model judges when to escalate (DEFAULT). Far
+#                  less noisy than `untrusted` for chat-driven use.
+#   on-failure   — codex retries with escalation only after a sandbox
+#                  rejection.
+#   untrusted    — codex elicits on EVERY non-allowlisted command. Most
+#                  paranoid; very chatty.
+#
+# default_sandbox:
+#   read-only        — DEFAULT. Filesystem reads OK, writes blocked at OS
+#                      level until an approved escalation grants the
+#                      specific command.
+#   workspace-write  — writes to cwd permitted; outside cwd still blocked.
+#   danger-full-access — no sandbox. Use with extreme care.
+#
+# Edit via `operator edit codex` for per-meeting tightening / loosening.
+permissions:
+  default_approval_policy: on-request
+  default_sandbox: read-only
+
+# MCP servers. The codex brain itself is plumbed here as a normal entry —
+# operator's MCPClient spawns `codex mcp-server`, discovers its `codex`
+# and `codex-reply` tools, and the CodexMCPProvider drives them.
+#
+# `OPENAI_API_KEY: ""` clears the env var at spawn time so Codex falls
+# through to ChatGPT subscription auth even if the user has an API key
+# set in `~/.operator/.env`. Defense layer 1 of the subscription billing
+# guard; layer 2 is the `codex login status` preflight in __main__.py.
+mcp_servers:
+  codex:
+    command: codex
+    args: [mcp-server]
+    env:
+      OPENAI_API_KEY: ""
+    description: "Codex CLI in MCP-server mode (the agent's brain)"
+    enabled: true
+
+# Skills — codex has no `~/.codex/skills/` analogue today. Empty by design.
+# Schema kept compatible with config.py's parser.
+skills:
+  enabled: []
+  external_paths: []
+  progressive_disclosure: true
+
+# System prompt — USER addition (voice + always-on rules in one free-form
+# text block). The framework voice + always-on rules live in
+# `agents/codex/framework.py:FRAMEWORK_SYSTEM_PROMPT` and are composed
+# under the hood. Anything below is appended on top.
+system_prompt: ""

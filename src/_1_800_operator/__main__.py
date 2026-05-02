@@ -897,6 +897,28 @@ def _run_bot(name, rest):
             f"TIMING claude_sync={_time_init.monotonic() - _t_sync:.2f}s"
         )
 
+    # Codex agent — same hard-fail posture as claude. The codex bundled
+    # agent's identity is "OpenAI Codex CLI as the meeting brain." If
+    # codex isn't installed or the user isn't logged in via ChatGPT
+    # subscription, there's nothing for the agent to be. The check also
+    # rejects API-key auth (subscription-only by design — defense layer 2
+    # of the billing guard; layer 1 is OPENAI_API_KEY="" in the agent's
+    # mcp_servers.codex.env block).
+    if name == "codex":
+        from _1_800_operator.pipeline.codex_import import (
+            codex_installed_and_logged_in,
+        )
+        ok, reason = codex_installed_and_logged_in()
+        if not ok:
+            print(
+                f"\nThe `codex` agent requires the OpenAI Codex CLI.\n"
+                f"  {reason}\n"
+                f"\nInstall Codex (`npm install -g @openai/codex`) and run "
+                f"`codex login`, then re-run `operator run codex`.\n",
+                file=sys.stderr,
+            )
+            return 2
+
     # 15.7.4.5 runtime pre-flight — catches hand-edit-config cases the
     # wizard status screen doesn't. All-ok state is silent (zero visible
     # cost on the happy path). Non-zero exit means the user opted out
