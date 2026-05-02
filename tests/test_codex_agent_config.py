@@ -148,6 +148,93 @@ def test_unknown_provider_rejected():
         raise AssertionError("expected config to reject unknown provider")
 
 
+def test_bundled_codex_yaml_omits_moot_blocks():
+    """Lock in the session-180 divergence: codex's bundled config.yaml MUST
+    NOT carry a `skills:` block or `permissions.auto_approve` /
+    `permissions.always_ask` lists.
+
+    Reason these are absent (not just empty): they're operator-side
+    surfaces that don't reach codex's subprocess (codex IS the harness
+    for this agent). Shipping them as empty placeholders would mislead
+    users who open config.yaml — they'd see a familiar-looking block,
+    fill it in, and silently get nothing. The setup/edit wizard skips
+    those steps for codex and pops these keys on write; this test
+    catches the case where a future config or wizard refactor
+    accidentally puts them back.
+
+    If you're seeing this fail because you intentionally added one of
+    those blocks back, double-check that the corresponding wizard step
+    and runtime consumer actually take effect for codex agents — and
+    update the bundled comment block in config.yaml that explains
+    *why* they were absent.
+    """
+    import yaml as _yaml
+    print("\n5. Bundled codex config.yaml omits skills + auto_approve/always_ask")
+    bundled_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "_1_800_operator" / "agents" / "codex" / "config.yaml"
+    )
+    raw = _yaml.safe_load(bundled_path.read_text())
+    _check(
+        "no `skills:` block in bundled codex/config.yaml",
+        "skills" not in raw,
+        detail="codex auto-loads ~/.codex/skills/; an operator-side block is moot",
+    )
+    perms = raw.get("permissions") or {}
+    _check(
+        "no `permissions.auto_approve` in bundled codex/config.yaml",
+        "auto_approve" not in perms,
+        detail="codex's elicitation flow handles approvals — fnmatch lists never fire",
+    )
+    _check(
+        "no `permissions.always_ask` in bundled codex/config.yaml",
+        "always_ask" not in perms,
+        detail="codex's elicitation flow handles approvals — fnmatch lists never fire",
+    )
+    # Companion check: the load-bearing knobs ARE present. If someone
+    # accidentally drops these too, the divergence-comment lie would land.
+    _check(
+        "permissions.default_approval_policy IS present (load-bearing)",
+        "default_approval_policy" in perms,
+    )
+    _check(
+        "permissions.default_sandbox IS present (load-bearing)",
+        "default_sandbox" in perms,
+    )
+
+
+def test_runtime_defaults_for_omitted_blocks():
+    """When the bundled codex config (no `skills`, no `auto_approve`/
+    `always_ask`) is loaded, config.py MUST default the runtime constants
+    to empty — never crash, never raise. This is the runtime mirror of
+    the bundled-yaml invariants test above: locks the defensive
+    `.get(...) or default` pattern in config.py against future
+    refactors that might tighten access to a hard `cfg["skills"]`.
+    """
+    print("\n6. Runtime constants default to empty when blocks are absent")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _seed_codex_into(home)
+        cfg = _load_config_with({"OPERATOR_BOT": "codex"}, fake_home=home)
+        _check("SKILLS_ENABLED == []", cfg.SKILLS_ENABLED == [])
+        _check("SKILLS_EXTERNAL_PATHS == []", cfg.SKILLS_EXTERNAL_PATHS == [])
+        _check("PERMISSIONS_AUTO_APPROVE == []", cfg.PERMISSIONS_AUTO_APPROVE == [])
+        _check("PERMISSIONS_ALWAYS_ASK == []", cfg.PERMISSIONS_ALWAYS_ASK == [])
+        # default_approval_policy + default_sandbox round-trip into the
+        # codex-specific runtime constants — already covered by
+        # test_config_loads_with_expected_defaults, but re-asserting
+        # here keeps this test self-contained for the bundled→runtime
+        # invariant story.
+        _check(
+            "CODEX_APPROVAL_POLICY survives the omitted blocks",
+            cfg.CODEX_APPROVAL_POLICY == "on-request",
+        )
+        _check(
+            "CODEX_SANDBOX survives the omitted blocks",
+            cfg.CODEX_SANDBOX == "read-only",
+        )
+
+
 def main():
     print("=" * 50)
     print("Codex agent config")
@@ -158,6 +245,8 @@ def main():
         test_invalid_approval_policy_rejected,
         test_invalid_sandbox_rejected,
         test_unknown_provider_rejected,
+        test_bundled_codex_yaml_omits_moot_blocks,
+        test_runtime_defaults_for_omitted_blocks,
     ]:
         try:
             fn()
