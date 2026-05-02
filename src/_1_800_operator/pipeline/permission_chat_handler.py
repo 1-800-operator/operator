@@ -21,7 +21,6 @@ the main polling loop doesn't re-feed the user's "ok" to the LLM.
 """
 import fnmatch
 import logging
-import re
 import threading
 import time
 
@@ -102,32 +101,7 @@ ARG_RENDER_HEAD = 90
 ARG_RENDER_TAIL = 90
 
 
-_AFFIRM_PATTERNS = [
-    re.compile(r"\b(yes|ok|okay|sure|approve|approved|confirmed|yep|yeah|y)\b", re.I),
-]
-
-
-def _is_yes(text):
-    """Best-effort yes detection, modeled on chat_runner._handle_confirmation.
-
-    Mirrors the negation gate added to _handle_confirmation: a reply that
-    pairs an affirmative token with a negation ("ok no don't do that",
-    "yes don't") must NOT auto-approve. Same semantics on both confirmation
-    surfaces (track-B chat_runner + track-A permission handler) keeps the
-    user-facing contract consistent regardless of which path they're on.
-    """
-    lower = text.lower().strip()
-    has_negative = (
-        re.search(r"\b(no|nope|nah|stop|cancel)\b", lower) is not None
-        or "don't" in lower
-        or "dont" in lower
-        or "do not" in lower
-    )
-    if has_negative:
-        return False
-    if "go ahead" in lower or "do it" in lower:
-        return True
-    return any(p.search(lower) for p in _AFFIRM_PATTERNS)
+from _1_800_operator.pipeline.confirmation import is_yes as _is_yes  # noqa: F401
 
 
 def _human_size(n):
@@ -257,8 +231,8 @@ def _format_confirmation(tool_name, tool_input):
     """Render the tool call as a neutral approval challenge.
 
     Same shape regardless of voice — operator emits a sterile
-    machine-style prompt; the bot's persona (set via personality +
-    ground_rules) is responsible for the conversational preamble in
+    machine-style prompt; the bot's persona (set via the
+    system_prompt field) is responsible for the conversational preamble in
     chat before this prompt arrives. That keeps customization (pirate
     voice, Spanish, etc.) cleanly in prompt territory and out of
     Python templating.

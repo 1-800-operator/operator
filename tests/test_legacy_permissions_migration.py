@@ -56,8 +56,7 @@ def test_legacy_read_tools_translate_to_auto_approve():
               - get_issue
               - list_issues
             confirm_tools: []
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """)
     assert "mcp__linear__get_issue" in cfg.PERMISSIONS_AUTO_APPROVE
     assert "mcp__linear__list_issues" in cfg.PERMISSIONS_AUTO_APPROVE
@@ -78,8 +77,7 @@ def test_legacy_confirm_tools_translate_to_always_ask():
             read_tools: []
             confirm_tools:
               - analyze_issue_with_seer
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """)
     assert "mcp__sentry__analyze_issue_with_seer" in cfg.PERMISSIONS_ALWAYS_ASK
 
@@ -106,8 +104,7 @@ def test_unified_permissions_block_takes_precedence():
             read_tools:
               - get_issue
             confirm_tools: []
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """)
     # Native + legacy translation both present
     assert "Read"                    in cfg.PERMISSIONS_AUTO_APPROVE
@@ -131,8 +128,7 @@ def test_chat_runner_needs_confirmation_uses_unified_lists():
           always_ask:
             - "mcp__linear__delete_issue"
         mcp_servers: {}
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """)
     # Re-import chat_runner so it picks up the freshly-loaded config.
     if "_1_800_operator.pipeline.chat_runner" in sys.modules:

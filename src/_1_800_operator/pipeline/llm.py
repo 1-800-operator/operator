@@ -253,7 +253,7 @@ class LLMClient:
             messages.append({"role": "user", "content": extra_user_msg})
         return messages
 
-    def ask(self, message, record=True, tools=None, extra_system: str = "", on_paragraph=None):
+    def ask(self, message, record=True, tools=None, extra_system: str = "", on_paragraph=None, retry_rate_limits=True):
         """Send a message to the LLM and return the reply.
 
         ChatRunner is expected to have appended this message to the meeting
@@ -296,6 +296,7 @@ class LLMClient:
                     max_tokens=self._max_tokens,
                     tools=tools,
                     on_paragraph=on_paragraph,
+                    retry_rate_limits=retry_rate_limits,
                 )
             else:
                 response = self._provider.complete(
@@ -304,6 +305,7 @@ class LLMClient:
                     model=config.LLM_MODEL,
                     max_tokens=self._max_tokens,
                     tools=tools,
+                    retry_rate_limits=retry_rate_limits,
                 )
         except ContextOverflowError:
             log.warning("LLM context length exceeded — shrinking replay window")

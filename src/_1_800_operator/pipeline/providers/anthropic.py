@@ -182,7 +182,7 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, client):
         self._client = client
 
-    def complete(self, system, messages, model, max_tokens, tools=None):
+    def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
         kwargs = {
             "model": model,
             "max_tokens": max_tokens,
@@ -203,7 +203,8 @@ class AnthropicProvider(LLMProvider):
             # Mirror OpenAI's parallel_tool_calls=False. Revisit post-MVP.
             kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         t_start = time.monotonic()
-        for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 2):
+        max_retries = RATE_LIMIT_MAX_RETRIES if retry_rate_limits else 0
+        for attempt in range(1, max_retries + 2):
             try:
                 response = self._client.messages.create(**kwargs)
                 break
@@ -212,7 +213,7 @@ class AnthropicProvider(LLMProvider):
                     raise ContextOverflowError() from e
                 raise
             except anthropic.RateLimitError as e:
-                if attempt <= RATE_LIMIT_MAX_RETRIES:
+                if attempt <= max_retries:
                     sleep_s = _compute_retry_sleep(e)
                     _log_rate_limit(e, attempt=attempt, retrying=True, sleep_s=sleep_s)
                     time.sleep(sleep_s)
@@ -239,9 +240,13 @@ class AnthropicProvider(LLMProvider):
 
     def complete_streaming(
         self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
+        retry_rate_limits=True,
     ):
         if on_paragraph is None:
-            return self.complete(system, messages, model, max_tokens, tools=tools)
+            return self.complete(
+                system, messages, model, max_tokens, tools=tools,
+                retry_rate_limits=retry_rate_limits,
+            )
 
         kwargs = {
             "model": model,
@@ -289,11 +294,21 @@ class AnthropicProvider(LLMProvider):
         watchdog.daemon = True
         watchdog.start()
 
-        # 429s in the streaming path occur at request initiation (input-token
-        # check happens before any text is produced), so retrying here cannot
-        # cause partial paragraphs to post twice — buffer is reset per attempt.
+        # 429s in the streaming path *usually* fire at request initiation
+        # (input-token bucket check before any output), in which case
+        # retrying is safe — `buffer` is reset per attempt and nothing has
+        # reached the user yet. But the SDK can also surface 429s mid-stream
+        # (e.g. output-tokens-per-minute caps on lower tiers). If we've
+        # already flushed a paragraph to chat via `on_paragraph` and the
+        # next chunk raises 429, retrying would re-stream from the start
+        # and the user would see the reply twice. The `flushed_any` guard
+        # detects this case and bails with a one-line apology rather than
+        # double-posting.
+        max_retries = RATE_LIMIT_MAX_RETRIES if retry_rate_limits else 0
+        flushed_any = False
+        bailed_mid_stream = False
         try:
-            for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 2):
+            for attempt in range(1, max_retries + 2):
                 buffer = ""
                 try:
                     with self._client.messages.stream(**kwargs) as stream:
@@ -307,6 +322,7 @@ class AnthropicProvider(LLMProvider):
                                 if t_first_flush is None:
                                     t_first_flush = time.monotonic()
                                 buffer = flush_paragraphs(buffer, on_paragraph)
+                                flushed_any = True
                         final = stream.get_final_message()
                     break
                 except anthropic.BadRequestError as e:
@@ -314,7 +330,19 @@ class AnthropicProvider(LLMProvider):
                         raise ContextOverflowError() from e
                     raise
                 except anthropic.RateLimitError as e:
-                    if attempt <= RATE_LIMIT_MAX_RETRIES:
+                    if flushed_any:
+                        # Mid-stream 429 after partial flush: bail.
+                        _log_rate_limit(e, attempt=attempt, retrying=False)
+                        try:
+                            on_paragraph(
+                                "Hit a rate limit mid-reply — sorry, that's all "
+                                "I've got for now. Try again in a moment."
+                            )
+                        except Exception as ex:  # never let apology errors mask the 429
+                            log.warning(f"mid-stream 429 apology post failed: {ex}")
+                        bailed_mid_stream = True
+                        break
+                    if attempt <= max_retries:
                         sleep_s = _compute_retry_sleep(e)
                         _log_rate_limit(e, attempt=attempt, retrying=True, sleep_s=sleep_s)
                         time.sleep(sleep_s)
@@ -325,6 +353,13 @@ class AnthropicProvider(LLMProvider):
             # Cancel even on exception paths so a failed call doesn't leave
             # the watchdog ticking and fire a stale "still working" message.
             watchdog.cancel()
+
+        if bailed_mid_stream:
+            # User already saw the partial reply + the apology line via
+            # on_paragraph. Return a synthetic empty response so the caller
+            # treats the turn as complete and doesn't fire its own narrate
+            # fallback on top of our apology.
+            return ProviderResponse(text="", tool_calls=[], stop_reason="end")
 
         if buffer.strip():
             flush_paragraphs(buffer, on_paragraph, force_final=True)

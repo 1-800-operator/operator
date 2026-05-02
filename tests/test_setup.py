@@ -647,12 +647,12 @@ def test_reset_to_bundled_writes_backup_and_replaces_when_confirmed():
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path, bundled_cfg = _seed_reset_fixture(Path(tmp))
-        bundled_cfg.write_text("name: claude\npersonality: bundled\n")
-        cfg_path.write_text("name: claude\npersonality: USER EDITED\n")
+        bundled_cfg.write_text("name: claude\nsystem_prompt: bundled\n")
+        cfg_path.write_text("name: claude\nsystem_prompt: USER EDITED\n")
         # Decoy second agent — must not be touched
         decoy = cfg_path.parent.parent / "pm" / "config.yaml"
         decoy.parent.mkdir()
-        decoy.write_text("name: pm\npersonality: pm-rules\n")
+        decoy.write_text("name: pm\nsystem_prompt: pm-rules\n")
         decoy_before = decoy.read_text()
 
         orig = wizard._BUNDLED_AGENTS_DIR
@@ -666,7 +666,7 @@ def test_reset_to_bundled_writes_backup_and_replaces_when_confirmed():
         assert result is not None
         assert result.exists()
         assert "USER EDITED" in result.read_text()  # backup carries pre-reset
-        assert cfg_path.read_text() == "name: claude\npersonality: bundled\n"
+        assert cfg_path.read_text() == "name: claude\nsystem_prompt: bundled\n"
         # Decoy agent untouched
         assert decoy.read_text() == decoy_before
         assert not list(decoy.parent.glob("*.bak.*"))
@@ -691,11 +691,11 @@ def test_edit_preset_skips_reset_when_reset_allowed_false():
         # agent + llm or _load_yaml/portrait machinery downstream may break.
         cfg_path.write_text(
             "agent:\n  name: claude\nllm:\n  provider: claude_cli\n"
-            "personality: USER EDITED\n"
+            "system_prompt: USER EDITED\n"
         )
         (bundled_dir / "claude" / "config.yaml").write_text(
             "agent:\n  name: claude\nllm:\n  provider: claude_cli\n"
-            "personality: bundled\n"
+            "system_prompt: bundled\n"
         )
 
         orig_user = wizard._AGENTS_DIR
@@ -714,7 +714,7 @@ def test_edit_preset_skips_reset_when_reset_allowed_false():
                 wizard, "_auto_import_claude_setup", return_value=None
             ):
                 state = wizard._edit_preset("claude", reset_allowed=False)
-            assert state.bot_cfg["personality"] == "USER EDITED", \
+            assert state.bot_cfg["system_prompt"] == "USER EDITED", \
                 "edit mode must preserve current state, not reset"
         finally:
             wizard._AGENTS_DIR = orig_user

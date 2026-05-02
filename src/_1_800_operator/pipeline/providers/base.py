@@ -96,7 +96,7 @@ class LLMProvider:
     receive a ProviderResponse.
     """
 
-    def complete(self, system, messages, model, max_tokens, tools=None):
+    def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
         """Send a chat completion and return a ProviderResponse.
 
         Args:
@@ -106,6 +106,10 @@ class LLMProvider:
           max_tokens: int
           tools: optional list of tool schemas in OpenAI-function-calling shape
                  (providers translate to their own schema format if needed)
+          retry_rate_limits: when False, providers MUST NOT retry on 429 — fail
+                 fast. Used by ChatRunner's narrate-the-failure fallback so the
+                 user doesn't wait through a second retry window after the
+                 original call already exhausted its retries.
 
         Raises ContextOverflowError if the model's context window is exceeded.
         """
@@ -120,6 +124,7 @@ class LLMProvider:
 
     def complete_streaming(
         self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
+        retry_rate_limits=True,
     ):
         """Same contract as complete(), but flushes paragraphs as they arrive.
 

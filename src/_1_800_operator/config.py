@@ -174,11 +174,10 @@ def _validate_config(cfg, source: Path) -> None:
             if env is not None and not isinstance(env, dict):
                 errors.append(f"`mcp_servers.{name}.env` must be a mapping.")
 
-    # personality / ground_rules (optional strings)
-    for key in ("personality", "ground_rules"):
-        v = cfg.get(key)
-        if v is not None and not isinstance(v, str):
-            errors.append(f"`{key}` must be a string, got {type(v).__name__}.")
+    # system_prompt (optional string)
+    sp = cfg.get("system_prompt")
+    if sp is not None and not isinstance(sp, str):
+        errors.append(f"`system_prompt` must be a string, got {type(sp).__name__}.")
 
     # claude_md_imports (optional list of strings — paths, not content)
     _require_list_of_str("claude_md_imports", cfg.get("claude_md_imports"))
@@ -214,17 +213,14 @@ LLM_PROVIDER           = _config["llm"]["provider"]
 LLM_MODEL              = _config["llm"].get("model") if LLM_PROVIDER == "claude_cli" else _config["llm"]["model"]
 HISTORY_MESSAGES       = _config["llm"].get("history_messages", 40)
 
-# System prompt has three layers, composed under the hood:
+# System prompt has two layers, composed under the hood:
 #   1. FRAMEWORK_SYSTEM_PROMPT — operator-defined per-agent voice and
 #      always-on rules. Lives in code at `agents/<name>/framework.py`,
 #      hidden from the wizard. Applies to every run of this agent.
-#   2. PERSONALITY — user-added voice/disposition. Authored via wizard
+#   2. USER_SYSTEM_PROMPT — user-authored prompt (voice, disposition,
+#      always-on rules — one free-form text block). Authored via wizard
 #      step 4. Empty for fresh agents.
-#   3. GROUND_RULES — user-added always-on rules. Authored via wizard
-#      step 4. Empty for fresh agents.
-# Composition: framework first, then user personality, then user ground_rules.
-# Rules-last gains adherence because LLMs weight end-of-prompt content
-# more heavily. Empty layers drop out of the final join.
+# Composition: framework first, then user prompt. Empty layers drop out.
 def _load_framework_system_prompt() -> str:
     """Import the per-agent `framework.py` if present and return its
     `FRAMEWORK_SYSTEM_PROMPT` constant. Missing module → empty string.
@@ -238,13 +234,12 @@ def _load_framework_system_prompt() -> str:
         return ""
 
 FRAMEWORK_SYSTEM_PROMPT = _load_framework_system_prompt()
-PERSONALITY   = (_config.get("personality") or "").strip()
-GROUND_RULES  = (_config.get("ground_rules") or "").strip()
+USER_SYSTEM_PROMPT = (_config.get("system_prompt") or "").strip()
 
 # `claude_md_imports` (optional, claude preset's path-based mirror): the
 # wizard stores PATHS (e.g. `~/.claude/CLAUDE.md`, `./CLAUDE.md`) rather
-# than baking content into ground_rules. Files are read fresh at every
-# config-load (per-meeting boot), so editing your CLAUDE.md takes effect
+# than baking content into the system_prompt. Files are read fresh at
+# every config-load (per-meeting boot), so editing your CLAUDE.md takes effect
 # next session without re-running the wizard. Missing files are skipped
 # with a stderr warning — common when configs travel across machines or
 # the user launches from a different cwd than originally configured.
@@ -305,7 +300,7 @@ if LLM_PROVIDER == "claude_cli":
 else:
     CLAUDE_MD_BLOCK = _read_claude_md_imports(CLAUDE_MD_IMPORTS_RAW)
 SYSTEM_PROMPT = "\n\n".join(
-    b for b in (FRAMEWORK_SYSTEM_PROMPT, PERSONALITY, GROUND_RULES, CLAUDE_MD_BLOCK) if b
+    b for b in (FRAMEWORK_SYSTEM_PROMPT, USER_SYSTEM_PROMPT, CLAUDE_MD_BLOCK) if b
 )
 
 # Skills
@@ -382,7 +377,7 @@ PERMISSIONS_ALWAYS_ASK   = list(_permissions.get("always_ask") or [])
 # Voice — controls how the bot communicates across three surfaces:
 #   - progress narrator ("Working: …")
 #   - confirmation prompts ("Run? …")
-#   - reply content (steered by ground_rules directive)
+#   - reply content (steered by system_prompt directive)
 #
 # Two modes:
 #   "plain"     — meeting-friendly. Translates tool names and args into

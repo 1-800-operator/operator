@@ -3,11 +3,11 @@ and ground rules operator ships with this bot.
 
 This block lives in code, not in user-visible cfg, so the wizard's "System
 Prompt" step shows ONLY user additions on top. Composed at runtime by
-`config.py` as: FRAMEWORK_SYSTEM_PROMPT + cfg.personality + cfg.ground_rules
-+ dynamic notices (disabled MCPs, recall_transcript backstop, etc.).
+`config.py` as: FRAMEWORK_SYSTEM_PROMPT + cfg.system_prompt + dynamic
+notices (disabled MCPs, recall_transcript backstop, etc.).
 
 Edit this file to change the framework voice; users override or augment
-via the wizard's personality / ground_rules step.
+via the wizard's system-prompt step.
 """
 
 FRAMEWORK_SYSTEM_PROMPT = """You are Claude Code, joined to a Google Meet via chat. Your tools — Read,

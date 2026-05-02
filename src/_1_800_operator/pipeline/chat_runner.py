@@ -14,6 +14,7 @@ from pathlib import Path
 
 from _1_800_operator import config
 from _1_800_operator.pipeline import ui
+from _1_800_operator.pipeline.confirmation import is_yes
 from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
 
 log = logging.getLogger(__name__)
@@ -209,7 +210,7 @@ class ChatRunner:
                       bot is doing.
           plain     — narrator stays silent. The bot self-narrates in
                       its own persona-faithful voice via the
-                      ground_rules directive ("when using a tool that
+                      system_prompt directive ("when using a tool that
                       takes >2s, briefly say what you're doing").
                       Keeping a Python-templated narrator alongside
                       that creates duplicate / clashing voice — better
@@ -681,7 +682,13 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
-            self._emit_turn_done(failed=True)
+            self._narrate_failure(
+                context=(
+                    f"the meeting bot tried to answer the user's question but "
+                    f"the LLM call failed with: {type(e).__name__}: {e}."
+                ),
+                fallback="Sorry — I couldn't reach my brain just now. Try again in a moment?",
+            )
             return
 
         # llm.ask returns a raw string only on the legacy non-streaming
@@ -767,26 +774,13 @@ class ChatRunner:
         self._send(msg, kind="confirmation")
 
     def _handle_confirmation(self, text):
-        """Process user's yes/no response to a pending tool call."""
-        lower = text.lower()
-        words = set(re.findall(r"\b\w+\b", lower))
+        """Process user's yes/no response to a pending tool call.
 
-        affirmative_match = bool(words & {
-            "yes", "ok", "sure", "approve", "confirmed", "yep", "yeah"
-        }) or "go ahead" in lower or "do it" in lower
-        # Negation gate: "ok no", "yes don't", "go ahead no actually"
-        # otherwise count as approval because an affirmative token is
-        # present. If any negation is also present, fall through to the
-        # correction branch and let the LLM disambiguate. Contractions
-        # are matched via substring because `\b\w+\b` splits "don't"
-        # into {don, t}.
-        has_negative = (
-            bool(words & {"no", "nope", "nah", "stop", "cancel"})
-            or "don't" in lower
-            or "dont" in lower
-            or "do not" in lower
-        )
-        affirmative = affirmative_match and not has_negative
+        Yes/no detection is shared with the track-A permission handler
+        via `pipeline.confirmation.is_yes` — same vocab, same negation
+        gate, regardless of provider.
+        """
+        affirmative = is_yes(text)
 
         tc = self._pending_tool_call
 
@@ -826,7 +820,15 @@ class ChatRunner:
         self._execute_and_respond(tc)
 
     def _dispatch_result(self, result):
-        """Route an LLM result (text, tool_call, or context_overflow)."""
+        """Route an LLM result (text, tool_call, or context_overflow).
+
+        The else-arm is the safety net for unknown result shapes — a future
+        provider change, an SDK bug, or a new result kind that wasn't wired
+        in. Hands the offending payload to `_narrate_failure` which asks
+        the LLM to translate it into a user-friendly message; on any
+        narration failure, falls through to a hardcoded message. One-shot —
+        never re-enters the dispatcher.
+        """
         if isinstance(result, str):
             self._send(result)
             self._emit_turn_done()
@@ -845,6 +847,45 @@ class ChatRunner:
         elif result["type"] == "context_overflow":
             self._send("Our conversation got too long — I've cleared the history. What would you like to do next?")
             self._emit_turn_done()
+        else:
+            log.error(f"_dispatch_result: unknown result shape {result!r}")
+            self._narrate_failure(
+                context=(
+                    f"the previous turn produced a result the meeting bot "
+                    f"doesn't know how to render in chat. The raw payload was: "
+                    f"{result!r}."
+                ),
+                fallback="Sorry — something went wrong on my end. Try again?",
+            )
+
+    def _narrate_failure(self, *, context: str, fallback: str):
+        """Hand a failure context to the LLM via a small no-tools call asking
+        for a plain-text reply the user can act on. One-shot: the call uses
+        record=False (not persisted to the meeting record), tools=None
+        (return shape is guaranteed to be a bare string), and
+        retry_rate_limits=False (don't make the user wait through a second
+        retry window after the original call already exhausted its retries).
+        On any narration failure (call raises, returns empty), posts the
+        hardcoded `fallback`. Always emits turn_done(failed=True).
+        """
+        prompt = (
+            f"Internal note (do not echo verbatim): {context} "
+            f"Send a short plain-text reply telling the user what happened "
+            f"and what to try next (retry, wait, ping the operator host, etc.). "
+            f"Do not call any tool."
+        )
+        try:
+            narrated = self._llm.ask(
+                prompt, record=False, tools=None, retry_rate_limits=False,
+            )
+        except Exception as e:
+            log.error(f"_narrate_failure call failed: {e}")
+            narrated = None
+        if isinstance(narrated, str) and narrated.strip():
+            self._send(narrated)
+        else:
+            self._send(fallback)
+        self._emit_turn_done(failed=True)
 
     def _handle_load_skill(self, tc):
         """Resolve a load_skill call locally and feed the skill body back as the tool result."""
@@ -869,7 +910,13 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: load_skill follow-up failed: {e}")
-            self._send("Couldn't load that skill — check the logs.")
+            self._narrate_failure(
+                context=(
+                    f"the meeting bot tried to run the /{name} skill but the "
+                    f"LLM follow-up call failed with: {type(e).__name__}: {e}."
+                ),
+                fallback=f"Couldn't run /{name} just now — try again in a moment?",
+            )
             return
         self._dispatch_result(result)
 
@@ -937,8 +984,18 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM summary failed: {e}")
-            self._send("Tool succeeded but I couldn't summarize the result.")
-            self._emit_turn_done(failed=True)
+            truncated = (tool_result[:600] + "...") if isinstance(tool_result, str) and len(tool_result) > 600 else tool_result
+            self._narrate_failure(
+                context=(
+                    f"the {tc['name']} tool ran successfully and returned the "
+                    f"following raw result, but the LLM summary call failed "
+                    f"with: {type(e).__name__}: {e}. Pass the raw result "
+                    f"through to the user verbatim if it looks useful, "
+                    f"otherwise tell them what happened.\n\n"
+                    f"--- raw tool result ---\n{truncated!r}"
+                ),
+                fallback=f"Got the result but couldn't summarize it. Raw output: {truncated}",
+            )
             return
 
         self._dispatch_result(result)

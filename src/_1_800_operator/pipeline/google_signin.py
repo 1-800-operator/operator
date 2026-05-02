@@ -194,11 +194,19 @@ def _launch_signin_flow(
     from _1_800_operator.pipeline.chrome_preflight import require_chrome_or_exit
     require_chrome_or_exit()
 
-    # Match macos_adapter.py:509 — the persistent profile is opened by the
-    # real Google Chrome at runtime, and Chrome profiles aren't compatible
-    # across binaries (bundled Chrome-for-Testing vs system Chrome). Use the
-    # same executable here so the profile we seed is the one the adapter
-    # will read.
+    # NB (session 178, T1.11): wizard sign-in uses real Google Chrome
+    # explicitly. Runtime adapter (`macos_adapter.py:_browser_session`)
+    # currently launches Playwright's bundled Chromium-for-Testing against
+    # the SAME `~/.operator/browser_profile/` dir without `executable_path`.
+    # The two binaries share most profile format, so Google Meet's session
+    # cookies (SAPISID, __Secure-1PSID, etc. — not keychain-encrypted)
+    # round-trip fine today. Risk for the future: if Google ever moves the
+    # auth cookies into the keychain-encrypted slot (Chrome's "v10"/"v11"
+    # scheme), or if Chrome's monthly update bumps a profile-DB schema
+    # Chromium-for-Testing can't yet read, sign-in will silently fail at
+    # `operator run` time with no clear error. Fix when reproducible:
+    # pass `executable_path=str(CHROME_PATH)` in the adapter so both ends
+    # use the same binary. Deferred pre-launch — no observed failures.
     chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
     profile_dir.mkdir(parents=True, exist_ok=True)

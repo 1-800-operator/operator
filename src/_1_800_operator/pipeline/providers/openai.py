@@ -67,7 +67,7 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, client):
         self._client = client
 
-    def complete(self, system, messages, model, max_tokens, tools=None):
+    def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
         kwargs = {
             "model": model,
             "max_tokens": max_tokens,
@@ -127,6 +127,7 @@ class OpenAIProvider(LLMProvider):
 
     def complete_streaming(
         self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
+        retry_rate_limits=True,
     ):
         if on_paragraph is None:
             return self.complete(system, messages, model, max_tokens, tools=tools)

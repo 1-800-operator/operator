@@ -53,15 +53,15 @@ Each bot has a `voice` setting under `agent:`. It controls how much
 detail operator puts into the *system's* messages (the sterile
 approval challenge for destructive tools, the optional progress
 narrator). The bot's actual conversational voice — friendly,
-technical, in Spanish, or even pirate — lives in the `personality`
-and `ground_rules` blocks of the bot's config.yaml. Operator
-doesn't template persona; the bot speaks for itself.
+technical, in Spanish, or even pirate — lives in the `system_prompt`
+block of the bot's config.yaml. Operator doesn't template persona;
+the bot speaks for itself.
 
 - **`plain`** — meeting-friendly. The system's approval challenge is
   a one-line summary that hides bulk content (Write body, MultiEdit
   edits) but keeps imperative fields (Bash command, file paths, URLs)
   verbatim. Operator's narrator stays silent — the bot self-narrates
-  in chat in its own voice via a `ground_rules` directive. **Default.**
+  in chat in its own voice via a `system_prompt` directive. **Default.**
 - **`technical`** — developer-flavored. The approval challenge is a
   full parameter dump with head…tail truncation. Operator's narrator
   emits deterministic "Working: …" lines for auto-approved tools.
@@ -76,7 +76,7 @@ agent:
 
 The conversational shape — "Let me check Sentry first, ok?" or "Aye
 matey, time to peek at yer files" — comes from the bot's prompt, not
-from operator. So if you set the bot's `personality` to talk like a
+from operator. So if you set the bot's `system_prompt` to talk like a
 pirate, every chat message it sends in plain mode reads like a pirate.
 The system's approval challenge stays neutral underneath as a
 machine-readable safety gate.

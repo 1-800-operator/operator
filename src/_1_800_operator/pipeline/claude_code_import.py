@@ -15,7 +15,7 @@ Skills at `~/.claude/skills/` are NOT imported here as of Phase 15.11
 — the bundled claude config ships with
 `skills.external_paths: [~/.claude/skills]`, so the skills loader picks
 them up live without a copy. `read_user_claude_md()` stays because
-CLAUDE.md feeds `ground_rules`, not skills.
+CLAUDE.md feeds the `system_prompt` field, not skills.
 
 Transport handling: Claude Code's MCPs may be stdio (local subprocess
 with `command`+`args`) or remote (HTTP / SSE via `url`). Operator's
@@ -484,7 +484,7 @@ def read_user_claude_md(cwd: Optional[Path] = None) -> Optional[str]:
 
     Single source returns bare content (preserves old contract); multiple
     sources are joined with `# CLAUDE.md — <label>` section headers so
-    provenance survives into ground_rules.
+    provenance survives into the system_prompt.
     """
     found = discover_claude_md_sources(cwd)
     if not found:

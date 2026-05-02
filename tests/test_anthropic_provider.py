@@ -334,6 +334,126 @@ def test_other_bad_request_still_raises():
 
 
 # ---------------------------------------------------------------------------
+# Streaming — mid-stream 429 must not double-post (T1.6, session 178)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStream:
+    """Context manager that yields a list of text chunks then raises (or
+    returns a final message). Mirrors the slice of anthropic.MessageStream
+    surface that complete_streaming uses: `with` + `text_stream` iter +
+    `get_final_message`.
+    """
+
+    def __init__(self, chunks, raise_on_index=None, final=None):
+        self._chunks = chunks
+        self._raise_on_index = raise_on_index
+        self._final = final or SimpleNamespace(
+            content=[_text_block("".join(chunks))], stop_reason="end_turn", usage=None,
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    @property
+    def text_stream(self):
+        for i, chunk in enumerate(self._chunks):
+            if self._raise_on_index is not None and i == self._raise_on_index:
+                err = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+                err.message = "rate limited"
+                err.args = (err.message,)
+                err.response = SimpleNamespace(headers={})
+                raise err
+            yield chunk
+
+    def get_final_message(self):
+        return self._final
+
+
+def test_streaming_mid_stream_429_bails_with_apology_no_double_post():
+    """When a 429 fires after a paragraph has already flushed via on_paragraph,
+    we must NOT retry (the user would see the reply twice). Instead, post a
+    one-line apology via on_paragraph and return a synthetic empty response."""
+    provider, client = _make_provider()
+    # First chunk forms a complete paragraph (\n\n triggers flush_paragraphs);
+    # second iteration raises 429 mid-stream.
+    chunks = ["First paragraph.\n\n", "Second paragraph never arrives."]
+    client.messages.stream.return_value = _FakeStream(chunks, raise_on_index=1)
+
+    flushed: list[str] = []
+
+    result = provider.complete_streaming(
+        system="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        model="m",
+        max_tokens=60,
+        on_paragraph=lambda text: flushed.append(text),
+    )
+
+    # Stream was opened exactly once — no retry that would re-post paragraphs.
+    assert client.messages.stream.call_count == 1, \
+        f"expected 1 stream attempt, got {client.messages.stream.call_count}"
+
+    # First paragraph reached the user, then the apology line.
+    assert any("First paragraph" in t for t in flushed), \
+        f"expected first paragraph in flushed output: {flushed}"
+    assert any("rate limit" in t.lower() for t in flushed), \
+        f"expected mid-stream apology in flushed output: {flushed}"
+
+    # Synthetic empty response so caller doesn't fire its own narrate fallback.
+    assert isinstance(result, ProviderResponse)
+    assert result.text == ""
+    assert result.tool_calls == []
+    assert result.stop_reason == "end"
+    print(f"PASS  test_streaming_mid_stream_429_bails_with_apology_no_double_post  flushed={flushed}")
+
+
+def test_streaming_pre_flush_429_still_retries():
+    """When a 429 fires before any paragraph has flushed, retry is still
+    safe — the buffer is reset per attempt and nothing reached the user.
+    Verifies the flushed_any guard doesn't over-trigger."""
+    provider, client = _make_provider()
+
+    # First call raises immediately (index 0, before any chunk arrives — no flush);
+    # second call succeeds.
+    raising_stream = _FakeStream(["x"], raise_on_index=0)
+    success_stream = _FakeStream(
+        ["Hello.\n\n", "World."],
+        final=SimpleNamespace(
+            content=[_text_block("Hello.\n\nWorld.")], stop_reason="end_turn", usage=None,
+        ),
+    )
+    client.messages.stream.side_effect = [raising_stream, success_stream]
+
+    flushed: list[str] = []
+
+    # Patch sleep to skip the retry backoff in the test.
+    import _1_800_operator.pipeline.providers.anthropic as anth_mod
+    original_sleep = anth_mod.time.sleep
+    anth_mod.time.sleep = lambda s: None
+    try:
+        result = provider.complete_streaming(
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            model="m",
+            max_tokens=60,
+            on_paragraph=lambda text: flushed.append(text),
+        )
+    finally:
+        anth_mod.time.sleep = original_sleep
+
+    assert client.messages.stream.call_count == 2, "expected one retry"
+    assert any("Hello" in t for t in flushed)
+    assert not any("rate limit" in t.lower() for t in flushed), \
+        f"unexpected mid-stream apology: {flushed}"
+    assert isinstance(result, ProviderResponse)
+    print("PASS  test_streaming_pre_flush_429_still_retries")
+
+
+# ---------------------------------------------------------------------------
 # Run all
 # ---------------------------------------------------------------------------
 
@@ -350,6 +470,8 @@ if __name__ == "__main__":
         test_max_tokens_stop_reason_mapped_to_length,
         test_context_overflow_translated,
         test_other_bad_request_still_raises,
+        test_streaming_mid_stream_429_bails_with_apology_no_double_post,
+        test_streaming_pre_flush_429_still_retries,
     ]
     failures = []
     for t in tests:

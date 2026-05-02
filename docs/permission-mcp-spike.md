@@ -121,7 +121,7 @@ Spike findings reduce 14.12.2's estimate from "2–3 days" to roughly **1.5–2 
 - Migration: drop bundled MCPs from claude bot, retire dead Chrome preflight: 1 hour
 - Tests: 2 hours
 
-The unknown is the system-prompt augmentation — passing operator's track-A `personality` + `ground_rules` into `claude -p`'s system prompt without conflicting with the user's `~/.claude/CLAUDE.md`. Several flags exist (`--system-prompt`, `--append-system-prompt`, `--append-system-prompt-file`); choosing the right one will need a small experiment but probably not its own spike.
+The unknown is the system-prompt augmentation — passing operator's track-A `system_prompt` field into `claude -p`'s system prompt without conflicting with the user's `~/.claude/CLAUDE.md`. Several flags exist (`--system-prompt`, `--append-system-prompt`, `--append-system-prompt-file`); choosing the right one will need a small experiment but probably not its own spike.
 
 ## Open questions for 14.12.2
 

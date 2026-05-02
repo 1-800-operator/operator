@@ -858,6 +858,15 @@ def _run_bot(name, rest):
     import time as _time_init
     import logging as _logging_init
 
+    # MUST be set before anything in this function imports `config` —
+    # transitively or directly. Pipeline modules (setup, claude_code_import,
+    # readiness, …) read OPERATOR_BOT at config-import time; if any of them
+    # ever grow a top-level `from _1_800_operator import config` and the env
+    # var isn't set yet, config.py exits 2 with "OPERATOR_BOT env var is not
+    # set". Setting it as the very first line of `_run_bot` makes the
+    # contract enforced by code position, not by comment discipline.
+    os.environ["OPERATOR_BOT"] = name
+
     # Claude agent — Phase 15.9 hard-fail gate. The `claude` bundled agent's
     # entire identity is "inherit your Claude Code setup." If Claude Code
     # isn't installed or the user isn't logged in, there's nothing for the
@@ -887,9 +896,6 @@ def _run_bot(name, rest):
         _logging_init.getLogger("operator").info(
             f"TIMING claude_sync={_time_init.monotonic() - _t_sync:.2f}s"
         )
-
-    # MUST be set before any `from _1_800_operator import config` fires in the pipeline modules.
-    os.environ["OPERATOR_BOT"] = name
 
     # 15.7.4.5 runtime pre-flight — catches hand-edit-config cases the
     # wizard status screen doesn't. All-ok state is silent (zero visible

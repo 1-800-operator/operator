@@ -89,6 +89,29 @@ class LinuxAdapter(MeetingConnector):
         except queue.Empty:
             return []
 
+    def get_participant_count(self):
+        """Return participant count via browser thread.
+
+        Without this override, ChatRunner's `saw_others`/1-on-1/alone-grace
+        signals never fire on Linux because the base default is 0. Selectors
+        match macOS (Meet's DOM is platform-agnostic).
+        """
+        result_q = queue.Queue()
+        self._chat_queue.put(("participant_count", None, result_q))
+        try:
+            return result_q.get(timeout=5)
+        except queue.Empty:
+            return 0
+
+    def get_participant_names(self):
+        """Return participant display names via browser thread (best effort)."""
+        result_q = queue.Queue()
+        self._chat_queue.put(("participant_names", None, result_q))
+        try:
+            return result_q.get(timeout=5)
+        except queue.Empty:
+            return []
+
     def _ensure_chat_open(self, page):
         """Open the chat panel if it isn't already open. Must run on browser thread."""
         try:
@@ -178,6 +201,47 @@ class LinuxAdapter(MeetingConnector):
             log.warning(f"LinuxAdapter: read_chat failed: {e}")
         return new_messages
 
+    def _do_get_participant_count(self, page):
+        """Count participants via data-requested-participant-id elements."""
+        try:
+            return page.locator('[data-requested-participant-id]').count()
+        except Exception as e:
+            log.warning(f"LinuxAdapter: get_participant_count failed: {e}")
+            return 0
+
+    def _do_get_participant_names(self, page):
+        """Best-effort participant name scrape via tile DOM. Same selector
+        chain as macOS — Meet's tile structure is platform-agnostic."""
+        try:
+            return page.evaluate("""() => {
+                const tiles = document.querySelectorAll('[data-requested-participant-id]');
+                const names = [];
+                const seen = new Set();
+                tiles.forEach(t => {
+                    let name = '';
+                    const labelled = t.querySelector('[data-self-name]');
+                    if (labelled) name = (labelled.textContent || '').trim();
+                    if (!name) {
+                        const aria = t.getAttribute('aria-label') || '';
+                        if (aria && !aria.includes('More options') && !aria.includes('Menu')) {
+                            name = aria.trim();
+                        }
+                    }
+                    if (!name) {
+                        const txt = (t.textContent || '').trim();
+                        if (txt && txt.length < 60) name = txt;
+                    }
+                    if (name && !seen.has(name)) {
+                        seen.add(name);
+                        names.push(name);
+                    }
+                });
+                return names;
+            }""") or []
+        except Exception as e:
+            log.warning(f"LinuxAdapter: get_participant_names failed: {e}")
+            return []
+
     def _process_chat_queue(self, page):
         """Drain the chat command queue. Called from browser thread's idle loop."""
         while not self._chat_queue.empty():
@@ -191,6 +255,12 @@ class LinuxAdapter(MeetingConnector):
             elif cmd == "read":
                 messages = self._do_read_chat(page)
                 result_q.put(messages)
+            elif cmd == "participant_count":
+                count = self._do_get_participant_count(page)
+                result_q.put(count)
+            elif cmd == "participant_names":
+                names = self._do_get_participant_names(page)
+                result_q.put(names)
 
     # ── Waiting room ─────────────────────────────────────────────────
 

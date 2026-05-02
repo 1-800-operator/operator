@@ -2,8 +2,8 @@
 Tests for the voice mode redesign.
 
 Architectural shape: operator emits a sterile, neutral confirmation
-prompt regardless of voice. The bot's persona (set via personality +
-ground_rules) is responsible for the conversational preamble that
+prompt regardless of voice. The bot's persona (set via the
+system_prompt field) is responsible for the conversational preamble that
 appears in chat before the system's prompt. This keeps customization
 (pirate voice, Spanish, etc.) cleanly in prompt territory and out of
 Python templating.
@@ -52,8 +52,7 @@ def _yaml(voice_line=""):
           provider: "openai"
           model: "gpt-5"
         mcp_servers: {{}}
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """
 
 
@@ -78,8 +77,7 @@ def test_legacy_permission_verbosity_translates():
           provider: "openai"
           model: "gpt-5"
         mcp_servers: {}
-        ground_rules: ""
-        personality: ""
+        system_prompt: ""
     """
     cfg = _load_config(yaml)
     assert cfg.VOICE == "plain"
@@ -101,7 +99,7 @@ def test_url_imperative_field_never_collapsed_in_terse():
 def test_format_confirmation_plain_mode():
     """Plain voice produces a sterile single-line 'Run? <terse>\\nOK?' prompt.
 
-    No persona phrasing — the bot's ground_rules directive is what
+    No persona phrasing — the bot's system_prompt directive is what
     paraphrases destructive actions in conversational chat *before*
     this sterile prompt arrives.
     """
@@ -139,7 +137,7 @@ def test_no_persona_templating_remains():
                       "_MCP_SERVER_FRIENDLY", "_MCP_VERB_FRIENDLY"):
         assert not hasattr(h, forbidden), (
             f"{forbidden!r} reappeared in permission_chat_handler — "
-            f"persona-flavored phrases belong in ground_rules, not Python"
+            f"persona-flavored phrases belong in system_prompt, not Python"
         )
 
 

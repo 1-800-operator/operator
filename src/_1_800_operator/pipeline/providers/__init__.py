@@ -34,8 +34,8 @@ def build_provider():
     if name == "claude_cli":
         # Track A: claude IS the LLM, run via the `claude` CLI subprocess
         # under the user's Claude Max subscription. SYSTEM_PROMPT
-        # (personality + ground_rules) is appended to claude's default
-        # system prompt via --append-system-prompt at spawn time.
+        # (framework + user system_prompt) is appended to claude's
+        # default system prompt via --append-system-prompt at spawn time.
         # permission_handler is wired in step 5c — for now claude follows
         # its native ~/.claude/settings.json permission rules.
         # cwd mirrors `claude` itself: spawn in the user's invocation dir

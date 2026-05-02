@@ -17,7 +17,7 @@ agent:
   #   plain     — meeting-friendly. Translates tool names and args into
   #               plain English. e.g. "Want me to grab the Sentry issue?
   #               (yes/no)". Reply content steered toward everyday
-  #               language by the ground_rules directive below.
+  #               language by the system_prompt directive below.
   #   technical — developer-flavored. Tool names verbatim with full
   #               parameter dump in confirmation prompts. Reply content
   #               keeps file:line citations and code blocks. Useful when
@@ -99,10 +99,9 @@ skills:
     - ~/.claude/skills
   progressive_disclosure: true
 
-# Personality / ground rules — USER additions to the system prompt.
-# The framework voice + always-on rules (the multi-paragraph block that
-# tells the inner Claude it's in a Meet, response shape, self-narration
-# rules, etc.) lives in `framework.py:FRAMEWORK_SYSTEM_PROMPT` and is
-# composed under the hood. Anything below is appended on top.
-personality: ""
-ground_rules: ""
+# System prompt — USER addition (voice + always-on rules in one free-form
+# text block). The framework voice + always-on rules (the multi-paragraph
+# block that tells the inner Claude it's in a Meet, response shape,
+# self-narration rules, etc.) lives in `framework.py:FRAMEWORK_SYSTEM_PROMPT`
+# and is composed under the hood. Anything below is appended on top.
+system_prompt: ""

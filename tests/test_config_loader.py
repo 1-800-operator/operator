@@ -5,7 +5,7 @@ Covers `config.py`'s behavior at import time:
   1. Missing OPERATOR_BOT → SystemExit(2)
   2. Unknown bot name → SystemExit(2) listing available bots
   3. Happy-path yaml → agent/llm/skills/transcript fields parse with defaults
-  4. SYSTEM_PROMPT = personality + "\\n\\n" + ground_rules; absent blocks drop out
+  4. SYSTEM_PROMPT = system_prompt (single field); absent block → empty
   5. `agent.intro_on_join` — defaults to True when absent, honored when present
   6. MCP servers — `enabled: false` filtered, `tool_timeout_seconds` override preserved,
      `${VAR}` env resolution against os.environ
@@ -146,7 +146,7 @@ def test_happy_path_parses_fields():
 
 def test_claude_md_imports_mounted_into_system_prompt():
     """`claude_md_imports` paths get read fresh at config-load and appended
-    to SYSTEM_PROMPT after personality + ground_rules. Missing files
+    to SYSTEM_PROMPT after the user's system_prompt. Missing files
     warn-and-skip; absent block is a silent no-op."""
     # Set up a fixture CLAUDE.md under tmp HOME so ~/... resolves to it.
     tmp = Path(tempfile.mkdtemp())
@@ -159,8 +159,7 @@ def test_claude_md_imports_mounted_into_system_prompt():
         # Multi-source mounts both with section headers.
         yaml_text = (
             MIN_YAML
-            + "\npersonality: 'be nice'\n"
-            + "ground_rules: 'no lies'\n"
+            + "\nsystem_prompt: |\n  be nice\n\n  no lies\n"
             + "claude_md_imports:\n"
             + "  - ~/.claude/CLAUDE.md\n"
             + "  - ./CLAUDE.md\n"
@@ -191,7 +190,7 @@ def test_claude_md_imports_mounted_into_system_prompt():
             os.chdir(prev_cwd)
 
         sp = module.SYSTEM_PROMPT
-        # personality + ground_rules + claude_md block, in that order
+        # user system_prompt + claude_md block, in that order
         assert sp.startswith("be nice\n\nno lies\n\n"), repr(sp[:100])
         assert "# CLAUDE.md — ~/.claude/CLAUDE.md" in sp
         assert "USER RULE" in sp
@@ -210,7 +209,7 @@ def test_claude_md_imports_missing_paths_skipped_silently():
     stderr, not an error). Common when configs travel cross-machine."""
     yaml_text = (
         MIN_YAML
-        + "\npersonality: 'p'\n"
+        + "\nsystem_prompt: 'p'\n"
         + "claude_md_imports:\n"
         + "  - ~/.this/does/not/exist.md\n"
     )
@@ -222,26 +221,25 @@ def test_claude_md_imports_missing_paths_skipped_silently():
 
 
 def test_system_prompt_composition():
-    """personality first, ground_rules last, joined with blank line; missing blocks drop out."""
-    # Both present
-    yaml_both = MIN_YAML + "\npersonality: |\n  You are friendly.\nground_rules: |\n  Never lie.\n"
+    """system_prompt is the single user-authored field; absent → empty."""
+    # Multi-line block via YAML literal `|`
+    yaml_both = MIN_YAML + "\nsystem_prompt: |\n  You are friendly.\n\n  Never lie.\n"
     mod, _ = load_config(yaml_both)
     assert mod.SYSTEM_PROMPT == "You are friendly.\n\nNever lie.", \
         f"Bad composition: {mod.SYSTEM_PROMPT!r}"
-    assert mod.PERSONALITY == "You are friendly."
-    assert mod.GROUND_RULES == "Never lie."
+    assert mod.USER_SYSTEM_PROMPT == "You are friendly.\n\nNever lie."
 
-    # Only personality
-    mod, _ = load_config(MIN_YAML + "\npersonality: 'only me'\n")
+    # Inline scalar
+    mod, _ = load_config(MIN_YAML + "\nsystem_prompt: 'only me'\n")
     assert mod.SYSTEM_PROMPT == "only me"
-    assert mod.GROUND_RULES == ""
+    assert mod.USER_SYSTEM_PROMPT == "only me"
 
-    # Only ground_rules
-    mod, _ = load_config(MIN_YAML + "\nground_rules: 'rules only'\n")
-    assert mod.SYSTEM_PROMPT == "rules only"
-    assert mod.PERSONALITY == ""
+    # Empty string
+    mod, _ = load_config(MIN_YAML + "\nsystem_prompt: ''\n")
+    assert mod.SYSTEM_PROMPT == ""
+    assert mod.USER_SYSTEM_PROMPT == ""
 
-    # Neither present
+    # Field absent
     mod, _ = load_config(MIN_YAML)
     assert mod.SYSTEM_PROMPT == ""
     print("PASS  test_system_prompt_composition")

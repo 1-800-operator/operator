@@ -25,10 +25,10 @@ through a seven-step guided TUI:
                           On success the final card re-renders with the
                           resolved real portrait — the gift to the user.
 
-Ground rules and personality are the two halves of the bot's system prompt
-(composed in `config.py` as personality first, ground_rules last). The
-wizard treats them as separate steps so users author them as the two
-distinct concerns they really are.
+The bot's user-authored system prompt is one free-form text field
+(`system_prompt`) covering both voice and always-on rules. The wizard's
+instructional copy frames the two concerns; the schema does not split
+them.
 
 All locked-in decisions are in `docs/plan.md`. The wizard never touches
 runtime code paths; `config.py` simply filters `enabled: false` blocks at
@@ -174,9 +174,9 @@ def _ruamel():
     """Lazy ruamel.yaml round-trip parser. Cached at module level via attr.
 
     Configured for round-trip mode: comments preserved, block-scalar styles
-    (`|` for multi-line `ground_rules` / `personality`) preserved, mappings
-    not reordered. width=4096 effectively disables the default ~80-column
-    line wrap which otherwise rewraps long values into folded form.
+    (`|` for multi-line `system_prompt`) preserved, mappings not reordered.
+    width=4096 effectively disables the default ~80-column line wrap which
+    otherwise rewraps long values into folded form.
     """
     cached = getattr(_ruamel, "_cached", None)
     if cached is not None:
@@ -346,8 +346,8 @@ def _from_scratch() -> WizardState:
     for srv in cfg.get("mcp_servers", {}).values():
         srv["enabled"] = False
 
-    # Personality + ground_rules carry pm's defaults through — steps 4/5
-    # offer approve-or-start-blank so users can inherit or replace.
+    # system_prompt carries pm's default through — step 4 offers
+    # approve-or-start-blank so users can inherit or replace.
 
     return WizardState(
         mode="new",
@@ -454,7 +454,7 @@ def _auto_import_claude_setup(state: WizardState) -> None:
     any they don't want for this agent.
 
     CLAUDE.md content is stashed on state for step 4 to optionally append
-    to ground_rules.
+    to the user's system_prompt.
     """
     servers = state.bot_cfg.setdefault("mcp_servers", {})
 
@@ -1010,34 +1010,36 @@ def _step_permissions(state: WizardState) -> None:
     )
 
 
-# ── Step 4 — System Prompt (personality + ground rules) ───────────────────
+# ── Step 4 — System Prompt (voice + always-on rules) ──────────────────────
 
 
 def _step4_system_prompt(state: WizardState) -> None:
-    """Author the agent's system prompt — voice + always-on rules.
+    """Author the agent's system prompt — voice + always-on rules in one
+    free-form text block.
 
     When existing content is present, render it in full as dim preview
     above a single binary `Keep existing prompt? [y/n]` (default y).
-    `n` clears both personality and ground_rules. There's no inline
-    replace affordance — authoring a fresh prompt happens via the
-    no-existing-content path (fresh build) or by clearing here and
-    re-running build. Avoids the caveman bug (session 174) where a
-    stale "Speak like a caveman." stuck around because the input prompt
-    didn't show the existing value and users hit Enter expecting clear.
+    `n` clears the field. There's no inline replace affordance —
+    authoring a fresh prompt happens via the no-existing-content path
+    (fresh build) or by clearing here and re-running build. Avoids the
+    caveman bug (session 174) where a stale "Speak like a caveman."
+    stuck around because the input prompt didn't show the existing
+    value and users hit Enter expecting clear.
 
-    Claude preset note: the next sub-prompt APPENDS CLAUDE.md to whatever
-    this step produces. Clear here if you want CLAUDE.md alone.
+    Claude preset note: the next sub-prompt APPENDS CLAUDE.md to
+    whatever this step produces. Clear here if you want CLAUDE.md alone.
     """
     console.print("[bold]4. System Prompt[/bold]")
-    console.print("  [dim]Add personality and ground rules.[/dim]\n")
+    console.print(
+        "  [dim]Voice and always-on rules — one free-form block. "
+        "How the bot talks, who it is, what it must always (or never) do.[/dim]\n"
+    )
 
-    existing_personality = (state.bot_cfg.get("personality") or "").strip()
-    existing_ground_rules = (state.bot_cfg.get("ground_rules") or "").strip()
-    composed = "\n\n".join(b for b in (existing_personality, existing_ground_rules) if b)
-    existing_chars = len(composed)
+    existing = (state.bot_cfg.get("system_prompt") or "").strip()
+    existing_chars = len(existing)
 
     if existing_chars:
-        console.print(f"  [dim]{composed}[/dim]\n")
+        console.print(f"  [dim]{existing}[/dim]\n")
         keep = Prompt.ask(
             f"  Keep existing prompt? ({existing_chars} chars)",
             choices=["y", "n"],
@@ -1046,14 +1048,12 @@ def _step4_system_prompt(state: WizardState) -> None:
         if keep == "y":
             console.print(f"  [dim]kept existing ({existing_chars} chars)[/dim]")
         else:
-            state.bot_cfg["personality"] = ""
-            state.bot_cfg["ground_rules"] = ""
+            state.bot_cfg["system_prompt"] = ""
             console.print(f"  ✓ system prompt cleared")
     else:
-        new_text = _prompt_with_hint("Leave empty for no personality / ground rules").strip()
+        new_text = _prompt_with_hint("Leave empty for no voice / rules").strip()
         if new_text:
-            state.bot_cfg["personality"] = new_text
-            state.bot_cfg["ground_rules"] = ""
+            state.bot_cfg["system_prompt"] = new_text
             console.print(f"  ✓ system prompt saved ({len(new_text)} chars)")
         else:
             console.print(f"  [dim]system prompt left blank[/dim]")
@@ -1083,8 +1083,8 @@ def _prompt_with_hint(hint: str, *, dim: bool = True) -> str:
     Control characters (ESC/Ctrl-X/etc.) are stripped from the result. Rich's
     Prompt.ask captures raw stdin bytes; an accidental Escape press becomes a
     single-char input ("\\x1b") that's truthy and survives `.strip()` — which
-    has corrupted downstream YAML/env writes (personality field showing up as
-    literal "\\e", etc.).
+    has corrupted downstream YAML/env writes (system_prompt field showing up
+    as literal "\\e", etc.).
     """
     style = "[dim]" if dim else ""
     close = "[/dim]" if dim else ""

@@ -188,7 +188,7 @@ class ClaudeCLIProvider(LLMProvider):
 
         Also appends a runtime backstop to `_append_system_prompt` so the
         recall_transcript hint survives even if a user nukes the agent's
-        ground_rules. The MCP tool's own description is the primary
+        system_prompt. The MCP tool's own description is the primary
         signal; this is defense in depth.
         """
         self._meeting_record_path = str(path) if path else None
@@ -642,7 +642,7 @@ class ClaudeCLIProvider(LLMProvider):
 
     # --- LLMProvider interface ----------------------------------------
 
-    def complete(self, system, messages, model, max_tokens, tools=None):
+    def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
         """Send the latest user message and return the assistant's reply.
 
         Args ignored: model, max_tokens, tools — inner-claude handles these.
@@ -769,6 +769,7 @@ class ClaudeCLIProvider(LLMProvider):
 
     def complete_streaming(
         self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
+        retry_rate_limits=True,
     ):
         """Same contract as complete(), but flushes paragraphs as they arrive.
 
@@ -859,12 +860,6 @@ class ClaudeCLIProvider(LLMProvider):
         deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         buffer = ""
         full_text_parts = []
-        # Each terminal `assistant` event finalizes one sub-message of the
-        # turn. A turn that calls a tool produces multiple sub-messages
-        # (text → tool_use → text after tool result). Indices reset between
-        # sub-messages, so we track the assistant-event boundary instead —
-        # see the assistant-event handler below.
-        canonical_messages = []
         result_evt = None
         while time.monotonic() < deadline:
             try:
@@ -912,13 +907,13 @@ class ClaudeCLIProvider(LLMProvider):
                 # they're inner Task-tool output, not the bot's reply.
                 if payload.get("parent_tool_use_id"):
                     continue
-                content = (payload.get("message") or {}).get("content") or []
-                parts = []
-                for block in content:
-                    btype = block.get("type")
-                    if btype == "text":
-                        parts.append(block.get("text", ""))
-                    elif btype == "tool_use" and self._progress_callback:
+                # Walk content blocks only to dispatch tool_use to the
+                # progress_callback (chat-side narration of inner tools).
+                # Text content is already in `full_text_parts` via the
+                # text_delta path above; we don't reconstruct it from the
+                # assistant event.
+                for block in (payload.get("message") or {}).get("content") or []:
+                    if block.get("type") == "tool_use" and self._progress_callback:
                         try:
                             self._progress_callback(
                                 block.get("name", ""),
@@ -929,8 +924,6 @@ class ClaudeCLIProvider(LLMProvider):
                                 f"ClaudeCLI: progress_callback raised on tool_use "
                                 f"{block.get('name', '')!r}: {exc}"
                             )
-                if parts:
-                    canonical_messages.append("".join(parts))
                 # An `assistant` event finalizes one sub-message of the turn.
                 # When the model calls a tool, the next text comes in a NEW
                 # assistant message (indices reset to 0). Without flushing
@@ -972,19 +965,11 @@ class ClaudeCLIProvider(LLMProvider):
                 f"claude reported error_during_execution: {result_evt.get('error', '')}"
             )
 
-        accumulated = "".join(full_text_parts).strip()
-        # Canonical text reconstructs the full reply by joining each
-        # assistant sub-message with a paragraph break — same separator
-        # we used to flush at the boundary, so the parity check holds
-        # whether the model called zero, one, or many tools mid-turn.
-        canonical_text = "\n\n".join(canonical_messages) if canonical_messages else None
-        final_text = accumulated
-        if canonical_text is not None and canonical_text != accumulated:
-            log.warning(
-                f"ClaudeCLI: streamed accumulator ({len(accumulated)} chars) diverged "
-                f"from canonical assistant event ({len(canonical_text)} chars) — using canonical."
-            )
-            final_text = canonical_text
+        # `full_text_parts` is the single source of truth for what reached
+        # the user via on_paragraph (and via _send → meeting record). No
+        # canonical reconstruction from terminal assistant events — those
+        # are only walked to dispatch tool_use blocks to progress_callback.
+        final_text = "".join(full_text_parts).strip()
 
         return ProviderResponse(
             text=final_text or None,
