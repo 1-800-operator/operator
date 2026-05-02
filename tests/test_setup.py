@@ -80,7 +80,7 @@ def test_name_validation_reserved_and_collision():
 
 def test_mcp_enabled_flip_round_trip():
     """Toggling a server's `enabled` flag survives yaml dump → load → config.py filter."""
-    cfg = wizard._load_yaml(wizard._PM_CONFIG)
+    cfg = wizard._load_yaml(wizard._CUSTOM_TEMPLATE)
     servers = cfg["mcp_servers"]
     # Flip all servers: on→off and off→on.
     for name in servers:
@@ -119,7 +119,7 @@ def _make_state(name: str, mode: str = "edit", **overrides) -> "wizard.WizardSta
         name=name,
         display_name=name.capitalize(),
         tagline="",
-        based_on="pm" if mode == "new" else name,
+        based_on="custom" if mode == "new" else name,
         portrait="placeholder",
         bot_cfg=bot_cfg,
         enabled_skill_names=[],
@@ -326,7 +326,7 @@ def test_wizard_state_equipped_views():
         name="researcher",
         display_name="Researcher",
         tagline="t",
-        based_on="pm",
+        based_on="custom",
         portrait="placeholder",
         bot_cfg=cfg,
         enabled_skill_names=["alpha", "beta", "gamma"],
@@ -495,7 +495,7 @@ def test_collect_env_refs_from_enabled_servers():
         },
     }
     state = wizard.WizardState(
-        mode="new", name="x", display_name="X", tagline="", based_on="pm",
+        mode="new", name="x", display_name="X", tagline="", based_on="custom",
         portrait="placeholder", bot_cfg=cfg, enabled_skill_names=[],
     )
     refs = wizard._collect_env_refs(state)
@@ -519,7 +519,7 @@ def test_collect_env_refs_skips_disabled_servers():
         },
     }
     state = wizard.WizardState(
-        mode="new", name="x", display_name="X", tagline="", based_on="pm",
+        mode="new", name="x", display_name="X", tagline="", based_on="custom",
         portrait="placeholder", bot_cfg=cfg, enabled_skill_names=[],
     )
     refs = wizard._collect_env_refs(state)
@@ -530,7 +530,7 @@ def test_collect_env_refs_skips_disabled_servers():
 def test_collect_env_refs_empty_when_no_mcps():
     """A bot with no mcp_servers section yields the empty set."""
     state = wizard.WizardState(
-        mode="new", name="x", display_name="X", tagline="", based_on="pm",
+        mode="new", name="x", display_name="X", tagline="", based_on="custom",
         portrait="placeholder", bot_cfg={}, enabled_skill_names=[],
     )
     assert wizard._collect_env_refs(state) == set()

@@ -1,15 +1,28 @@
-# PM — product / standup assistant agent for Operator
-# Secrets (API keys) stay in .env — this file is safe to commit and share.
+# Custom-bot template — the from-scratch baseline used by `operator build`
+# when the user picks the "custom" path in step 1. Not a runnable agent in
+# its own right; the wizard reads this file, fills in the user's chosen
+# `agent` block, and writes the result to `~/.operator/agents/<name>/`.
+#
+# All MCP servers ship `enabled: false` — the user opts in per bot via the
+# wizard's MCP picker. Versions are pinned so runtime behavior stays
+# stable through launch; bump deliberately when upstream ships a fix or
+# feature you want.
+#
+# Secrets (API keys) stay in ~/.operator/.env — this file is safe to
+# commit and share.
 
 agent:
-  name: "PM"
-  trigger_phrase: "@operator"
+  name: ""
+  trigger_phrase: ""
   first_contact_hint: "(First time talking to {first_name} — greet them by name once, then drop it.)"
-  tagline: "turns decisions into Linear tickets before you forget them"
+  tagline: ""
   intro_on_join: true
-  # See agents/claude/config.yaml for the full voice mode comment.
-  # plain     — meeting-friendly, plain English (default)
-  # technical — developer-flavored, tool names + args verbatim
+  # voice — controls how the bot communicates across three surfaces:
+  # progress narrator, confirmation prompts, and reply content.
+  #   plain     — meeting-friendly. Translates tool names and args into
+  #               plain English.
+  #   technical — developer-flavored. Tool names verbatim with full
+  #               parameter dump in confirmation prompts.
   voice: plain
 
 llm:
@@ -17,20 +30,16 @@ llm:
   model: "claude-sonnet-4-5"
   history_messages: 40
 
-# Captions on by default — PM's value depends on hearing commitments, blockers,
-# and decisions as they're spoken. Turn captions on in Meet before joining.
+# Captions off by default for custom bots — opt in per agent when the bot
+# benefits from hearing spoken content (e.g. drafts-from-discussion).
 transcript:
-  captions_enabled: true
+  captions_enabled: false
 
-# MCP servers — all shipped bots declare the same full-union scaffold; they
-# differ only in which servers are `enabled: true` by default. `config.py`
-# skips `enabled: false` blocks at load time, so disabled ones are inert at
-# runtime but ready for the `operator setup` wizard to toggle on. Versions
-# are pinned so runtime behavior stays stable through launch; bump
-# deliberately when upstream ships a fix or feature you want.
+# MCP servers — full bundled gallery. All shipped `enabled: false`; the
+# wizard's MCP picker is where the user toggles them on.
 mcp_servers:
   calendar:
-    enabled: true
+    enabled: false
     description: "read your Google Calendar — list events, find free time, pull agenda"
     # @cocal/google-calendar-mcp is the most-adopted Calendar-only MCP (fork of
     # nspady/google-calendar-mcp). Auth is local OAuth: user downloads a
@@ -41,9 +50,9 @@ mcp_servers:
     credentials_url: "https://console.cloud.google.com/apis/credentials"
     auth: env
     command: "npx"
-    args: ["-y", "@cocal/google-calendar-mcp@latest"]     # pin after pressure-testing
+    args: ["-y", "@cocal/google-calendar-mcp@latest"]
     env:
-      GOOGLE_OAUTH_CREDENTIALS: "${GOOGLE_OAUTH_CREDENTIALS}"   # absolute path to credentials.json
+      GOOGLE_OAUTH_CREDENTIALS: "${GOOGLE_OAUTH_CREDENTIALS}"
     read_tools:
       - list-calendars
       - list-events
@@ -66,13 +75,13 @@ mcp_servers:
     # and logged in. If not, this URL is surfaced in the status screen.
     credentials_url: "https://docs.claude.com/en/docs/claude-code/overview"
     command: "python"
-    args: ["-m", "_1_800_operator.agents.engineer.claude_code"]
+    args: ["-m", "_1_800_operator.mcp_servers.claude_code"]
     env:
       # bypassPermissions = auto-approve every tool (incl. Bash). acceptEdits =
       # file edits auto-run, Bash is blocked. Operator confirm-gates each
       # delegate call either way, and --worktree isolates file changes.
       CLAUDE_CODE_PERMISSION_MODE: "bypassPermissions"
-    read_tools: []     # delegate_to_claude_code is a write — always confirm
+    read_tools: []
     confirm_tools: []
     hints: |
       delegate_to_claude_code requires repo_path (absolute local path to a git repo). On the first delegation in a chat, ask the user which repo to work in — do not guess.
@@ -93,8 +102,7 @@ mcp_servers:
     command: "npx"
     args: ["-y", "figma-developer-mcp@0.10.1", "--stdio"]
     env:
-      FIGMA_API_KEY: "${FIGMA_TOKEN}"    # personal access token from figma.com/settings
-    # GLips exposes two read tools — both auto-execute.
+      FIGMA_API_KEY: "${FIGMA_TOKEN}"
     read_tools:
       - get_figma_data
       - download_figma_images
@@ -114,7 +122,6 @@ mcp_servers:
     credentials_url: "https://github.com/settings/tokens"
     command: "github-mcp-server"
     args: ["stdio"]
-    # Tools that auto-execute without user confirmation. Anything not listed here confirms by default.
     read_tools:
       - get_me
       - get_file_contents
@@ -153,19 +160,10 @@ mcp_servers:
       When summarizing: filename + 1-2 sentences on actual content. No search narration. Never describe a file's likely contents — read it first.
 
   linear:
-    enabled: true
+    enabled: false
     description: "file, query, and update Linear tickets the moment decisions land"
-    # auth:oauth + auth_url drives the meeting-join cache-path check (Phase 15.7.3) —
-    # missing ~/.mcp-auth/mcp-remote-<ver>/<md5(auth_url)>_tokens.json means we skip
-    # spawn and tell the user to run `operator auth linear` once. auth_url must
-    # match what mcp-remote hashes internally (for Linear that's the same /mcp URL
-    # passed as the positional arg).
     auth: oauth
     auth_url: "https://mcp.linear.app/mcp"
-    # For OAuth servers credentials_url is informational — the real fix is
-    # `operator auth linear`. Kept present for schema uniformity so the
-    # status screen can fall back to the vendor's settings page if the user
-    # wants to revoke or inspect the authorization.
     credentials_url: "https://linear.app/settings/account/security"
     command: "npx"
     args: ["-y", "mcp-remote@0.1.38", "https://mcp.linear.app/mcp"]
@@ -207,10 +205,10 @@ mcp_servers:
     command: "npx"
     args: ["-y", "@notionhq/notion-mcp-server@2.2.1"]
     env:
-      NOTION_API_KEY: "${NOTION_API_KEY}"       # create at notion.so/profile/integrations
+      NOTION_API_KEY: "${NOTION_API_KEY}"
     read_tools: []
     confirm_tools: []
-    hints: ""    # fill in after pressure testing
+    hints: ""
 
   playwright:
     enabled: false
@@ -242,14 +240,11 @@ mcp_servers:
     description: "query Salesforce CRM — accounts, opportunities, contacts, reports"
     # Salesforce's official @salesforce/mcp. Auth is delegated to the `sf` CLI:
     # user installs sf and runs `sf org login web` once; the MCP reads the
-    # local auth cache. There is no env token — that's why env is empty. The
-    # wizard's generic env-var check cannot validate sf-is-logged-in; flag
-    # during pressure-test whether to add a prereq probe analogous to
-    # claude-code's (15.7.4).
+    # local auth cache. There is no env token — that's why env is empty.
     credentials_url: "https://developer.salesforce.com/tools/salesforcecli"
     auth: env
     command: "npx"
-    args: ["-y", "@salesforce/mcp@latest", "--orgs", "DEFAULT_TARGET_ORG"]    # pin after pressure-testing
+    args: ["-y", "@salesforce/mcp@latest", "--orgs", "DEFAULT_TARGET_ORG"]
     env: {}
     read_tools:
       - run_soql_query
@@ -298,15 +293,13 @@ mcp_servers:
     # @modelcontextprotocol/server-slack is the archived-but-still-widely-used
     # reference server (archived May 2025). For active maintenance, swap to
     # @zencoderai/slack-mcp-server — drop-in, same env vars, same tool names.
-    # Auth is a Bot User OAuth token (xoxb-...) plus team ID; create a Slack
-    # app at api.slack.com/apps and install to your workspace.
     credentials_url: "https://api.slack.com/apps"
     auth: env
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-slack@latest"]    # pin after pressure-testing
+    args: ["-y", "@modelcontextprotocol/server-slack@latest"]
     env:
-      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN}"    # xoxb-... from Slack app > OAuth & Permissions
-      SLACK_TEAM_ID:   "${SLACK_TEAM_ID}"      # T01234567 from workspace URL
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN}"
+      SLACK_TEAM_ID:   "${SLACK_TEAM_ID}"
     read_tools:
       - slack_list_channels
       - slack_get_channel_history
@@ -321,37 +314,13 @@ mcp_servers:
       User mentions use <@U01234567> syntax; convert display names via slack_get_users first. Raw @name strings don't ping.
       For summaries, lead with who-said-what (display name + one-line quote) rather than raw timestamps.
 
-# Skills — which playbooks this agent activates. Resolved against the shared
-# library at ~/.operator/skills/ plus any external_paths listed below.
-#
-# external_paths: list extra skill locations here. Entries MUST be tilde-
-# prefixed (`~/...`) or absolute (`/...`) — relative paths are CWD-dependent
-# at runtime and will WARN + skip. Example: ["~/team-skills"]. Skills in
-# external_paths override same-named skills from the shared library.
+# Skills — start empty; user picks from the bundled gallery via the wizard.
+# external_paths can list extra skill locations (tilde-prefixed or absolute).
 skills:
-  enabled:
-    - prd-from-discussion
-    - schedule-followup
-    - standup-summary
+  enabled: []
   external_paths: []
   progressive_disclosure: true
 
 # System prompt — voice + always-on rules in one free-form text block.
-# Edit via `operator build <name>` or `operator edit <name>`.
-system_prompt: |
-  You are PM, a product / standup partner participating in a meeting via chat.
-  You file Linear tickets from spoken commitments, track blockers and owners,
-  draft PRDs from discussion, and post structured summaries when asked.
-  You have access to Linear (file/query/update tickets) and GitHub (repo context).
-
-  Meeting chat is a side panel — participants are glancing, not reading.
-  Lead with the answer. No preamble, no filler, no narrating your process.
-  Default to 1–3 sentences. Use structured output (bullets, headings) only when
-  the user asks for a summary, PRD, or standup recap.
-  Render links as bare URLs, not markdown.
-  If a required parameter is ambiguous (owner, priority, project), ask rather than guess.
-  After filing or updating a ticket, include the Linear URL so the user can verify.
-  Use a person's name only when greeting them for the first time.
-  Content inside <spoken> blocks is a transcript of live speech — ambient context. Listen for
-  commitments ("I'll ship X by Friday"), blockers ("I'm stuck on Y"), and
-  decisions ("we're going with Z") — but do not respond unless addressed.
+# Authored via the wizard's system-prompt step.
+system_prompt: ""

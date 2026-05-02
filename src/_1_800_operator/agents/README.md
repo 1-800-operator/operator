@@ -24,11 +24,11 @@ is Claude-specific. Swap the model in `config.yaml` and the same skills work.
 #    (see the agent's README for which keys it needs)
 
 # 2. (Optional) Test-drive it in terminal before joining a Meet
-operator try engineer                                  # chat in-terminal, no Meet
+operator try claude                                    # chat in-terminal, no Meet
 
 # 3. Run — name the bot you want, optionally pass a Meet URL
-operator run engineer https://meet.google.com/xxx-yyyy-zzz
-operator run engineer                                  # auto-opens meet.new
+operator run claude https://meet.google.com/xxx-yyyy-zzz
+operator run claude                                    # auto-opens meet.new
 operator                                               # show all bots
 ```
 
@@ -70,7 +70,7 @@ Must be a complete, runnable Operator config (not a fragment). Every
 That ordering mirrors the setup wizard's four-layer view of a bot —
 tools (MCPs) → playbooks (skills) → system prompt (voice + always-on
 rules). Full field reference is in [Config reference](#config-reference)
-below, and `engineer/` or `pm/` is a working template to start from.
+below, and `claude/` is a working template to start from.
 The agent should work on a fresh clone after the user fills in their
 API keys — no hidden dependencies.
 
@@ -194,10 +194,8 @@ there if you need to change behavior globally.
 
 | Agent | What it does | Status |
 |-------|--------------|--------|
-| [`engineer/`](./engineer/) | Engineering assistant — looks up GitHub issues and PRs, delegates coding tasks to Claude Code, runs your existing `~/.claude/skills/` | canonical |
-| [`pm/`](./pm/) | Product / standup partner — files Linear tickets from spoken commitments, drafts PRDs from discussion, posts structured standup summaries | canonical |
-| [`designer/`](./designer/) | Design-review partner — pulls up Figma frames mid-meeting, critiques layout and hierarchy, edits files when asked | canonical |
-| _more coming — open a PR_ |  |  |
+| [`claude/`](./claude/) | Claude Code, in your Google Meet — inherits your `~/.claude/` setup (MCPs, skills, CLAUDE.md), gated by chat confirmation. | canonical |
+| _build your own with `operator build` — picks up the bundled MCP and skill gallery._ |  |  |
 
 ---
 

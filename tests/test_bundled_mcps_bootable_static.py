@@ -37,13 +37,23 @@ import yaml  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLED_AGENTS_DIR = REPO_ROOT / "src" / "_1_800_operator" / "agents"
+CUSTOM_TEMPLATE = REPO_ROOT / "src" / "_1_800_operator" / "custom_template.yaml"
 
 
 def _iter_bundled_configs():
-    """Yield (agent_name, config_path, parsed_yaml) for each bundled agent."""
+    """Yield (source_label, config_path, parsed_yaml) for each shipped config
+    that declares MCP servers — bundled agents under `agents/<name>/`, plus
+    the wizard's from-scratch baseline at `custom_template.yaml`. The
+    template carries the full MCP gallery for custom builds, so its
+    bootability matters as much as any agent's.
+    """
     for cfg_path in sorted(BUNDLED_AGENTS_DIR.glob("*/config.yaml")):
         agent = cfg_path.parent.name
         yield agent, cfg_path, yaml.safe_load(cfg_path.read_text())
+    if CUSTOM_TEMPLATE.exists():
+        yield "custom_template", CUSTOM_TEMPLATE, yaml.safe_load(
+            CUSTOM_TEMPLATE.read_text()
+        )
 
 
 def _check_module_importable(module_path: str) -> tuple[bool, str]:
