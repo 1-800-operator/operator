@@ -204,7 +204,7 @@ def _launch_signin_flow(
     # auth cookies into the keychain-encrypted slot (Chrome's "v10"/"v11"
     # scheme), or if Chrome's monthly update bumps a profile-DB schema
     # Chromium-for-Testing can't yet read, sign-in will silently fail at
-    # `operator run` time with no clear error. Fix when reproducible:
+    # `operator dial` time with no clear error. Fix when reproducible:
     # pass `executable_path=str(CHROME_PATH)` in the adapter so both ends
     # use the same binary. Deferred pre-launch — no observed failures.
     chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"

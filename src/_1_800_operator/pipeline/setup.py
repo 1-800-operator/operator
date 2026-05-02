@@ -744,7 +744,7 @@ def _step2_mcps(state: WizardState, *, step_num: int = 3) -> None:
     # discovered MCPs' full env blocks). The wizard's overlay no longer
     # carries `env` keys, so this surface moved to the runtime sync —
     # the user sees the "+ appended N env placeholder(s)" line on their
-    # next `operator run claude` instead of during setup.
+    # next `operator dial claude` instead of during setup.
 
     _render_mcp_readiness(servers)
 
@@ -1486,7 +1486,7 @@ def _write_readme(path: Path, name: str, bot_cfg: dict) -> None:
     body = (
         f"# {display}\n\n"
         f"{tagline}\n\n"
-        f"Run: `operator run {name}` or `operator run {name} <meet-url>`.\n\n"
+        f"Run: `operator dial {name}` or `operator dial {name} <meet-url>`.\n\n"
         f"MCPs: {mcp_line}\n\n"
         "## Note\n\n"
         "Skills and MCPs are independent in this bundle — enabling a skill\n"
@@ -1524,7 +1524,7 @@ def _reveal(state: WizardState) -> None:
             f"restore with `cp {backup_path} {config_path}` if needed.[/dim]"
         )
     console.print()
-    console.print(f"Take [bold]{state.name}[/bold] for a spin: [bold]operator run {state.name}[/bold]")
+    console.print(f"Take [bold]{state.name}[/bold] for a spin: [bold]operator dial {state.name}[/bold]")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────

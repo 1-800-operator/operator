@@ -208,7 +208,7 @@ Mirror of claude's framework.py with codex-flavored voice. Tweak "your tools are
 - `operator edit codex` opens wizard with current config preloaded.
 
 ### Risks
-- **R8 — Caption deferral UX gap.** Mitigation: header comment in `config.yaml` + startup banner in `operator run codex`: "Codex agent does not see meeting captions in v1 — only chat messages." + roadmap entry "codex caption parity."
+- **R8 — Caption deferral UX gap.** Mitigation: header comment in `config.yaml` + startup banner in `operator dial codex`: "Codex agent does not see meeting captions in v1 — only chat messages." + roadmap entry "codex caption parity."
 - **Wizard step 3.5 vocabulary** — phase 4 must teach `setup.py` the codex tool list before phase 3 reaches user-visible state.
 
 ---
@@ -240,7 +240,7 @@ Mirror of claude's framework.py with codex-flavored voice. Tweak "your tools are
 5. Return `(True, None)` only if all pass.
 
 ### Acceptance
-- `operator run codex` no codex CLI → exits 2, correct error.
+- `operator dial codex` no codex CLI → exits 2, correct error.
 - Not logged in → exits 2, correct error.
 - API-key-only auth → exits 2, correct error (R5 layer 2).
 - Happy path: joins meet, codex MCP connects, `@codex hello` → reply. End-to-end smoke.

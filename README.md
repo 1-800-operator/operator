@@ -6,8 +6,8 @@ Joins, reads chat, replies via an LLM with tool access (Linear, GitHub, and
 other MCP servers you wire up), and leaves when everyone else does.
 
 ```bash
-operator run pm                                        # open a fresh Meet
-operator run pm https://meet.google.com/xxx-yyyy-zzz   # join a specific Meet
+operator dial pm                                       # open a fresh Meet
+operator dial pm https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
 operator try pm                                        # terminal test-drive, no Meet
 operator                                               # show available agents
 ```

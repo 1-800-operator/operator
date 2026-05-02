@@ -14,7 +14,7 @@ BOT_NAME = os.environ.get("OPERATOR_BOT", "").strip()
 if not BOT_NAME:
     sys.stderr.write(
         "ERROR: OPERATOR_BOT env var is not set.\n"
-        "Run via the CLI: `operator run <name> [url]`.\n"
+        "Run via the CLI: `operator dial <name> [url]`.\n"
     )
     raise SystemExit(2)
 

@@ -26,9 +26,9 @@ is Claude-specific. Swap the model in `config.yaml` and the same skills work.
 # 2. (Optional) Test-drive it in terminal before joining a Meet
 operator try claude                                    # chat in-terminal, no Meet
 
-# 3. Run — name the bot you want, optionally pass a Meet URL
-operator run claude https://meet.google.com/xxx-yyyy-zzz
-operator run claude                                    # auto-opens meet.new
+# 3. Dial — name the bot you want, optionally pass a Meet URL
+operator dial claude https://meet.google.com/xxx-yyyy-zzz
+operator dial claude                                    # auto-opens meet.new
 operator                                               # show all bots
 ```
 

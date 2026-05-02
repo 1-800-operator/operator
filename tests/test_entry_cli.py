@@ -312,7 +312,7 @@ def test_main_unknown_bot_returns_2():
     print("PASS  test_main_unknown_bot_returns_2")
 
 
-def test_main_bare_known_bot_rejected_with_run_hint():
+def test_main_bare_known_bot_rejected_with_dial_hint():
     """Phase 15.8: bare `operator <known-bot>` hard-fails with a pointed hint."""
     spy = MagicMock(return_value=0)
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
@@ -323,13 +323,26 @@ def test_main_bare_known_bot_rejected_with_run_hint():
     assert rc == 2
     assert spy.call_count == 0
     out = buf.getvalue()
-    assert "operator run pm" in out
+    assert "operator dial pm" in out
     assert "no longer supported" in out
-    print("PASS  test_main_bare_known_bot_rejected_with_run_hint")
+    print("PASS  test_main_bare_known_bot_rejected_with_dial_hint")
 
 
-def test_main_run_known_bot_dispatches_to_run_bot():
-    """`operator run <name> <url>` → _run_bot(name, [url])."""
+def test_main_dial_known_bot_dispatches_to_run_bot():
+    """`operator dial <name> <url>` → _run_bot(name, [url])."""
+    spy = MagicMock(return_value=0)
+    with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
+        with patched_argv(["dial", "pm", "https://meet.google.com/abc-defg-hij"]), \
+             patched_dispatch(_run_bot=spy):
+            rc = entry.main()
+    assert rc == 0
+    assert spy.call_args.args == ("pm", ["https://meet.google.com/abc-defg-hij"])
+    print("PASS  test_main_dial_known_bot_dispatches_to_run_bot")
+
+
+def test_main_run_alias_still_dispatches_to_run_bot():
+    """Hidden `run` alias survives the dial rename — preserves muscle memory
+    and external links. Drop this test (and the alias) on a future major bump."""
     spy = MagicMock(return_value=0)
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
         with patched_argv(["run", "pm", "https://meet.google.com/abc-defg-hij"]), \
@@ -337,31 +350,31 @@ def test_main_run_known_bot_dispatches_to_run_bot():
             rc = entry.main()
     assert rc == 0
     assert spy.call_args.args == ("pm", ["https://meet.google.com/abc-defg-hij"])
-    print("PASS  test_main_run_known_bot_dispatches_to_run_bot")
+    print("PASS  test_main_run_alias_still_dispatches_to_run_bot")
 
 
-def test_main_run_without_name_returns_2():
-    """`operator run` with no name prints usage and exits 2."""
+def test_main_dial_without_name_returns_2():
+    """`operator dial` with no name prints usage and exits 2."""
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
-        with patched_argv(["run"]):
+        with patched_argv(["dial"]):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = entry.main()
     assert rc == 2
-    assert "Usage: operator run" in buf.getvalue()
-    print("PASS  test_main_run_without_name_returns_2")
+    assert "Usage: operator dial" in buf.getvalue()
+    print("PASS  test_main_dial_without_name_returns_2")
 
 
-def test_main_run_unknown_bot_returns_2():
-    """`operator run <unknown>` errors with 'Unknown bot'."""
+def test_main_dial_unknown_bot_returns_2():
+    """`operator dial <unknown>` errors with 'Unknown bot'."""
     with tmp_agents_dir({"pm": {"yaml": "agent: {name: pm}"}}):
-        with patched_argv(["run", "ghost"]):
+        with patched_argv(["dial", "ghost"]):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = entry.main()
     assert rc == 2
     assert "Unknown bot" in buf.getvalue()
-    print("PASS  test_main_run_unknown_bot_returns_2")
+    print("PASS  test_main_dial_unknown_bot_returns_2")
 
 
 # ---------------------------------------------------------------------------
@@ -585,10 +598,11 @@ if __name__ == "__main__":
         test_main_auth_rejects_extra_args,
         test_main_unknown_flag_returns_2,
         test_main_unknown_bot_returns_2,
-        test_main_bare_known_bot_rejected_with_run_hint,
-        test_main_run_known_bot_dispatches_to_run_bot,
-        test_main_run_without_name_returns_2,
-        test_main_run_unknown_bot_returns_2,
+        test_main_bare_known_bot_rejected_with_dial_hint,
+        test_main_dial_known_bot_dispatches_to_run_bot,
+        test_main_run_alias_still_dispatches_to_run_bot,
+        test_main_dial_without_name_returns_2,
+        test_main_dial_unknown_bot_returns_2,
         test_run_bot_parses_url_and_flags_and_sets_env,
         test_run_bot_propagates_platform_runner_exit_code,
         test_run_bot_unknown_flag_returns_2,

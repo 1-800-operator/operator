@@ -3,7 +3,7 @@
 # under `mcp_servers.codex`; operator's MCPClient owns its lifecycle.
 #
 # Requires the `codex` CLI installed (`npm install -g @openai/codex`) and
-# logged in (`codex login`). `operator run codex` hard-fails without it.
+# logged in (`codex login`). `operator dial codex` hard-fails without it.
 #
 # Differences vs the claude agent (intentional, scoped to v1):
 #   - No CLAUDE.md / project-memory mirror — codex reads AGENTS.md /

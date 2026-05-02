@@ -1,6 +1,6 @@
 # Top 10 Claude-in-a-Meeting Use Cases
 
-*Phase 15.10.3 deliverable, session 159. Doubles as the test script for Phase 14.8(e) — a brand-new user runs `operator run claude <fresh-meet-url>` against this list — and as raw material for the second hero-framing post of Phase 16.4 (launch).*
+*Phase 15.10.3 deliverable, session 159. Doubles as the test script for Phase 14.8(e) — a brand-new user runs `operator dial claude <fresh-meet-url>` against this list — and as raw material for the second hero-framing post of Phase 16.4 (launch).*
 
 ## What "meeting use case" means here
 
@@ -166,7 +166,7 @@ Release review meeting or end-of-sprint demo. "What shipped this week?"
 
 ## How to use this list
 
-**As the Phase 14.8(e) test script.** Run `operator run claude <fresh-meet-url>` on a clean second mac. For each of the ten cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #8 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
+**As the Phase 14.8(e) test script.** Run `operator dial claude <fresh-meet-url>` on a clean second mac. For each of the ten cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #8 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
 
 **As launch-campaign material (Phase 16.4 second hero post).** The header framing — "Claude Code in your Google Meet" — is already locked. This list is the proof points: ten concrete, named meeting moments where the bot earns its seat. Pick the three highest-fit to your demo audience and lead with them.
 

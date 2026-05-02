@@ -3,7 +3,7 @@
 # inherited live from your ~/.claude/ setup; this file just toggles them
 # on/off and configures meeting-scope permissions + voice.
 #
-# Requires the `claude` CLI installed and logged in — `operator run claude`
+# Requires the `claude` CLI installed and logged in — `operator dial claude`
 # hard-fails without it.
 
 agent:

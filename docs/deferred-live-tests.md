@@ -222,9 +222,9 @@ test matrix — one run per MCP to confirm tools appear in
 
 - **CLI first-run with real `~/.claude.json`:**
   - Delete `~/.operator/agents/claude/` (or fresh install) and run
-    `operator run claude`. Expect: stderr prints
+    `operator dial claude`. Expect: stderr prints
     `[claude] auto-imported N MCP(s): ...` on first run, followed by
-    normal boot. Re-run `operator run claude` — expect silent boot
+    normal boot. Re-run `operator dial claude` — expect silent boot
     (marker `_claude_import_done: true` short-circuits the re-import).
   - Verify config write: `~/.operator/agents/claude/config.yaml` now
     has both the bundled `claude-code` block AND the imported hosted
@@ -234,10 +234,10 @@ test matrix — one run per MCP to confirm tools appear in
 
 - **Hard-fail when `claude` CLI uninstalled:**
   - Temporarily rename `$(which claude)` or run on a machine without
-    Claude Code. Run `operator run claude`. Expect: exit code 2,
+    Claude Code. Run `operator dial claude`. Expect: exit code 2,
     stderr block starting "The `claude` agent requires the Claude Code
     CLI." with install link. No browser launch, no config write.
-  - Cross-check: `operator run pm` on the same machine boots normally
+  - Cross-check: `operator dial pm` on the same machine boots normally
     (hard-fail is scoped to `claude` agent only).
 
 - **`claude mcp list` format drift canary:**

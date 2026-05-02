@@ -41,7 +41,7 @@ LOGIN_STATUS_TIMEOUT = 5
 
 
 def codex_installed_and_logged_in() -> tuple[bool, str]:
-    """Public preflight gate for `operator run codex`.
+    """Public preflight gate for `operator dial codex`.
 
     Returns (ok, reason_if_not_ok). ok=True iff:
       1. `codex` is on PATH.

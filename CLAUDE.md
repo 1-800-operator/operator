@@ -11,20 +11,24 @@ Operator is a chat-based AI meeting participant. It joins Google Meet, opens the
 ### Run
 
 ```bash
-operator run pm https://meet.google.com/xxx-yyyy-zzz   # join a specific Meet
-operator run pm                                        # auto-open meet.new
+operator dial pm https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
+operator dial pm                                       # auto-open meet.new
 operator                                               # usage + agent list
 ```
 
+`dial` is the canonical subcommand (1-800-Operator phone metaphor). `run` is
+kept as a hidden alias for muscle memory + external links — same dispatch,
+not advertised in `--help`; safe to drop on a future major bump.
+
 Replace `pm` with any bot under `agents/` (`engineer`, `designer`, `claude`, …). Every
-run selects an agent explicitly — there is no ambient root `config.yaml`
+dial selects an agent explicitly — there is no ambient root `config.yaml`
 anymore. The `operator` wrapper (symlinked into `~/.local/bin/`) handles venv
-activation; you can also call `python __main__.py run <name> [url]` directly
+activation; you can also call `python __main__.py dial <name> [url]` directly
 if the venv is already active.
 
 The `claude` agent (session 151, Phase 15.9) is different from the other three
 in one respect: it hard-depends on the Claude Code CLI being installed and
-logged in. `operator run claude` exits 2 with a clear stderr message if
+logged in. `operator dial claude` exits 2 with a clear stderr message if
 `claude` isn't on PATH or `claude auth status --json` reports not logged in.
 On first run it auto-imports the user's Claude Code MCP servers (both from
 `~/.claude.json#mcpServers` and `claude mcp list` — the latter is how
@@ -97,7 +101,7 @@ Pipeline (platform-agnostic)
 
 ### Configuration
 
-Every run names an agent explicitly (`operator run <name> [url]`). Config loading is driven by the `OPERATOR_BOT` env var — the CLI sets this before importing `config`, which then reads `agents/<name>/config.yaml` into module-level constants. There is no root `config.yaml`; there is one config file per bot under `agents/`. User-facing blocks (top-to-bottom ordering mirrors the setup wizard's four-layer view of a bot):
+Every dial names an agent explicitly (`operator dial <name> [url]`). Config loading is driven by the `OPERATOR_BOT` env var — the CLI sets this before importing `config`, which then reads `agents/<name>/config.yaml` into module-level constants. There is no root `config.yaml`; there is one config file per bot under `agents/`. User-facing blocks (top-to-bottom ordering mirrors the setup wizard's four-layer view of a bot):
 - `agent` — `name`, `trigger_phrase`, `first_contact_hint`, `tagline`, `intro_on_join`
 - `llm` — `provider` (`openai` | `anthropic`), `model`, `history_messages` (tail size replayed from the meeting record)
 - `transcript` — `captions_enabled`

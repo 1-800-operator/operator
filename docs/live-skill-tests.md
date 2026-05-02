@@ -35,7 +35,7 @@ operator build       # confirm wizard runs cleanly
 
 ### B. Verify track-A claude config is seeded
 
-If `~/.operator/agents/claude/config.yaml` was deleted (or never existed), the next `operator run claude` will copy the bundled track-A seed into place. Verify with:
+If `~/.operator/agents/claude/config.yaml` was deleted (or never existed), the next `operator dial claude` will copy the bundled track-A seed into place. Verify with:
 
 ```bash
 cat ~/.operator/agents/claude/config.yaml | head -25
@@ -80,7 +80,7 @@ These six gates check that the track-A architecture itself works before we lean 
 
 ### Test 0.1 — Subscription-auth assertion fires
 
-**Setup:** open a fresh Meet, run `operator run claude` against it. Ensure `ANTHROPIC_API_KEY` is unset (`unset ANTHROPIC_API_KEY` in the shell where you launched operator).
+**Setup:** open a fresh Meet, run `operator dial claude` against it. Ensure `ANTHROPIC_API_KEY` is unset (`unset ANTHROPIC_API_KEY` in the shell where you launched operator).
 
 **Trigger phrase (paste into Meet chat):**
 
@@ -222,7 +222,7 @@ grep "subprocess died mid-meeting\|attempting one restart\|synthesized opener" /
 This test intentionally tries to break the bot. Run it from a separate terminal AFTER you're done with 0.1–0.5 in the current meeting (you'll need to leave + restart).
 
 ```bash
-ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" operator run claude
+ANTHROPIC_API_KEY="sk-ant-fake-key-for-test" operator dial claude
 ```
 
 **Expected behavior:**
@@ -247,7 +247,7 @@ After this test, restart operator WITHOUT the bogus key for the rest of the doc.
 
 ## Session 1 — Engineer flow (~15–20 min)
 
-**Setup:** open a fresh Meet, run `operator run claude` against it. Sit alone; 1-on-1 mode auto-engages.
+**Setup:** open a fresh Meet, run `operator dial claude` against it. Sit alone; 1-on-1 mode auto-engages.
 
 ### Test 1.1 — Codebase walkthrough
 
@@ -382,7 +382,7 @@ You can leave the meeting after this test. **Revert the `--version` change** wit
 
 ## Session 2 — PM/sprint flow (~15 min)
 
-**Setup:** fresh Meet, `operator run claude`, captions ON (CC button).
+**Setup:** fresh Meet, `operator dial claude`, captions ON (CC button).
 
 ### Test 2.0 — Pre-step: create a fixture Linear ticket
 
@@ -426,7 +426,7 @@ grep "PermissionChatHandler: asking user about\|stream_event\|TIMING claude_cli_
 
 **Pre-step:** captions still streaming (CC on). Speak out loud (microphone on) for ~90 seconds about this imaginary feature — speak naturally, with pauses:
 
-> "OK so we want to add a stealth mode to operator. The idea is when stealth is on, the bot doesn't post an intro message when it joins, it doesn't post the failure banner, and it doesn't show its name in the participant list. The use case is sales calls where the user doesn't want the prospect to know an AI is in the room. Open question: should stealth also disable captions ingestion to be safe? And should we let users turn it on per-meeting via a CLI flag, or per-bot in config? I'm leaning per-meeting — `operator run claude --stealth <url>` — so it's an explicit decision each time. Goal would be ship a v1 of this within two weeks."
+> "OK so we want to add a stealth mode to operator. The idea is when stealth is on, the bot doesn't post an intro message when it joins, it doesn't post the failure banner, and it doesn't show its name in the participant list. The use case is sales calls where the user doesn't want the prospect to know an AI is in the room. Open question: should stealth also disable captions ingestion to be safe? And should we let users turn it on per-meeting via a CLI flag, or per-bot in config? I'm leaning per-meeting — `operator dial claude --stealth <url>` — so it's an explicit decision each time. Goal would be ship a v1 of this within two weeks."
 
 You can paraphrase, but cover: stealth concept, the three behaviors it disables, the use case, the open question, the goal.
 

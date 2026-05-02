@@ -3,8 +3,8 @@ Operator — AI Meeting Participant
 Cross-platform entry point. Auto-detects OS and dispatches to the right adapter.
 
 Usage:
-    operator run <name> <url> Run named agent in a specific Meet
-    operator run <name>       Auto-open a new Meet, join as that bot
+    operator dial <name> <url> Dial named agent into a specific Meet
+    operator dial <name>       Auto-open a new Meet, dial in that bot
     operator try <name>       Terminal test-drive (no Meet)
     operator build            Create a new agent (wizard)
     operator edit <target>    Edit an agent config (wizard, surgical) or .env (in $EDITOR)
@@ -535,7 +535,7 @@ def _bot_tagline(name):
 
 def _print_usage():
     print("Usage:")
-    print("  operator run <name> [url] Run an agent in a Meet (auto-opens one if no url)")
+    print("  operator dial <name> [url] Dial an agent into a Meet (auto-opens one if no url)")
     print("  operator try <name>       Terminal test-drive (no Meet)")
     print("  operator build            Create a new agent (wizard)")
     print("  operator auth <mcp>       Authorize an OAuth MCP (Linear, etc.)")
@@ -690,9 +690,11 @@ def main():
         return _run_edit(argv[1:])
     if first == "where":
         return _run_where(argv[1:])
-    if first == "run":
+    # `run` kept as a hidden alias for muscle memory + external links after
+    # the dial rename — not advertised in --help; safe to drop later.
+    if first in ("dial", "run"):
         if len(argv) < 2:
-            print("Usage: operator run <name> [url]\n")
+            print("Usage: operator dial <name> [url]\n")
             _print_usage()
             return 2
         name = argv[1]
@@ -712,7 +714,7 @@ def main():
     # through to the generic unknown-subcommand message.
     if first in _available_bots():
         print(
-            f"Run agents via `operator run {first}`. "
+            f"Dial agents via `operator dial {first}`. "
             f"Bare `operator {first}` is no longer supported.\n"
         )
         return 2
@@ -882,7 +884,7 @@ def _run_bot(name, rest):
                 f"\nThe `claude` agent requires the Claude Code CLI.\n"
                 f"  {reason}\n"
                 f"\nInstall Claude Code (https://claude.ai/code) and run "
-                f"`claude login`, then re-run `operator run claude`.\n",
+                f"`claude login`, then re-run `operator dial claude`.\n",
                 file=sys.stderr,
             )
             return 2
@@ -914,7 +916,7 @@ def _run_bot(name, rest):
                 f"\nThe `codex` agent requires the OpenAI Codex CLI.\n"
                 f"  {reason}\n"
                 f"\nInstall Codex (`npm install -g @openai/codex`) and run "
-                f"`codex login`, then re-run `operator run codex`.\n",
+                f"`codex login`, then re-run `operator dial codex`.\n",
                 file=sys.stderr,
             )
             return 2
@@ -1112,7 +1114,7 @@ def _run_macos(meeting_url=None, force=False):
         log.info(f"Starting Operator — joining {meeting_url}")
         runner.run(meeting_url)
         if not runner._stop_event.is_set():
-            ui.say(f"Restart with: operator run {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
+            ui.say(f"Restart with: operator dial {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
     except KeyboardInterrupt:
         log.info("Interrupted — leaving meeting")
     finally:
@@ -1142,8 +1144,8 @@ def _run_linux(meeting_url, force=False):
     if not meeting_url:
         bot = os.environ.get("OPERATOR_BOT", "<name>")
         print("A meeting URL is required on Linux:", file=sys.stderr)
-        print(f"   operator run {bot} <meet-url>", file=sys.stderr)
-        print(f"   MEETING_URL=<url> operator run {bot}", file=sys.stderr)
+        print(f"   operator dial {bot} <meet-url>", file=sys.stderr)
+        print(f"   MEETING_URL=<url> operator dial {bot}", file=sys.stderr)
         sys.exit(1)
 
     display = os.environ.get("DISPLAY")
@@ -1225,7 +1227,7 @@ def _run_linux(meeting_url, force=False):
     try:
         runner.run(meeting_url)
         if not runner._stop_event.is_set():
-            ui.say(f"Restart with: operator run {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
+            ui.say(f"Restart with: operator dial {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
     except KeyboardInterrupt:
         log.info("Interrupted — leaving meeting")
     finally:
