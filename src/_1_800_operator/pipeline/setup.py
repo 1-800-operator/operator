@@ -78,9 +78,10 @@ _ENV_FILE = Path.home() / ".operator" / ".env"
 # and writes the result under ~/.operator/agents/<name>/.
 _CUSTOM_TEMPLATE = Path(__file__).resolve().parents[1] / "custom_template.yaml"
 
-# `claude` is the only shipped preset — its identity is "your Claude Code
-# setup, in a meeting." Everything else is built via the custom path.
-_PRESET_NAMES = {"claude"}
+# Shipped presets: the two "inherit your <CLI> setup, in a meeting"
+# agents. Everything else is built via the custom path. Each preset
+# has a hard CLI prereq enforced at picker-time in step 1.
+_PRESET_NAMES = {"claude", "codex"}
 
 # Subcommand verbs the CLI reserves — a from-scratch bot can't use them as
 # a name because `operator <reserved>` would never dispatch to the bot.
@@ -277,20 +278,25 @@ def _bot_tagline(name: str) -> str:
 
 
 def _step1_fighter_select() -> WizardState:
-    """Choose between the `claude` preset and a from-scratch custom build.
-
-    These are the only two paths v1 ships. Existing custom bots are edited
-    via `operator edit <name>`, which bypasses step 1 entirely; the picker
-    here is just for new builds.
+    """Choose between the `claude` preset, the `codex` preset, or a
+    from-scratch custom build. v1 ships these three paths. Existing
+    custom bots are edited via `operator edit <name>`, which bypasses
+    step 1 entirely; the picker here is just for new builds.
     """
     console.print("[bold]1. Choose your base agent[/bold]\n")
 
     claude_tagline = _bundled_tagline("claude")
+    codex_tagline = _bundled_tagline("codex")
     choices: list[Choice] = [
         Choice(
             label="claude",
             value="claude",
             preview=_preset_preview("claude", claude_tagline),
+        ),
+        Choice(
+            label="codex",
+            value="codex",
+            preview=_preset_preview("codex", codex_tagline),
         ),
         Choice(
             label="custom",
@@ -303,18 +309,31 @@ def _step1_fighter_select() -> WizardState:
     console.print()
     if picked.value == "__custom__":
         return _from_scratch()
-    # claude preset is a hard dependency on the Claude Code CLI — the
-    # whole agent identity is "inherit the user's claude-code setup."
+    # Both presets hard-depend on their CLI being installed + logged in
+    # — the whole agent identity is "inherit the user's <CLI> setup."
     # Gate selection at the picker so the user fixes the prereq first
     # rather than discovering it mid-wizard.
-    ok, reason = claude_code_installed_and_logged_in()
-    if not ok:
-        console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}")
-        console.print(
-            "  [dim]Install Claude Code (https://claude.ai/code) and run "
-            "`claude login`, then re-run `operator build`.[/dim]\n"
+    if picked.value == "claude":
+        ok, reason = claude_code_installed_and_logged_in()
+        if not ok:
+            console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}")
+            console.print(
+                "  [dim]Install Claude Code (https://claude.ai/code) and run "
+                "`claude login`, then re-run `operator build`.[/dim]\n"
+            )
+            return _step1_fighter_select()
+    elif picked.value == "codex":
+        from _1_800_operator.pipeline.codex_import import (
+            codex_installed_and_logged_in,
         )
-        return _step1_fighter_select()
+        ok, reason = codex_installed_and_logged_in()
+        if not ok:
+            console.print(f"  [red]✗ codex preset requires Codex CLI:[/red] {reason}")
+            console.print(
+                "  [dim]Install Codex (`npm install -g @openai/codex`) and run "
+                "`codex login`, then re-run `operator build`.[/dim]\n"
+            )
+            return _step1_fighter_select()
     return _edit_preset(picked.value)
 
 
@@ -399,6 +418,8 @@ def _edit_preset(name: str, *, reset_allowed: bool = True) -> WizardState:
     state._reset_backup_path = backup_path  # type: ignore[attr-defined]
     if name == "claude":
         _auto_import_claude_setup(state)
+    elif name == "codex":
+        _surface_codex_inheritance(state)
     return state
 
 
@@ -530,6 +551,133 @@ def _auto_import_claude_setup(state: WizardState) -> None:
         )
 
 
+def _surface_codex_inheritance(state: WizardState) -> None:
+    """Discover the user's codex CLI MCPs + skills and stash on state for
+    read-only display in steps 2 and 3. Mirrors `_auto_import_claude_setup`
+    in shape but does NOT fold anything into bot_cfg — codex IS the harness
+    for this agent (operator just spawns `codex mcp-server`), so codex
+    auto-loads `~/.codex/skills/` and `~/.codex/config.toml` itself at
+    runtime. Operator-side toggles would be illusory.
+
+    Two attributes on state (lists, possibly empty):
+      - state._codex_inherited_mcps   : [(name, command_summary)]
+      - state._codex_inherited_skills : [(name, description, source_label)]
+
+    Steps 2 (MCPs) and 3 (Skills) read these and render a
+    "Codex CLI inheritance" footer.
+    """
+    from _1_800_operator.pipeline.codex_import import (
+        discover_codex_mcps,
+        discover_codex_skills,
+    )
+
+    with console.status(
+        "[dim]reading your codex setup[/dim]",
+        spinner="simpleDots",
+    ):
+        mcps = discover_codex_mcps()
+        skills = discover_codex_skills()
+
+    state._codex_inherited_mcps = mcps  # type: ignore[attr-defined]
+    state._codex_inherited_skills = skills  # type: ignore[attr-defined]
+
+    console.print()
+    console.print("  [bold]Codex CLI inheritance:[/bold]")
+    if mcps:
+        names = ", ".join(n for n, _ in mcps)
+        console.print(
+            f"    [green]✓[/green] {len(mcps)} MCP(s) loaded by codex itself: "
+            f"{names}"
+        )
+    else:
+        console.print(
+            "    [dim]No MCPs configured in codex (add via "
+            "`codex mcp add <name> -- <command>`).[/dim]"
+        )
+    if skills:
+        console.print(
+            f"    [green]✓[/green] {len(skills)} skill(s) under "
+            f"~/.codex/skills/ (incl. codex built-ins)"
+        )
+    else:
+        console.print(
+            "    [dim]No skills found under ~/.codex/skills/.[/dim]"
+        )
+    console.print(
+        "    [dim]These are managed via codex directly — operator just shows "
+        "what's there.[/dim]"
+    )
+
+
+def _render_codex_inheritance_footer(state: WizardState, *, surface: str) -> None:
+    """Print a read-only summary of inherited codex MCPs or skills, plus a
+    management guidance line. Used in steps 2 and 3 as the *whole* content
+    for the codex agent (the operator-side picker is skipped entirely
+    because operator can't add or remove from codex's set — codex IS the
+    harness for this agent). No-op for non-codex agents.
+
+    `surface` is "mcps" or "skills" — picks which inherited list to render.
+    """
+    if state.based_on != "codex":
+        return
+    if surface == "mcps":
+        rows = getattr(state, "_codex_inherited_mcps", []) or []
+        console.print(
+            "  [dim]MCPs codex loads internally (read-only — operator "
+            "can't toggle these):[/dim]"
+        )
+        if rows:
+            for name, summary in rows:
+                console.print(
+                    f"    [dim]·[/dim] [bold]{name}[/bold]  [dim]{summary}[/dim]"
+                )
+        else:
+            console.print("    [dim](none configured yet)[/dim]")
+        console.print()
+        console.print(
+            "  [dim]To add or remove MCPs, manage them globally in codex:[/dim]"
+        )
+        console.print(
+            "    [dim]·[/dim] [bold]add[/bold]    [dim]codex mcp add <name> "
+            "-- <command>[/dim]"
+        )
+        console.print(
+            "    [dim]·[/dim] [bold]remove[/bold] [dim]codex mcp remove <name>[/dim]"
+        )
+        console.print(
+            "    [dim](changes take effect on the next `operator run codex`.)[/dim]"
+        )
+    elif surface == "skills":
+        rows_sk = getattr(state, "_codex_inherited_skills", []) or []
+        console.print(
+            "  [dim]Skills codex auto-loads (read-only — operator can't "
+            "toggle these):[/dim]"
+        )
+        if rows_sk:
+            for name, _desc, src in rows_sk:
+                console.print(
+                    f"    [dim]·[/dim] [bold]{name}[/bold]  [dim]{src}[/dim]"
+                )
+        else:
+            console.print("    [dim](none installed yet)[/dim]")
+        console.print()
+        console.print(
+            "  [dim]To add or remove skills, manage them globally in codex:[/dim]"
+        )
+        console.print(
+            "    [dim]·[/dim] [bold]add[/bold]    [dim]ask `@codex install "
+            "<skill>` (uses codex's built-in skill-installer), or copy a "
+            "skill folder into ~/.codex/skills/[/dim]"
+        )
+        console.print(
+            "    [dim]·[/dim] [bold]remove[/bold] [dim]delete the folder "
+            "under ~/.codex/skills/[/dim]"
+        )
+        console.print(
+            "    [dim](changes take effect on the next `operator run codex`.)[/dim]"
+        )
+
+
 # ── Step 2 — MCP toggle (arrow-key multi-select with build card) ──────────
 
 
@@ -545,6 +693,20 @@ def _step2_mcps(state: WizardState) -> None:
     servers = state.bot_cfg.get("mcp_servers") or {}
     if not servers:
         console.print("  [dim]No MCP servers declared in the base config.[/dim]")
+        return
+
+    # Codex agent: the only operator-side mcp_servers entry is the codex
+    # brain itself — toggling it would disable the agent. Codex's actual
+    # tool surface comes from `~/.codex/config.toml`, which operator can't
+    # touch. Skip the togglable picker and show the brain status + a
+    # read-only inheritance panel + management guidance.
+    if state.based_on == "codex":
+        console.print(
+            "  [green]✓[/green] [bold]codex[/bold] (brain) — always enabled "
+            "[dim](operator's connection to the codex CLI)[/dim]"
+        )
+        console.print()
+        _render_codex_inheritance_footer(state, surface="mcps")
         return
 
     required_map = _required_mcps_from_skills(state)
@@ -599,6 +761,10 @@ def _step2_mcps(state: WizardState) -> None:
     # next `operator run claude` instead of during setup.
 
     _render_mcp_readiness(servers)
+
+    # Codex agent: surface MCPs that codex itself loads internally
+    # (`codex mcp list`). Read-only — operator can't toggle these.
+    _render_codex_inheritance_footer(state, surface="mcps")
 
 
 def _render_mcp_readiness(servers: dict) -> None:
@@ -767,6 +933,19 @@ def _step3_skills(state: WizardState, _unused: Path | None = None) -> None:
     the hint shown inline.
     """
     console.print("[bold]2. Skills[/bold]\n")
+
+    # Codex agent: operator-side skills don't reach codex's loop (codex IS
+    # the harness — it auto-loads only ~/.codex/skills/ and ignores any
+    # operator skill state). Skip the togglable picker AND the
+    # "add external path" prompt — both are functionally moot. The
+    # inheritance footer is the whole step content + management guidance.
+    # Strip any stale `skills:` block from prior configs so the on-disk
+    # config.yaml doesn't carry a misleading empty list — the user might
+    # otherwise assume editing it does something.
+    if state.based_on == "codex":
+        state.bot_cfg.pop("skills", None)
+        _render_codex_inheritance_footer(state, surface="skills")
+        return
 
     state.bot_cfg.setdefault("skills", {})
     state.bot_cfg["skills"].setdefault("external_paths", [])
@@ -1282,12 +1461,18 @@ def _step7_write(state: WizardState) -> Path:
 
         # New skills block: `enabled: [names]` is canonical; `external_paths`
         # survives from the input config (in-place edits during step 3);
-        # legacy `paths` key is dropped unconditionally.
-        state.bot_cfg.setdefault("skills", {})
-        state.bot_cfg["skills"]["enabled"] = list(state.enabled_skill_names)
-        state.bot_cfg["skills"].setdefault("external_paths", [])
-        state.bot_cfg["skills"].setdefault("progressive_disclosure", True)
-        state.bot_cfg["skills"].pop("paths", None)
+        # legacy `paths` key is dropped unconditionally. Codex agent skips
+        # this entirely — its `skills:` block is intentionally absent on
+        # disk because operator can't bridge skills into codex's subprocess
+        # (codex IS the harness; it loads `~/.codex/skills/` itself).
+        if state.based_on == "codex":
+            state.bot_cfg.pop("skills", None)
+        else:
+            state.bot_cfg.setdefault("skills", {})
+            state.bot_cfg["skills"]["enabled"] = list(state.enabled_skill_names)
+            state.bot_cfg["skills"].setdefault("external_paths", [])
+            state.bot_cfg["skills"].setdefault("progressive_disclosure", True)
+            state.bot_cfg["skills"].pop("paths", None)
 
         _dump_yaml(state.bot_cfg, tmp / "config.yaml")
         face.write_if_missing(state.name, tmp / "portrait.txt")

@@ -8,7 +8,9 @@
 # Differences vs the claude agent (intentional, scoped to v1):
 #   - No CLAUDE.md / project-memory mirror — codex reads AGENTS.md /
 #     CLAUDE.md from cwd itself, so passing it twice would double context.
-#   - No skills overlay — codex has no `~/.codex/skills/` analogue today.
+#   - No `skills:` block — codex auto-loads `~/.codex/skills/` itself; an
+#     operator-side overlay wouldn't reach codex's subprocess. Wizard
+#     surfaces them read-only.
 #   - Captions disabled — codex's mcp-server mode doesn't yet expose a way
 #     to inherit operator's bundled transcript MCP. v1 codex sees only chat
 #     messages, not spoken audio. Tracking: roadmap → "codex caption parity".
@@ -85,12 +87,20 @@ mcp_servers:
     description: "Codex CLI in MCP-server mode (the agent's brain)"
     enabled: true
 
-# Skills — codex has no `~/.codex/skills/` analogue today. Empty by design.
-# Schema kept compatible with config.py's parser.
-skills:
-  enabled: []
-  external_paths: []
-  progressive_disclosure: true
+# Skills — INTENTIONALLY ABSENT. Codex IS the harness for this agent
+# (operator just spawns `codex mcp-server` and relays chat), so codex
+# auto-loads `~/.codex/skills/` itself at runtime. Operator's skills
+# loader is not bridged to codex's subprocess, so any `skills:` block
+# here would be dead weight. The setup/edit wizard surfaces the
+# inherited set as a read-only panel; manage skills via codex directly
+# (skill folders under `~/.codex/skills/`).
+#
+# Permissions — only `default_approval_policy` + `default_sandbox` above.
+# Operator's `auto_approve` / `always_ask` fnmatch lists (used by the
+# claude agent) are INTENTIONALLY ABSENT here too: codex's internal
+# safe-allowlist filters read-class commands before they reach
+# operator, and chat-gated approval rides codex's own elicitation flow,
+# so operator-side allowlists would never fire.
 
 # System prompt — USER addition (voice + always-on rules in one free-form
 # text block). The framework voice + always-on rules live in
