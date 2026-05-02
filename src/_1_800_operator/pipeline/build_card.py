@@ -53,6 +53,30 @@ def width_for(console: Console, *, left_min: int = 26, padding: int = 8) -> int:
     return max(MIN_WIDTH, min(DEFAULT_WIDTH, available))
 
 
+# Overhead per item line, in cells: ``"  "`` body indent + the 12-cell label
+# column ("MCPs:       ") + ``"⚡ "`` glyph segment (the lightning-bolt is
+# wide → 2 cells, plus a 1-cell separator) + the panel's two border cells.
+# Tuned to match the constants used by ``_compose_body`` / ``render``; if
+# either the label width or the glyph changes, recompute this.
+_ITEM_LINE_OVERHEAD = 2 + 12 + 3 + 2 + 1
+
+
+def width_for_reveal(
+    console: Console,
+    *,
+    items: list[str],
+    margin: int = 4,
+) -> int:
+    """Card width tuned for the final reveal — extends past DEFAULT_WIDTH
+    so long power-up / skill names render on one line. Capped by the
+    terminal width (minus ``margin``) so the right edge never clips.
+    """
+    longest = max((cell_len(it) for it in items), default=0)
+    natural = longest + _ITEM_LINE_OVERHEAD
+    cap = max(MIN_WIDTH, console.size.width - margin)
+    return max(MIN_WIDTH, min(cap, max(DEFAULT_WIDTH, natural)))
+
+
 def _wrap_cells(text: str, width: int) -> list[str]:
     """Wrap ``text`` on spaces so each line fits ``width`` cells.
 

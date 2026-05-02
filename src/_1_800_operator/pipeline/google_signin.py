@@ -265,9 +265,11 @@ def run_signin_step(
     profile_dir: Path = _BROWSER_PROFILE_DIR,
     auth_state_path: Path = _AUTH_STATE_FILE,
     account_file: Path = _GOOGLE_ACCOUNT_FILE,
+    *,
+    step_num: int = 7,
 ) -> None:
     """Wizard entry point. Detect → continue / re-auth, or run first-time signin."""
-    console.print("\n[bold]6. Google sign-in[/bold]")
+    console.print(f"\n[bold]{step_num}. Google sign-in[/bold]")
     console.print(
         "  [dim]Your bot uses a shared Google session to join Meet. "
         "This is shared across all operator bots on this machine.[/dim]"

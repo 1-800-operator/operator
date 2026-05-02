@@ -140,10 +140,15 @@ class WizardState:
     enabled_skill_names: list[str] = field(default_factory=list)
 
     def equipped_mcps(self) -> list[str]:
-        return [
+        names = [
             n for n, s in (self.bot_cfg.get("mcp_servers") or {}).items()
             if s.get("enabled")
         ]
+        if self.based_on == "codex":
+            names = [
+                f"{n} (MCP bridge)" if n == "codex" else n for n in names
+            ]
+        return names
 
     def equipped_skills(self) -> list[str]:
         return list(self.enabled_skill_names)
@@ -154,15 +159,20 @@ class WizardState:
         mcps: list[str] | None = None,
         skills: list[str] | None = None,
         title: str = "Your build",
+        width: int | None = None,
     ) -> RenderableType:
+        ups = mcps if mcps is not None else self.equipped_mcps()
+        sks = skills if skills is not None else self.equipped_skills()
+        if width is None:
+            width = build_card.width_for(console)
         return build_card.render(
             name=self.display_name or self.name or "(unnamed)",
             tagline=self.tagline,
             portrait=self.portrait,
-            power_ups=mcps if mcps is not None else self.equipped_mcps(),
-            skills=skills if skills is not None else self.equipped_skills(),
+            power_ups=ups,
+            skills=sks,
             title=title,
-            width=build_card.width_for(console),
+            width=width,
         )
 
 
@@ -572,7 +582,7 @@ def _surface_codex_inheritance(state: WizardState) -> None:
     )
 
     with console.status(
-        "[dim]reading your codex setup[/dim]",
+        "[dim]loading your Codex skills and MCPs[/dim]",
         spinner="simpleDots",
     ):
         mcps = discover_codex_mcps()
@@ -629,23 +639,13 @@ def _render_codex_inheritance_footer(state: WizardState, *, surface: str) -> Non
         if rows:
             for name, summary in rows:
                 console.print(
-                    f"    [dim]·[/dim] [bold]{name}[/bold]  [dim]{summary}[/dim]"
+                    f"    [dim][✓][/dim] [dim]{name}  ({summary})[/dim]"
                 )
         else:
             console.print("    [dim](none configured yet)[/dim]")
         console.print()
         console.print(
-            "  [dim]To add or remove MCPs, manage them globally in codex:[/dim]"
-        )
-        console.print(
-            "    [dim]·[/dim] [bold]add[/bold]    [dim]codex mcp add <name> "
-            "-- <command>[/dim]"
-        )
-        console.print(
-            "    [dim]·[/dim] [bold]remove[/bold] [dim]codex mcp remove <name>[/dim]"
-        )
-        console.print(
-            "    [dim](changes take effect on the next `operator run codex`.)[/dim]"
+            "  [dim]To add or remove MCPs, manage them globally in codex.[/dim]"
         )
     elif surface == "skills":
         rows_sk = getattr(state, "_codex_inherited_skills", []) or []
@@ -656,32 +656,20 @@ def _render_codex_inheritance_footer(state: WizardState, *, surface: str) -> Non
         if rows_sk:
             for name, _desc, src in rows_sk:
                 console.print(
-                    f"    [dim]·[/dim] [bold]{name}[/bold]  [dim]{src}[/dim]"
+                    f"    [dim][✓][/dim] [dim]{name}  ({src})[/dim]"
                 )
         else:
             console.print("    [dim](none installed yet)[/dim]")
         console.print()
         console.print(
-            "  [dim]To add or remove skills, manage them globally in codex:[/dim]"
-        )
-        console.print(
-            "    [dim]·[/dim] [bold]add[/bold]    [dim]ask `@codex install "
-            "<skill>` (uses codex's built-in skill-installer), or copy a "
-            "skill folder into ~/.codex/skills/[/dim]"
-        )
-        console.print(
-            "    [dim]·[/dim] [bold]remove[/bold] [dim]delete the folder "
-            "under ~/.codex/skills/[/dim]"
-        )
-        console.print(
-            "    [dim](changes take effect on the next `operator run codex`.)[/dim]"
+            "  [dim]To add or remove skills, manage them globally in codex.[/dim]"
         )
 
 
 # ── Step 2 — MCP toggle (arrow-key multi-select with build card) ──────────
 
 
-def _step2_mcps(state: WizardState) -> None:
+def _step2_mcps(state: WizardState, *, step_num: int = 3) -> None:
     """Mutates state.bot_cfg['mcp_servers'][*]['enabled'] in place.
 
     Runs AFTER the skills step (see run()) so we can lock MCPs that the
@@ -689,7 +677,7 @@ def _step2_mcps(state: WizardState) -> None:
     enabled=true and can't be toggled off — to disable the MCP the user
     must first remove the skill that requires it.
     """
-    console.print("\n[bold]3. MCPs[/bold]\n")
+    console.print(f"\n[bold]{step_num}. MCPs[/bold]\n")
     servers = state.bot_cfg.get("mcp_servers") or {}
     if not servers:
         console.print("  [dim]No MCP servers declared in the base config.[/dim]")
@@ -698,15 +686,18 @@ def _step2_mcps(state: WizardState) -> None:
     # Codex agent: the only operator-side mcp_servers entry is the codex
     # brain itself — toggling it would disable the agent. Codex's actual
     # tool surface comes from `~/.codex/config.toml`, which operator can't
-    # touch. Skip the togglable picker and show the brain status + a
-    # read-only inheritance panel + management guidance.
+    # touch. Render the inheritance content as a read-only acknowledgement
+    # step (locked checkboxes + Enter-to-continue) so the user sees a real
+    # step rather than feeling like one was skipped.
     if state.based_on == "codex":
         console.print(
-            "  [green]✓[/green] [bold]codex[/bold] (brain) — always enabled "
+            "  [green]✓[/green] [bold]codex[/bold] (MCP bridge) — always enabled "
             "[dim](operator's connection to the codex CLI)[/dim]"
         )
         console.print()
         _render_codex_inheritance_footer(state, surface="mcps")
+        console.print()
+        console.input("  [dim]Press Enter to continue…[/dim] ")
         return
 
     required_map = _required_mcps_from_skills(state)
@@ -739,15 +730,10 @@ def _step2_mcps(state: WizardState) -> None:
         # the truth so the right-pane card reflects it on first render.
         initial.append(True if locked_skills else bool(servers[n].get("enabled", False)))
 
-    def right_pane(_cursor, checked):
-        enabled = [names[i] for i, on in enumerate(checked or []) if on]
-        return state.card(mcps=enabled)
-
     final = select_many(
         "",
         choices,
         initial_checked=initial,
-        right_pane=right_pane,
         console=console,
     )
     for i, n in enumerate(names):
@@ -916,7 +902,7 @@ def _mcp_sort_key(name: str) -> tuple[int, str]:
 # ── Step 3 — Skills ───────────────────────────────────────────────────────
 
 
-def _step3_skills(state: WizardState, _unused: Path | None = None) -> None:
+def _step3_skills(state: WizardState, _unused: Path | None = None, *, step_num: int = 2) -> None:
     """Mutates state.enabled_skill_names + state.bot_cfg["skills"]["external_paths"].
 
     Scans:
@@ -932,19 +918,23 @@ def _step3_skills(state: WizardState, _unused: Path | None = None) -> None:
     skills.external_paths — tilde-prefixed or absolute paths only, with
     the hint shown inline.
     """
-    console.print("[bold]2. Skills[/bold]\n")
+    console.print(f"[bold]{step_num}. Skills[/bold]\n")
 
     # Codex agent: operator-side skills don't reach codex's loop (codex IS
     # the harness — it auto-loads only ~/.codex/skills/ and ignores any
     # operator skill state). Skip the togglable picker AND the
-    # "add external path" prompt — both are functionally moot. The
-    # inheritance footer is the whole step content + management guidance.
+    # "add external path" prompt — both are functionally moot. Render the
+    # inheritance content as a read-only acknowledgement step (locked
+    # checkboxes + Enter-to-continue) so the user sees a real step rather
+    # than feeling like one was skipped.
     # Strip any stale `skills:` block from prior configs so the on-disk
     # config.yaml doesn't carry a misleading empty list — the user might
     # otherwise assume editing it does something.
     if state.based_on == "codex":
         state.bot_cfg.pop("skills", None)
         _render_codex_inheritance_footer(state, surface="skills")
+        console.print()
+        console.input("  [dim]Press Enter to continue…[/dim] ")
         return
 
     state.bot_cfg.setdefault("skills", {})
@@ -1018,14 +1008,12 @@ def _render_skill_picker(
     )
 
     names = [c[0] for c in candidates]
-    # Sublabel fits on one line within the left column. Budget = terminal
-    # width minus the (possibly-shrunken) build-card pane, Table.grid
+    # Sublabel fits on one line. Budget = terminal width minus Table.grid
     # horizontal padding (4 each side → 8), the checkbox indent
     # ("      " = 6), and a 2-cell safety margin so tight terminals don't
     # wrap on the last glyph. Floor at 24 so a very narrow terminal still
     # shows a readable excerpt.
-    card_w = build_card.width_for(console)
-    budget = max(24, console.size.width - card_w - 8 - 6 - 2)
+    budget = max(24, console.size.width - 8 - 6 - 2)
     # For the claude preset the picker is read-only/auto-enabled: the
     # inner Claude CLI auto-loads every skill under `~/.claude/skills/`
     # regardless of any toggle here, so unchecking would be illusory
@@ -1043,18 +1031,10 @@ def _render_skill_picker(
     ]
     initial = [True if is_claude else (n in current_enabled) for n in names]
 
-    def right_pane(_cursor, checked):
-        enabled_now = [names[i] for i, on in enumerate(checked or []) if on]
-        # Skills step runs before the MCP step — the build card on this
-        # screen should reflect skills only, not MCPs that auto-import
-        # may have flipped on in bot_cfg.
-        return state.card(mcps=[], skills=enabled_now)
-
     final = select_many(
         "",
         choices,
         initial_checked=initial,
-        right_pane=right_pane,
         console=console,
     )
     state.enabled_skill_names = [names[i] for i, on in enumerate(final) if on]
@@ -1119,7 +1099,7 @@ _BUILTIN_TOOLS = [
 ]
 
 
-def _step_permissions(state: WizardState) -> None:
+def _step_permissions(state: WizardState, *, step_num: int) -> None:
     """Permission policy — single-screen built-in-tool checklist.
 
     Same shape for openai / anthropic / claude_cli tracks. Track-A
@@ -1141,9 +1121,9 @@ def _step_permissions(state: WizardState) -> None:
     """
     provider = ((state.bot_cfg.get("llm") or {}).get("provider") or "").strip()
     if provider == "codex_mcp":
-        return _step_permissions_codex(state)
+        return _step_permissions_codex(state, step_num=step_num)
 
-    console.print("[bold]4. Permissions[/bold]")
+    console.print(f"[bold]{step_num}. Permissions[/bold]")
     console.print(
         "  [dim]Which built-in tools should run silently vs. ask in chat?[/dim]\n"
     )
@@ -1178,7 +1158,7 @@ def _step_permissions(state: WizardState) -> None:
         return Group(*lines)
 
     checked = select_many(
-        title="Permissions — space to toggle, enter to confirm",
+        title="",
         choices=choices,
         initial_checked=initial_checked,
         right_pane=right_pane,
@@ -1228,7 +1208,7 @@ _CODEX_SANDBOX_CHOICES = [
 ]
 
 
-def _step_permissions_codex(state: WizardState) -> None:
+def _step_permissions_codex(state: WizardState, *, step_num: int) -> None:
     """Permissions UI for the codex agent — two radio knobs (no tool list).
 
     Codex's internal safe-allowlist filters read-class commands before they
@@ -1238,12 +1218,7 @@ def _step_permissions_codex(state: WizardState) -> None:
     permitted before approval). See agents/codex/config.yaml for the full
     knob descriptions.
     """
-    console.print("[bold]4. Permissions (codex)[/bold]")
-    console.print(
-        "  [dim]Codex's internal allowlist filters read-class commands "
-        "automatically. Pick the approval policy + sandbox for everything "
-        "else.[/dim]\n"
-    )
+    console.print(f"[bold]{step_num}. Permissions (codex)[/bold]\n")
 
     state.bot_cfg.setdefault("permissions", {})
     existing_policy = state.bot_cfg["permissions"].get("default_approval_policy") or "on-request"
@@ -1292,7 +1267,7 @@ def _step_permissions_codex(state: WizardState) -> None:
 # ── Step 4 — System Prompt (voice + always-on rules) ──────────────────────
 
 
-def _step4_system_prompt(state: WizardState) -> None:
+def _step4_system_prompt(state: WizardState, *, step_num: int = 5) -> None:
     """Author the agent's system prompt — voice + always-on rules in one
     free-form text block.
 
@@ -1308,7 +1283,7 @@ def _step4_system_prompt(state: WizardState) -> None:
     Claude preset note: the next sub-prompt APPENDS CLAUDE.md to
     whatever this step produces. Clear here if you want CLAUDE.md alone.
     """
-    console.print("[bold]4. System Prompt[/bold]")
+    console.print(f"[bold]{step_num}. System Prompt[/bold]")
     console.print(
         "  [dim]Voice and always-on rules — one free-form block. "
         "How the bot talks, who it is, what it must always (or never) do.[/dim]\n"
@@ -1375,8 +1350,8 @@ def _prompt_with_hint(hint: str, *, dim: bool = True) -> str:
 # ── Step 5 — API keys ─────────────────────────────────────────────────────
 
 
-def _step6_api_keys(needed: set[str]) -> None:
-    console.print("\n[bold]5. API keys[/bold]")
+def _step6_api_keys(needed: set[str], *, step_num: int = 6) -> None:
+    console.print(f"\n[bold]{step_num}. API keys[/bold]")
     if not needed:
         console.print("  [dim]Nothing to prompt for — no enabled MCP needs an env var.[/dim]")
         return
@@ -1535,7 +1510,11 @@ def _reveal(state: WizardState) -> None:
     console.print()
     console.print("[bold]✨ All set! 🎁[/bold]")
     console.print()
-    console.print(state.card(title=f"Meet {state.name}"))
+    reveal_width = build_card.width_for_reveal(
+        console,
+        items=state.equipped_mcps() + state.equipped_skills(),
+    )
+    console.print(state.card(title=f"Meet {state.name}", width=reveal_width))
     console.print()
     console.print(f"Your agent config lives in [bold]{config_path}[/bold].")
     backup_path = getattr(state, "_reset_backup_path", None)
@@ -1573,8 +1552,7 @@ def run(
         f"[bold]Operator {'edit' if is_edit_mode else 'build'} wizard[/bold]"
     )
     console.print(
-        "[dim]Six steps + sign-in. Ctrl+C / q at any picker cancels "
-        "without writing.[/dim]\n"
+        "[dim]Ctrl+C / q at any picker cancels without writing.[/dim]\n"
     )
     try:
         if target_agent is not None:
@@ -1605,12 +1583,18 @@ def run(
         else:
             state = _step1_fighter_select()
 
-        # Skills first so step 3 (MCPs) can lock MCPs required by chosen skills.
+        # Step numbering is dynamic so both modes read 1, 2, 3… in order.
+        # Edit mode skips step 1 (the base-agent picker), so its first step
+        # below renders as "1." and so on. Setup mode already burned step 1
+        # on _step1_fighter_select, so its first step here renders as "2."
+        n = 1 if is_edit_mode else 2
+
+        # Skills first so MCPs step can lock MCPs required by chosen skills.
         console.clear()
-        _step3_skills(state)
+        _step3_skills(state, step_num=n); n += 1
 
         console.clear()
-        _step2_mcps(state)
+        _step2_mcps(state, step_num=n); n += 1
 
         # Permissions sit between Tools (MCPs) and System Prompt — the user
         # just chose which MCPs are on, now they decide how trusting to be
@@ -1619,20 +1603,27 @@ def run(
         # also still carry legacy per-MCP read_tools / confirm_tools blocks;
         # config.py translates those into the unified lists at load time.
         console.clear()
-        _step_permissions(state)
+        _step_permissions(state, step_num=n); n += 1
 
         console.clear()
-        _step4_system_prompt(state)
+        _step4_system_prompt(state, step_num=n); n += 1
 
-        console.clear()
         envs = _collect_env_refs(state)
-        _step6_api_keys(envs)
+        existing = _parse_env(_ENV_FILE) if _ENV_FILE.exists() else {}
+        missing_keys = sorted(v for v in envs if not existing.get(v))
+        # Only burn a step number on the API-keys step when there's actually
+        # something to prompt for. Otherwise the screen clears past it before
+        # the user reads it (codex has no env refs, so the step would flash
+        # by and sign-in would jump from step 5 to step 7).
+        if missing_keys:
+            console.clear()
+            _step6_api_keys(envs, step_num=n); n += 1
 
         console.clear()
         _step7_write(state)
 
         console.clear()
-        run_signin_step()
+        run_signin_step(step_num=n)
 
         console.print()
         console.input("  [bold]Press Enter to reveal your agent ✨🎁[/bold] ")
