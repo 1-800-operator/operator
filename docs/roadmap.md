@@ -509,6 +509,11 @@ Audio quality, TTS 3-tier architecture, latency masking, STT accuracy (mlx-whisp
 | Parallel tool calls | 11.2 | Currently disabled on both providers (`parallel_tool_calls=False` on OpenAI, `disable_parallel_tool_use=True` on Anthropic) so the one-tool-at-a-time loop in `LLMClient.ask()` stays safe. Re-enable for skills that fan out across MCP servers (e.g. "what's on my plate across Linear + GitHub?"). Requires `LLMClient` to execute N tool_calls per turn and feed back N tool_results before the next LLM turn. |
 | Per-meeting voice toggle | session 169 (2026-04-26) | `agent.voice: plain | technical` ships per-bot. Add a chat command (`@bot switch to technical voice`) so a user can flip mid-meeting when they need transparency for a specific exchange without editing the YAML. Requires runtime config mutation hook in chat_runner + a parser for the command. |
 
+### Agent Presets
+| Item | Origin | Description |
+|------|--------|-------------|
+| Cursor CLI agent preset | session 181 (2026-05-02) | Add `cursor` as a third CLI-backed preset alongside `claude` and `codex`. Same pattern as the existing two: hard-depend on the `cursor-agent` (or successor) CLI being installed + logged in, hand the meeting chat off to its loop as the "brain," surface its globally-configured MCPs and rules/skills as a read-only inheritance panel in the wizard (skip the togglable picker steps because operator-side state doesn't reach cursor's subprocess — same divergence locked for codex in session 180 via `tests/test_codex_agent_config.py`). Needs: a `pipeline/cursor_import.py` peer to `pipeline/codex_import.py` (`discover_cursor_mcps()` + `discover_cursor_rules()`), wizard step 1 entry for `cursor` (CLI-prereq gated like claude + codex), bundled `agents/cursor/config.yaml` with the moot blocks omitted, regression test. Inherits the Phase-15.9 brain-MCP plumbing for free. Pairs with the mid-meeting brain reset entry above. |
+
 ### Multi-Modal & Voice
 | Item | Origin | Description |
 |------|--------|-------------|
