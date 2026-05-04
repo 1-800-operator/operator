@@ -1,88 +1,7 @@
 # Operator — Agent Context
 
-*Working memory for coding agents. Human-readable roadmap: `docs/roadmap.md`. Forward strategy: `docs/product-strategy.md`.*
+*Working memory for coding agents. Human-readable roadmap: `docs/roadmap.md`.*
 *Living document — update at the end of each session.*
-
----
-
-## ⚠️ ARCHITECTURE REDESIGN — Session 185 (May 5, 2026)
-
-**The web app shrinks to marketing+signup+trial-trigger; the desktop app absorbs billing, dashboard, settings, and bot account onboarding. Backend is unified for L0 trial and sidecar bridges.**
-
-The session-184 design assumed a real web app at `1-800-operator.com` with auth, dashboard, Stripe surface, and a server-side noVNC hosted-browser flow for bot account onboarding. Session 185 collapsed this:
-
-- **Website is near-static.** Landing + email-gated signup + L0 trial-trigger endpoint + download CTA. No authenticated UI. Stack pick simplifies — Astro / static-export Next.js / similar (lock during A1).
-- **Desktop app owns the authenticated experience.** Stripe Checkout in system browser → deep-link back to app. Account dashboard, settings, meeting log, bot account management — all in-app.
-- **L0 uses a shared pool** of pre-warmed Operator-owned bot Google accounts (`heyoperator001@gmail.com` …). The hosted-browser noVNC flow from S184 is killed entirely.
-- **L1+ user-owned bot accounts onboard via embedded Chromium inside the app.** User signs into Google in a local browser window the app spawns; cookies are captured on-device, encrypted, then uploaded. Credentials never transit our servers.
-- **Backend is one unified service** for both the website's anonymous trial-trigger endpoints and the desktop app's authenticated WSS. One API, one DB, one cloud-browser fleet.
-
-**Phase plan A1–A10 renumbered:**
-- A1 — Marketing site + signup + trial-trigger API + DB. **No Stripe.** Static-ish stack.
-- A2 — Cloud browser orchestrator + spike-test Cloud Run / Fargate / Fly to pick fleet.
-- A3 — L0 shared bot account pool (5–10 pre-warmed accounts, ~2 weeks organic warmup each).
-- A4 — L0 LLM loop (Haiku 4.5, generic chat, phantom-action footers).
-- A5 — End-to-end L0 MVP (founder dogfood).
-- A6 — Desktop app skeleton + Stripe in-app + account link to backend.
-- A7 — Embedded-Chromium bot account onboarding (in app, replaces server noVNC).
-- A8 — Sidecar Claude Code bridge (this flips L1 → L2).
-- A9 — Codex bridge.
-- A10 — Soft launch + OSS archive.
-
-**Locked open questions from S184 (no longer open):**
-- L0 needs user-owned bot account? → No. Shared pool.
-- Hosted-browser noVNC flow? → Killed. Embedded Chromium in app instead.
-- Web app needs full backend (auth/sessions/dashboard/WSS fan-out)? → No. Near-static.
-
-**Still open (lock during A1–A2):** web stack pick (Astro / static-export Next.js / plain HTML), DB pick (Supabase / Neon / Fly Postgres), production fleet pick (Cloud Run / Fargate / Fly — spike-test during A2).
-
-**No code changes this session.** Strategy + docs only. `docs/product-strategy.md` rewritten end-to-end to match the redesign.
-
-Everything below this marker is **session-184 + earlier context** preserved as record. See `docs/product-strategy.md` for the active forward doc.
-
----
-
-## ⚠️ STRATEGIC SHARPENING — Session 184 (May 4, 2026)
-
-**The session-183 plugin path is dead. Replaced by a four-tier trust ladder (L0–L3) with cloud-hosted demo as the wedge and a sidecar desktop app at L2. Cloud-browser architecture validated end-to-end on a DigitalOcean droplet — but with a load-bearing constraint:**
-
-- **L0 (free):** paste Meet URL + email → cloud bot joins → 30 min total/account, rate-limited. Generic Claude (Haiku 4.5). No user-context tools — bot teases sidecar via "phantom action" footers.
-- **L1 (paid):** Stripe subscription, more hours, Sonnet 4.6. Cloud-only.
-- **L2 (sidecar):** signed/notarized macOS app downloaded from web. Bridges cloud bot to user's local Claude Code (skills, MCPs, codebase, Linear, GitHub). Replaces the dead plugin.
-- **L3 (Brainchild):** v2 build-your-own-bot, gated on v1 validation.
-
-**The load-bearing finding (8 spike runs against real Meet):** anonymous-guest cloud bots from a datacenter IP get their WebRTC connection dropped by Google within ~10s. Chat input renders in the bot's local UI but never broadcasts. **Authenticated cloud bots (using saved Google session via Playwright `storage_state`) sustain WebRTC indefinitely and deliver chat to other participants.** Validated in Run 8 with the existing voice-era `/root/operator/auth_state.json` (Mar 26, ~6 weeks old, still valid).
-
-**Therefore:** every cloud bot in v1 must run as a real Google account. Privacy story: user creates a fresh Google account *just for the bot* at signup, signs in via a hosted-browser flow (noVNC-streamed Chromium on our server), we capture and store only the encrypted session cookies — never the password. We never touch the user's personal Google account. OAuth is not viable (no scope for "join Meet as user"); app passwords don't work for web sign-in; password storage is a non-starter.
-
-**Updated phase plan A1–A10 lives in `docs/product-strategy.md`** (rewritten this session). Old A1–A9 from session 183 (plugin-centric) is superseded.
-
-**Spike artifacts retained at:** `experiments/cloud-browser-spike/droplet/` — Dockerfile, `join_meet.py`, screenshot artifacts from Runs 6 (failure: anonymous, +10s disconnect) and 8 (success: authenticated, full delivery). DigitalOcean droplet `operator-dev` at `64.23.182.26` is the spike host (already running, paid for, $12/mo) — production fleet TBD between DO and Fly.io.
-
-**What ports forward into v1 (now reaffirmed):** voice-era `cloud/docker/Dockerfile`, `connectors/docker_adapter.py`, `connectors/linux_adapter.py` (all on `voice-preserved` branch — strip PulseAudio + audio bits, keep stealth recipe + guest-name flow + chat selectors). Plus existing `pipeline/chat_runner.py`, `pipeline/mcp_client.py`, `pipeline/meeting_record.py`, `pipeline/guardrails.py`, `mcp_servers/transcript_server.py` from `main`.
-
-**What's archived from session 183 thinking:** `@operator/bridge` Claude Code plugin design. Plugin install UX is too low-trust for cold-acquisition v1; the sidecar absorbs everything the plugin would have done with better enterprise sheen.
-
-Everything below this marker is **session-183 + earlier OSS-phase context** preserved as record. See `docs/product-strategy.md` for the active forward doc.
-
----
-
-## ⚠️ STRATEGIC PIVOT — Session 183 (May 3, 2026)
-
-**Operator pivoted from OSS CLI to a closed-source two-product trajectory.** Working agents touching this codebase need to know:
-
-- **v1 Operator** = cloud-hosted web switchboard (`1-800-operator.com`) + Claude Code plugin (`claude plugin install operator`) that bridges meeting events to the user's local Claude Code via WebSocket. Cloud headless Chrome joins Meet as an acknowledged participant; user's local Claude does the thinking. Self-hosted browser fleet on Fly.io. Mac-only, Meet-only, Claude-Code-only at launch (Codex parity = Phase 1.5). Free for N meeting-hours/mo, then $19/mo flat. BYO-LLM (we never see Anthropic bills).
-- **v2 Brainchild** = desktop build-your-own-bot product, gated on v1 validation (~50 paying users).
-
-**The OSS CLI is being archived at v1 launch.** Phase 14.13 / 14.5 / 16 trajectory in this doc and `docs/roadmap.md` is **superseded**. New phases are v1 A1–A9 — see `docs/product-strategy.md` for the phase plan.
-
-**What ports forward (don't rewrite):** `connectors/macos_adapter.py` (Playwright Meet automation), `pipeline/chat_runner.py` (chat loop, trigger detection, tool confirmation), `pipeline/mcp_client.py`, `pipeline/meeting_record.py`, `pipeline/guardrails.py`, `mcp_servers/transcript_server.py`. All carry into v1 cloud browser + plugin bridge.
-
-**What's going away:** the CLI entry (`__main__.py`), the setup wizard (`pipeline/setup.py`), the bundled agent presets (`agents/<name>/`), `operator dial` / `operator setup` / `operator edit` commands as user-facing surfaces. The four-layer wizard view of an agent (agent / llm / mcp / skills / system_prompt) is a Brainchild concern, not v1.
-
-**Sessions 184+ work in this codebase is repackaging, not rewriting.** New code lives in two surfaces: a `cloud/` (or new repo) for the switchboard + browser orchestrator, and a `plugin/` (or `@operator/bridge` npm package) for the Claude Code plugin. The pipeline modules above get extracted into a shared library both surfaces depend on.
-
-Everything below this marker is **historical OSS-phase context** preserved as record. Useful for understanding why current code looks the way it does. Not the active trajectory.
 
 ---
 
@@ -2065,14 +1984,6 @@ Six new `SKILL.md` files, each following the existing `prd-from-discussion` / `d
 ---
 
 ## Hard Won Knowledge
-
-**Session 184 — Three entries:**
-
-1. **Anonymous-guest cloud bots cannot maintain WebRTC to Google Meet from a datacenter IP — but it looks like they can.** Spike Runs 1–6 (8 total) showed the bot consistently joining Meet from a DigitalOcean droplet, getting admitted by the host in ~2s, opening the chat panel, filling the chat input, rendering its own message bubble in the bot's local view. **All five steps lie:** the page renders, the UI works, but the WebRTC channel that actually broadcasts chat to other participants is dropped by Google within ~10s. "You lost your network connection. Trying to reconnect." appears. Page auto-reloads. Other participants never see the message. The misleading part: the bot's local chat panel renders the message bubble *immediately* on Enter, before the server ACKs — looks like success, isn't. Confirmed only when the user explicitly checked their own chat panel and reported the message never arrived. `--use-fake-device-for-media-stream` and `--network=host` did NOT fix it. **The fix:** authenticate the bot with a saved Google session via Playwright `storage_state`. Run 8 with the existing voice-era `auth_state.json` (Mar 26, ~6 weeks old, still valid) sustained WebRTC indefinitely; user confirmed receipt. **Lesson:** when validating cloud-meeting-bot architecture, the load-bearing test is "did another participant actually receive the message," NOT "did the bot's UI render the message bubble." Local-render success is misleading because chat input goes into Meet's React state before any server ACK; the bubble renders optimistically. Always validate end-to-end with another human in the room reading their own chat panel. Also: voice-era code may have never validated this either — they tested in personal-account meetings against themselves, which auto-admit and may have masked the same WebRTC failure mode.
-
-2. **Marketplace plugin install UX shows users zero permission scopes.** When evaluating Claude Code plugin distribution, I assumed install would surface manifest contents (subprocesses, network, filesystem access) and let users opt in. Wrong. Anthropic's docs explicitly state: *"Plugins are highly trusted components that can execute arbitrary code on your machine with your user privileges. Only install plugins and add marketplaces from sources you trust."* The install UX shows only name + description + author. No manifest disclosure, no permission scopes, no warnings. Trust delegation is to the brand, not to a sandbox. **Lesson:** when evaluating any plugin/extension distribution channel as a v1 acquisition surface, check the install UX FIRST before architecting around it — the trust model determines whether a new company can credibly distribute at all. Plugins suit established brands distributing to existing users; they're a poor cold-acquisition surface for unknown brands targeting enterprise-conscious users. The right v1 entry point in that scenario is a zero-install demo (paste link, bot joins) that earns trust before asking for OS-level access.
-
-3. **DigitalOcean droplets bill for existence, not for use — wrong cost shape for v1's expected utilization pattern.** $1.29 charge for 3 days of session-184 spike work confused us until we did the math: $12/mo / 730 hrs = $0.0164/hr × 24 × 3 ≈ $1.18. The droplet was idle (load average 0.00) the whole time except for ~10 minutes of actual spike runs. DO bills the droplet hourly whether anyone uses it or not. Even Power-Off doesn't stop billing — only destroying the droplet does (which loses local artifacts). For v1's expected pattern (mostly zero meetings, bursty usage when active), DO is structurally wrong. **Lesson:** match cloud platform billing model to expected utilization profile. Always-on hourly = right for steady utilization (≥40-50% of capacity used). Scale-to-zero per-second = right for bursty / low-utilization. Production target should be Cloud Run / Fargate / Fly.io (scale-to-zero) not droplets (always-on). Same lesson applies to picking AWS EC2 vs Lambda, GCE VM vs Cloud Run, etc. Validate with actual hourly cost math before committing to a platform.
 
 **Session 181 — Two entries:**
 
