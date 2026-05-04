@@ -5,6 +5,31 @@
 
 ---
 
+## ⚠️ STRATEGIC SHARPENING — Session 184 (May 4, 2026)
+
+**The session-183 plugin path is dead. Replaced by a four-tier trust ladder (L0–L3) with cloud-hosted demo as the wedge and a sidecar desktop app at L2. Cloud-browser architecture validated end-to-end on a DigitalOcean droplet — but with a load-bearing constraint:**
+
+- **L0 (free):** paste Meet URL + email → cloud bot joins → 30 min total/account, rate-limited. Generic Claude (Haiku 4.5). No user-context tools — bot teases sidecar via "phantom action" footers.
+- **L1 (paid):** Stripe subscription, more hours, Sonnet 4.6. Cloud-only.
+- **L2 (sidecar):** signed/notarized macOS app downloaded from web. Bridges cloud bot to user's local Claude Code (skills, MCPs, codebase, Linear, GitHub). Replaces the dead plugin.
+- **L3 (Brainchild):** v2 build-your-own-bot, gated on v1 validation.
+
+**The load-bearing finding (8 spike runs against real Meet):** anonymous-guest cloud bots from a datacenter IP get their WebRTC connection dropped by Google within ~10s. Chat input renders in the bot's local UI but never broadcasts. **Authenticated cloud bots (using saved Google session via Playwright `storage_state`) sustain WebRTC indefinitely and deliver chat to other participants.** Validated in Run 8 with the existing voice-era `/root/operator/auth_state.json` (Mar 26, ~6 weeks old, still valid).
+
+**Therefore:** every cloud bot in v1 must run as a real Google account. Privacy story: user creates a fresh Google account *just for the bot* at signup, signs in via a hosted-browser flow (noVNC-streamed Chromium on our server), we capture and store only the encrypted session cookies — never the password. We never touch the user's personal Google account. OAuth is not viable (no scope for "join Meet as user"); app passwords don't work for web sign-in; password storage is a non-starter.
+
+**Updated phase plan A1–A10 lives in `docs/product-strategy.md`** (rewritten this session). Old A1–A9 from session 183 (plugin-centric) is superseded.
+
+**Spike artifacts retained at:** `experiments/cloud-browser-spike/droplet/` — Dockerfile, `join_meet.py`, screenshot artifacts from Runs 6 (failure: anonymous, +10s disconnect) and 8 (success: authenticated, full delivery). DigitalOcean droplet `operator-dev` at `64.23.182.26` is the spike host (already running, paid for, $12/mo) — production fleet TBD between DO and Fly.io.
+
+**What ports forward into v1 (now reaffirmed):** voice-era `cloud/docker/Dockerfile`, `connectors/docker_adapter.py`, `connectors/linux_adapter.py` (all on `voice-preserved` branch — strip PulseAudio + audio bits, keep stealth recipe + guest-name flow + chat selectors). Plus existing `pipeline/chat_runner.py`, `pipeline/mcp_client.py`, `pipeline/meeting_record.py`, `pipeline/guardrails.py`, `mcp_servers/transcript_server.py` from `main`.
+
+**What's archived from session 183 thinking:** `@operator/bridge` Claude Code plugin design. Plugin install UX is too low-trust for cold-acquisition v1; the sidecar absorbs everything the plugin would have done with better enterprise sheen.
+
+Everything below this marker is **session-183 + earlier OSS-phase context** preserved as record. See `docs/product-strategy.md` for the active forward doc.
+
+---
+
 ## ⚠️ STRATEGIC PIVOT — Session 183 (May 3, 2026)
 
 **Operator pivoted from OSS CLI to a closed-source two-product trajectory.** Working agents touching this codebase need to know:

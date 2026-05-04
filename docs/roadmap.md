@@ -1,6 +1,38 @@
 # Operator — Roadmap
 
-*Last updated: May 3, 2026 (session 183 — strategic pivot from OSS CLI to closed-source two-product trajectory; OSS roadmap below superseded.)*
+*Last updated: May 4, 2026 (session 184 — sharpened the closed-source trajectory: plugin path replaced by sidecar app at L2, cloud-first wedge at L0, cloud-browser architecture validated end-to-end with the auth requirement.)*
+
+---
+
+## ⚠️ STRATEGIC SHARPENING — Session 184 (May 4, 2026)
+
+**Session 183's plugin path is dead. Replaced by a four-tier trust ladder (L0–L3). Cloud-browser architecture validated via 8 spike runs against real Meet rooms — but with one load-bearing constraint: every cloud bot must run authenticated as a real Google account.**
+
+- **L0 (free):** paste Meet URL + email → cloud bot joins → 30 min total/account, rate-limited. Generic Claude (Haiku 4.5). Phantom-action footers tease L2.
+- **L1 (paid):** Stripe subscription, more hours, Sonnet 4.6. Cloud-only.
+- **L2 (sidecar):** signed/notarized macOS app downloaded from `1-800-operator.com/download`. Bridges cloud bot to user's local Claude Code (skills, MCPs, codebase, Linear, GitHub). Replaces the dead plugin.
+- **L3 (Brainchild):** v2 build-your-own-bot, gated on v1 validation.
+
+**The auth requirement (validated session 184):** anonymous-guest cloud bots get WebRTC dropped by Google in ~10s from a datacenter IP. Authenticated bots (Playwright `storage_state` from a saved Google session) sustain WebRTC indefinitely. **Privacy flow:** user creates a fresh Google account *just for the bot*, signs in via a hosted-browser flow on our server (noVNC-streamed Chromium), we capture only encrypted session cookies — never the password.
+
+**Updated phase plan A1–A10 (session-183 A1–A9 superseded):**
+
+- **A1** — Switchboard skeleton: web app at `1-800-operator.com` (Next.js or Remix on Vercel TBD), email-gated signup, Stripe Checkout integration.
+- **A2** — Cloud browser orchestrator: port voice-era `cloud/docker/Dockerfile` + `connectors/docker_adapter.py` (chat-only, drop PulseAudio). Per-meeting Chromium spawn on DigitalOcean. Bot account `auth_state.json` injection.
+- **A3** — Hosted-browser bot account onboarding: noVNC-streamed sign-in flow at signup. Encrypted `auth_state.json` storage. Re-auth prompt when expired.
+- **A4** — L0 LLM loop: Haiku 4.5 inline in the cloud orchestrator. Generic chat responses, web search tool, phantom-action teases for L2.
+- **A5** — End-to-end L0 MVP: founder-account user flow, paste link → bot joins → chats → 30-min cap.
+- **A6** — L1 paid tier: Sonnet 4.6, longer meetings, Stripe webhook → quota flip.
+- **A7** — Sidecar app (L2): signed macOS app, WebSocket bridge to cloud orchestrator, Claude Code shim, MCP inheritance.
+- **A8** — Codex bridge in sidecar.
+- **A9** — Soft launch: invite-only, 10–20 users.
+- **A10** — Public launch + OSS archive.
+
+**Spike artifacts retained at:** `experiments/cloud-browser-spike/droplet/` (Dockerfile, `join_meet.py`, screenshots from Runs 6 + 8). DigitalOcean droplet `operator-dev` at `64.23.182.26` is the spike host (alive, $12/mo, ~6 weeks idle until session 184 reanimated it).
+
+**Forward-looking strategy: see `docs/product-strategy.md` (rewritten this session).**
+
+Everything below this marker is **session-183 + earlier OSS-phase context** preserved as record.
 
 ---
 
