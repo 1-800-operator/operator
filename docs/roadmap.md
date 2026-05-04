@@ -1,6 +1,24 @@
 # Operator — Roadmap
 
-*Last updated: May 4, 2026 (session 184 — sharpened the closed-source trajectory: plugin path replaced by sidecar app at L2, cloud-first wedge at L0, cloud-browser architecture validated end-to-end with the auth requirement.)*
+*Last updated: May 5, 2026 (session 185 — web surface collapses to marketing+signup+trial-trigger only; billing, dashboard, settings, bot account onboarding all move into the desktop app; backend unified between L0 trial and sidecar bridges. Phase plan A1–A10 renumbered.)*
+
+---
+
+## ⚠️ ARCHITECTURE REDESIGN — Session 185 (May 5, 2026)
+
+**Web surface collapses to a thin marketing site. Everything authenticated moves into the desktop app.**
+
+The session-184 plan still treated `1-800-operator.com` as a "real web app" with auth, sessions, dashboard, billing, hosted-browser noVNC bot account onboarding, and live-meeting WebSocket fan-out. Session 185 reduced that to: **landing + email-gated signup + L0 trial-trigger endpoint + app-download CTA.** No authenticated web UI. Once a user is past the 30-min trial, every interaction with Operator happens in the desktop app talking to our backend over WSS.
+
+Knock-on changes:
+- **L0 free trial uses a shared pool** of Operator-owned bot Google accounts (locked, no longer open). User-owned bot accounts only at L1+ via embedded Chromium first-run inside the app — *not* via server-side noVNC. Cookies originate on user's device.
+- **Stripe billing lives in the desktop app** (Checkout in system browser → deep-link return). Backend webhook flips the account tier.
+- **Backend is one unified service** serving both the website's anonymous endpoints and the app's authenticated WSS — no separate "web backend" vs "sidecar backend."
+- **Phase plan A1–A10 renumbered.** A1 shrinks (no Stripe). A3 = shared bot pool warmup (replaces the noVNC phase). A6 = desktop app skeleton + Stripe + account link. A7 = embedded-Chromium bot account onboarding (in app). A8 = sidecar Claude Code bridge (this is what flips L1 → L2). A9 = Codex bridge. A10 = soft launch + OSS archive.
+
+**See `docs/product-strategy.md` for the rewritten phase plan and architecture diagram.** No production code changes this session — strategy + doc only.
+
+Everything below this marker is **session-184 + earlier context** preserved as record.
 
 ---
 

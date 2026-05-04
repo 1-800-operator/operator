@@ -5,6 +5,43 @@
 
 ---
 
+## ⚠️ ARCHITECTURE REDESIGN — Session 185 (May 5, 2026)
+
+**The web app shrinks to marketing+signup+trial-trigger; the desktop app absorbs billing, dashboard, settings, and bot account onboarding. Backend is unified for L0 trial and sidecar bridges.**
+
+The session-184 design assumed a real web app at `1-800-operator.com` with auth, dashboard, Stripe surface, and a server-side noVNC hosted-browser flow for bot account onboarding. Session 185 collapsed this:
+
+- **Website is near-static.** Landing + email-gated signup + L0 trial-trigger endpoint + download CTA. No authenticated UI. Stack pick simplifies — Astro / static-export Next.js / similar (lock during A1).
+- **Desktop app owns the authenticated experience.** Stripe Checkout in system browser → deep-link back to app. Account dashboard, settings, meeting log, bot account management — all in-app.
+- **L0 uses a shared pool** of pre-warmed Operator-owned bot Google accounts (`heyoperator001@gmail.com` …). The hosted-browser noVNC flow from S184 is killed entirely.
+- **L1+ user-owned bot accounts onboard via embedded Chromium inside the app.** User signs into Google in a local browser window the app spawns; cookies are captured on-device, encrypted, then uploaded. Credentials never transit our servers.
+- **Backend is one unified service** for both the website's anonymous trial-trigger endpoints and the desktop app's authenticated WSS. One API, one DB, one cloud-browser fleet.
+
+**Phase plan A1–A10 renumbered:**
+- A1 — Marketing site + signup + trial-trigger API + DB. **No Stripe.** Static-ish stack.
+- A2 — Cloud browser orchestrator + spike-test Cloud Run / Fargate / Fly to pick fleet.
+- A3 — L0 shared bot account pool (5–10 pre-warmed accounts, ~2 weeks organic warmup each).
+- A4 — L0 LLM loop (Haiku 4.5, generic chat, phantom-action footers).
+- A5 — End-to-end L0 MVP (founder dogfood).
+- A6 — Desktop app skeleton + Stripe in-app + account link to backend.
+- A7 — Embedded-Chromium bot account onboarding (in app, replaces server noVNC).
+- A8 — Sidecar Claude Code bridge (this flips L1 → L2).
+- A9 — Codex bridge.
+- A10 — Soft launch + OSS archive.
+
+**Locked open questions from S184 (no longer open):**
+- L0 needs user-owned bot account? → No. Shared pool.
+- Hosted-browser noVNC flow? → Killed. Embedded Chromium in app instead.
+- Web app needs full backend (auth/sessions/dashboard/WSS fan-out)? → No. Near-static.
+
+**Still open (lock during A1–A2):** web stack pick (Astro / static-export Next.js / plain HTML), DB pick (Supabase / Neon / Fly Postgres), production fleet pick (Cloud Run / Fargate / Fly — spike-test during A2).
+
+**No code changes this session.** Strategy + docs only. `docs/product-strategy.md` rewritten end-to-end to match the redesign.
+
+Everything below this marker is **session-184 + earlier context** preserved as record. See `docs/product-strategy.md` for the active forward doc.
+
+---
+
 ## ⚠️ STRATEGIC SHARPENING — Session 184 (May 4, 2026)
 
 **The session-183 plugin path is dead. Replaced by a four-tier trust ladder (L0–L3) with cloud-hosted demo as the wedge and a sidecar desktop app at L2. Cloud-browser architecture validated end-to-end on a DigitalOcean droplet — but with a load-bearing constraint:**
