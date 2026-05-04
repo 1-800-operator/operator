@@ -52,12 +52,31 @@
 
 ---
 
-## Loose Ends — Hash Out Next Session (S187)
+## Loose Ends — Hash Out Next Session
 
-These are open threads carried into session 187 from cloud-spike work that needs a proper home in the OSS roadmap. Both are placeholders — to be discussed and properly scoped/sequenced in the next session, then folded into a real phase.
-
-- **Claude `--resume` flag.** A new resume flag for the Claude CLI was discovered during pivot-era spikes; the OSS product isn't yet taking advantage of it. Decide where it fits — the `claude` agent's subprocess wiring (`pipeline/providers/claude_cli.py`?) is the obvious surface — and what behavior it unlocks (e.g. continuity across reconnects, mid-meeting brain reset). Hash out shape, sequence, and tests next session.
 - **Codex captions parity (R8).** R8 was deferred at session 179 with a documented gap: codex's `mcp-server` mode doesn't accept `--mcp-config` to inherit operator's bundled transcript MCP, so the codex agent ships without caption awareness. Decide on the v1 OSS approach (caption parity via codex plugin manifest? Sidecar? Live with the gap?), sequence into the active phase plan, then implement.
+
+---
+
+## Phase 14.17: claude_cli `--resume` for crash recovery (~half-day)
+
+**Why.** When the `claude -p` subprocess dies mid-meeting today, `_restart_after_death` (`pipeline/providers/claude_cli.py:553`) re-spawns cold and feeds a synthesized opener built from `_turn_history` — but `_turn_history` only carries `(user_text, assistant_text)` pairs, dropping tool calls and tool results (S166 deferred carry-over). So if the subprocess crashed after claude opened files, edited Linear, etc., the resumed bot inherits a sanitized story without ground truth and may hallucinate or contradict prior actions.
+
+`claude -p --resume <session-id>` rehydrates a fresh subprocess from claude's local session store on disk (`~/.claude/projects/<project>/<session-id>.jsonl`) with the full message history including tool use + tool results. We already capture `session_id` from the system-init event (logged at `_validate_init_event`, line 582) — just need to persist it and use it on restart.
+
+**Note on scope:** `--resume` does NOT replace tail-replay on the `anthropic`/`openai` API providers — it's a `claude -p` flag, not an API feature. Steady-state turns on `claude_cli` already don't replay tail (the long-lived subprocess holds context in-memory). So this phase is exclusively about closing the crash-recovery fidelity gap on track A.
+
+**Cross-meeting continuity is an explicit non-goal of this phase** — `--resume`-ing a prior meeting's session-id when the bot rejoins a follow-up meeting is mechanically possible but sits in tension with the "fresh meeting = fresh context" default, and `MeetingRecord` is slug-keyed (no natural cross-meeting state). Revisit post-MVP.
+
+**Steps:**
+
+1. **Spike (~30min): confirm `--resume` + stream-json compose.** Verify `claude -p --resume <id> --input-format stream-json --output-format stream-json` works end-to-end. The engineer's delegate MCP (`agents/engineer/delegate_to_claude_code.py`) already uses `--resume` but in one-shot mode (`-p "<task>"`). If stream-json + resume compose, the swap is clean. If not, recovery becomes a two-step shape: one-shot `--resume` to reconstruct context, then re-init stream-json — uglier but still wins on fidelity vs. the synthesized-opener.
+2. **Capture and persist session_id.** Add `self._session_id` to `ClaudeCLIProvider`; populate from the `payload["session_id"]` already extracted at line 582. Set on every successful spawn.
+3. **Rewire `_restart_after_death`** to spawn with `["claude", "-p", "--resume", self._session_id, ...]` (or the two-step fallback if step 1 says so). Delete the `_build_synthesized_opener` codepath (lines ~513–550) and the `_turn_history: list[tuple[str, str]]` field + every `_turn_history.append(...)` site (lines 699 + 827, plus the wrap-around references near lines 683 + 805). Also delete the corresponding restart path that re-feeds the synthesized opener on streaming retries.
+4. **Test (live): kill the subprocess mid-meeting after a tool call; verify the resumed subprocess answers correctly about the prior tool call.** Kill via `pkill -9 -f "claude -p"` or similar between turns. Ask "what did you just do?" — pre-fix answer goes vague, post-fix answer cites the actual tool result.
+5. **Test (unit): subprocess crash → `--resume` invocation.** Mock the subprocess; assert the second spawn call uses `--resume <captured-id>` and that `_turn_history` is no longer touched.
+
+**Done when:** mid-meeting crash recovery preserves tool-call fidelity end-to-end, the `_turn_history` + `_build_synthesized_opener` plumbing is gone, and a regression test pins the `--resume` invocation.
 
 ---
 

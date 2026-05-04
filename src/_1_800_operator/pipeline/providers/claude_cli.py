@@ -157,13 +157,12 @@ class ClaudeCLIProvider(LLMProvider):
         # the assertion in _spawn(). Instead we observe the init event during
         # the first _send_and_collect() and flip this flag.
         self._init_validated = False
-        # History of completed turns within the lifetime of the *meeting*
-        # (not just the current subprocess). Each entry is (user_text,
-        # assistant_text). Populated after each successful turn so that a
-        # mid-meeting subprocess crash can be recovered by re-feeding the
-        # transcript into a freshly spawned subprocess via the synthesized
-        # opener strategy validated by probe 7.
-        self._turn_history: list[tuple[str, str]] = []
+        # Captured from the system-init event of the first successful spawn.
+        # On crash, _restart_after_death spawns a new subprocess with
+        # `--resume <session_id>` so the new process rehydrates claude's
+        # full local session state (messages + tool use + tool results)
+        # rather than rebuilding from a synthesized text-only opener.
+        self._session_id: str | None = None
         # Permission-bridge state (populated by _spawn when permission_handler
         # is set). Tempdir holds settings.json + named pipes; pump thread
         # listens on req pipe and dispatches to the handler.
@@ -209,13 +208,15 @@ class ClaudeCLIProvider(LLMProvider):
 
         Idempotent: returns False when the existing subprocess is still
         running. If the previous subprocess died (poll returns a code) or
-        was never started, this spawns a new one and returns True so the
-        caller knows it needs to rebuild context via the synthesized
-        opener.
+        was never started, this spawns a new one. When `self._session_id`
+        is set, the spawn uses `--resume <id>` so claude rehydrates the
+        prior session's full message history (incl. tool use + tool
+        results) from its on-disk session store.
 
         The system-init event is emitted lazily by claude after the first
-        user envelope is sent, so the apiKeySource assertion happens during
-        the first _send_and_collect() call instead.
+        user envelope is sent, so the apiKeySource assertion (and the
+        first session_id capture) happen during the first
+        _send_and_collect() call instead.
         """
         if self._proc is not None and self._proc.poll() is None:
             return False
@@ -240,7 +241,9 @@ class ClaudeCLIProvider(LLMProvider):
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--verbose",
-            "--no-session-persistence",
+            # Session persistence is required for `--resume` (claude's own
+            # help text: "sessions will not be saved to disk and cannot be
+            # resumed"). Sessions land under ~/.claude/projects/<...>/<id>.jsonl.
             # Always include partial messages. Non-streaming complete() simply
             # ignores `stream_event` events (the final `assistant` event still
             # arrives at end-of-turn). complete_streaming() consumes the
@@ -248,6 +251,12 @@ class ClaudeCLIProvider(LLMProvider):
             # on_paragraph as they arrive.
             "--include-partial-messages",
         ]
+        if self._session_id is not None:
+            # Re-spawn after a crash: rehydrate the prior session so the new
+            # subprocess inherits full message history (including tool use
+            # and tool results) rather than rebuilding from text-only
+            # turn pairs. The new init event will echo the same session_id.
+            cmd += ["--resume", self._session_id]
         if self._append_system_prompt:
             cmd += ["--append-system-prompt", self._append_system_prompt]
 
@@ -510,54 +519,26 @@ class ClaudeCLIProvider(LLMProvider):
                 pass
             self._mcp_only_tempdir = None
 
-    # --- restart / history rebuild ------------------------------------
-
-    def _build_synthesized_opener(self, current_user_text):
-        """Roll the recorded turn history into one big user envelope.
-
-        Probe 7 strategy 2: a single message "this is YOUR conversation
-        so far, here's the transcript, here's the new user message you
-        should answer." Bounded recovery latency regardless of how many
-        turns preceded the crash.
-
-        Framing matters. Earlier wording said "picking up a conversation
-        that was already in progress" — the model read that as a third
-        party's transcript and then hedged or denied its own prior tool
-        claims when asked to recap (e.g. "I claimed I wrote X but no
-        file was actually written"). The current framing tells the model
-        that the prior Assistant lines are its own past turns, so it
-        treats prior tool-action claims as its own completed actions.
-        Tool calls and results aren't replayed (they aren't recorded in
-        _turn_history); when the model needs ground truth about a prior
-        action it should verify by reading the relevant file/state
-        rather than contradicting its own prior claim.
-        """
-        transcript_lines = []
-        for u, a in self._turn_history:
-            transcript_lines.append(f"User: {u}")
-            transcript_lines.append(f"Assistant: {a}")
-        transcript = "\n".join(transcript_lines)
-        return (
-            "Continuation of your in-progress chat-meeting conversation. "
-            "The Assistant lines below are YOUR prior turns in this same "
-            "conversation — not a third-party transcript. Treat any tool "
-            "actions (file writes, edits, commands) you previously claimed "
-            "as actions you performed and that are already complete. If "
-            "you need to verify a prior action's effect, read the relevant "
-            "file or state — do not deny or contradict your own prior "
-            "claims without doing so first.\n\n"
-            f"{transcript}\n\n"
-            f"New user message: {current_user_text}"
-        )
+    # --- restart / resume ---------------------------------------------
 
     def _restart_after_death(self):
         """Tear down the dead subprocess and spawn a fresh one in its place.
+
+        If a session_id was captured from the dead subprocess's init event,
+        the fresh spawn uses `--resume <session_id>` so claude rehydrates
+        the prior message history (incl. tool use + tool results) from its
+        local session store. If no session_id was ever captured (subprocess
+        died before its first init event), spawn fresh — caller's retry
+        will replay the new user_text as a turn-1 against a clean session.
 
         Permission-bridge state is also rebuilt — pipes/settings.json are
         per-subprocess. Reset _init_validated so the new subprocess gets
         its own apiKeySource check.
         """
-        log.warning("ClaudeCLI: subprocess died mid-meeting, restarting")
+        log.warning(
+            "ClaudeCLI: subprocess died mid-meeting, restarting "
+            f"(session={self._session_id or 'none — fresh spawn'})"
+        )
         self._terminate_subprocess()
         self._teardown_permission_bridge()
         self._init_validated = False
@@ -577,9 +558,15 @@ class ClaudeCLIProvider(LLMProvider):
                 "proceed — an API key may have leaked into the environment."
             )
         self._init_validated = True
+        session_id = payload.get("session_id")
+        if session_id:
+            # Persist for `--resume` on subprocess restart. On a resumed
+            # spawn, claude echoes the same id back in the new init event,
+            # so re-assigning is idempotent.
+            self._session_id = session_id
         log.info(
             "ClaudeCLI subprocess ready: apiKeySource=none, "
-            f"session={payload.get('session_id', '?')}"
+            f"session={session_id or '?'}"
         )
 
     def _terminate_subprocess(self):
@@ -669,34 +656,27 @@ class ClaudeCLIProvider(LLMProvider):
         first_call = self._proc is None
         if first_call and system and not self._append_system_prompt:
             self._append_system_prompt = system
-        spawned_new = self._spawn()
+        self._spawn()
         if not first_call and system and system != self._append_system_prompt:
             log.warning(
                 "ClaudeCLI: system prompt changed after spawn — ignoring. "
                 "The subprocess's system prompt was fixed at first call."
             )
 
-        # If _spawn() created a fresh subprocess and we have prior turns,
-        # the new subprocess has zero context — feed the transcript via the
-        # synthesized opener (probe 7 strategy 2) before/inside the user
-        # message. With no history (first call ever), send raw.
-        if spawned_new and self._turn_history:
-            text_to_send = self._build_synthesized_opener(new_user_text)
-        else:
-            text_to_send = new_user_text
-
+        # The subprocess (whether fresh first-spawn or post-crash respawn
+        # via --resume) already holds the full prior message history in
+        # claude's own session store, so we send only the new user text.
         try:
-            response = self._send_and_collect(text_to_send)
+            response = self._send_and_collect(new_user_text)
         except ClaudeCLIProtocolError as exc:
-            # Subprocess died *during* the turn (write or read). Mid-turn
-            # death we can't catch via spawn-detection, so retry once with
-            # the synthesized opener.
+            # Subprocess died *during* the turn (write or read). Restart
+            # via _restart_after_death (which uses --resume when a
+            # session_id has been captured) and replay just the new user
+            # text against the rehydrated session.
             log.warning(f"ClaudeCLI: turn aborted ({exc}); attempting one restart")
             self._restart_after_death()
-            response = self._send_and_collect(self._build_synthesized_opener(new_user_text))
+            response = self._send_and_collect(new_user_text)
 
-        if response.text:
-            self._turn_history.append((new_user_text, response.text))
         return response
 
     def _send_and_collect(self, user_text):
@@ -795,36 +775,30 @@ class ClaudeCLIProvider(LLMProvider):
         first_call = self._proc is None
         if first_call and system and not self._append_system_prompt:
             self._append_system_prompt = system
-        spawned_new = self._spawn()
+        self._spawn()
         if not first_call and system and system != self._append_system_prompt:
             log.warning(
                 "ClaudeCLI: system prompt changed after spawn — ignoring. "
                 "The subprocess's system prompt was fixed at first call."
             )
 
-        if spawned_new and self._turn_history:
-            text_to_send = self._build_synthesized_opener(new_user_text)
-        else:
-            text_to_send = new_user_text
-
         try:
-            response = self._send_and_collect_streaming(text_to_send, on_paragraph)
+            response = self._send_and_collect_streaming(new_user_text, on_paragraph)
         except ClaudeCLIProtocolError as exc:
             # Mid-stream death. Note that any paragraphs already flushed
             # to on_paragraph will have been seen by the user; the retry
             # may emit overlapping content. Caller is responsible for
             # tolerating that (typically: meeting chat surfaces the new
             # reply as a fresh message and the user reads it as a redo).
+            # _restart_after_death uses --resume when a session_id has
+            # been captured so the rehydrated subprocess inherits prior
+            # context; we replay just the new user text.
             log.warning(
                 f"ClaudeCLI: streaming turn aborted ({exc}); attempting one restart"
             )
             self._restart_after_death()
-            response = self._send_and_collect_streaming(
-                self._build_synthesized_opener(new_user_text), on_paragraph,
-            )
+            response = self._send_and_collect_streaming(new_user_text, on_paragraph)
 
-        if response.text:
-            self._turn_history.append((new_user_text, response.text))
         return response
 
     def _send_and_collect_streaming(self, user_text, on_paragraph):

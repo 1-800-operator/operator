@@ -246,14 +246,15 @@ def test_build_provider_selects_claude_cli(monkeypatch_attrs):
         config.DISABLED_MCP_SERVERS = saved_disabled
 
 
-def test_subprocess_restart_with_history_rebuild():
-    """Killing the subprocess mid-meeting recovers via synthesized opener.
+def test_subprocess_restart_with_resume():
+    """Killing the subprocess mid-meeting recovers via `claude -p --resume`.
 
-    Mirrors probe 7 strategy 2 but exercises the production code path:
-    run 2 turns, terminate the subprocess externally, then send turn 3.
+    Run 2 turns, terminate the subprocess externally, then send turn 3.
     The provider should detect the broken pipe / EOF, spawn a fresh
-    subprocess, re-feed the prior transcript in one envelope, send turn
-    3, and produce the correct answer (11) — proving context survived.
+    subprocess with `--resume <session_id>`, send only the new user turn,
+    and produce the correct answer (11) — proving claude rehydrated the
+    prior message history from its on-disk session store. Also verifies
+    `_session_id` survives the restart unchanged (no fork-session).
     """
     provider = ClaudeCLIProvider()
     try:
@@ -278,13 +279,17 @@ def test_subprocess_restart_with_history_rebuild():
         # thinks the process is alive; the next complete() call will hit
         # a broken pipe or EOF and trigger restart.
         old_pid = provider._proc.pid
+        captured_session_id = provider._session_id
+        assert captured_session_id, (
+            "session_id should have been captured from init events by now"
+        )
         provider._proc.terminate()
         try:
             provider._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             provider._proc.kill()
             provider._proc.wait(timeout=5)
-        print(f"  killed subprocess pid={old_pid}")
+        print(f"  killed subprocess pid={old_pid} session={captured_session_id}")
 
         # Turn 3 — provider should auto-restart, replay history, answer correctly.
         history.append({
@@ -301,6 +306,11 @@ def test_subprocess_restart_with_history_rebuild():
         assert provider._proc is not None
         assert provider._proc.pid != old_pid, (
             f"expected a fresh subprocess after restart; pid did not change ({old_pid})"
+        )
+        # Same session_id should survive resume (default behavior, not --fork-session).
+        assert provider._session_id == captured_session_id, (
+            f"expected session_id {captured_session_id} to survive resume; "
+            f"got {provider._session_id}"
         )
         print(f"  restart OK (new pid={provider._proc.pid}, old={old_pid})")
     finally:
@@ -362,7 +372,91 @@ def test_streaming_paragraph_callback():
         provider.stop()
 
 
+def test_restart_spawn_includes_resume_flag():
+    """After capturing a session_id, the next _spawn() passes --resume <id>.
+
+    Mock-only: we patch subprocess.Popen so the test never actually launches
+    claude. The point is to pin the cmd-array shape so a future refactor
+    can't silently drop the --resume arg and regress crash-recovery
+    fidelity (Phase 14.17).
+    """
+    from _1_800_operator.pipeline.providers import claude_cli as cc_mod
+
+    captured_cmds = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured_cmds.append(list(cmd))
+            self._cmd = cmd
+            self.pid = 99999
+            # Pretend the process is alive so _spawn doesn't loop on
+            # detecting an immediate exit.
+            self._exited = False
+            # Provide just enough of the subprocess.Popen surface that
+            # ClaudeCLIProvider._spawn touches before the reader thread
+            # would have anything to do. _spawn writes to stdin and
+            # reads stdout in a separate thread; we stub minimally.
+            import io
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO()
+            self.stderr = io.StringIO()
+
+        def poll(self):
+            return None if not self._exited else 0
+
+        def terminate(self):
+            self._exited = True
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self._exited = True
+
+    real_popen = cc_mod.subprocess.Popen
+    cc_mod.subprocess.Popen = FakePopen
+    try:
+        provider = ClaudeCLIProvider()
+        # First spawn: no session_id captured yet, so cmd must NOT include --resume.
+        provider._spawn()
+        assert captured_cmds, "expected first _spawn() to invoke Popen"
+        first_cmd = captured_cmds[0]
+        assert "--resume" not in first_cmd, (
+            f"first spawn (no session_id) should not pass --resume: {first_cmd}"
+        )
+        # Simulate apiKeySource validation succeeding and an init event
+        # delivering a session_id.
+        provider._session_id = "abc-123-fake-session-id"
+
+        # Force a respawn (simulate crash recovery).
+        provider._proc._exited = True  # type: ignore[attr-defined]
+        provider._spawn()
+        assert len(captured_cmds) == 2, "expected respawn to invoke Popen a second time"
+        second_cmd = captured_cmds[1]
+        assert "--resume" in second_cmd, (
+            f"crash-recovery spawn should pass --resume: {second_cmd}"
+        )
+        idx = second_cmd.index("--resume")
+        assert second_cmd[idx + 1] == "abc-123-fake-session-id", (
+            f"expected --resume abc-123-fake-session-id, got {second_cmd[idx + 1]}"
+        )
+        # Sanity: --no-session-persistence must NOT appear (mutually
+        # exclusive with --resume per claude's own help text).
+        assert "--no-session-persistence" not in second_cmd, (
+            f"--no-session-persistence is mutually exclusive with --resume: {second_cmd}"
+        )
+        assert "--no-session-persistence" not in first_cmd, (
+            f"--no-session-persistence in steady-state spawn would block resume: {first_cmd}"
+        )
+        print("  restart spawn carries --resume <id> OK")
+    finally:
+        cc_mod.subprocess.Popen = real_popen
+
+
 def main():
+    print("test_restart_spawn_includes_resume_flag")
+    test_restart_spawn_includes_resume_flag()
     _skip_if_no_claude()
     print("test_three_turn_conversation")
     test_three_turn_conversation()
@@ -376,8 +470,8 @@ def main():
     test_permission_handler_allow()
     print("test_permission_handler_deny")
     test_permission_handler_deny()
-    print("test_subprocess_restart_with_history_rebuild")
-    test_subprocess_restart_with_history_rebuild()
+    print("test_subprocess_restart_with_resume")
+    test_subprocess_restart_with_resume()
     print("test_build_provider_selects_claude_cli")
     test_build_provider_selects_claude_cli({
         "LLM_PROVIDER": "claude_cli",

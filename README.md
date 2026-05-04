@@ -31,6 +31,53 @@ directory — treat it like any other local artifact. macOS typically clears
 Chat history also lands in `~/.operator/history/<slug>.jsonl` — that's the
 durable record the bot replays from between turns. Same sensitivity profile.
 
+### Resume your meeting in Claude Code
+
+For the `claude` agent specifically, the bot's brain is a `claude -p`
+subprocess running under your Claude Max subscription, which means meetings
+land in **claude's own session store** — the same place your regular Claude
+Code work is persisted:
+
+```
+~/.claude/projects/<encoded-working-dir>/<session-id>.jsonl
+```
+
+The folder name is whatever working directory you launched `operator dial
+claude` from (URL-encoded). Each meeting writes one session file with the
+full message history including tool calls and tool results. Operator uses
+this to recover gracefully if the brain subprocess dies mid-meeting (it
+respawns with `claude -p --resume <session-id>` and inherits everything).
+
+**Bonus workflow:** because these are normal Claude Code sessions, you can
+pick the meeting back up in your terminal afterwards. From the same
+directory you ran operator from:
+
+```bash
+claude --resume                 # picker — meeting sessions appear next to
+                                # your coding sessions
+claude --resume <session-id>    # jump straight in
+```
+
+Now you're chatting with the same brain that just left the meeting — full
+context, every tool call, every Linear ticket it filed. Great for follow-up
+work the bot started and you want to finish.
+
+**What this means for your filesystem:** meeting transcripts and your
+regular Claude Code coding sessions share `~/.claude/projects/<dir>/`.
+Everything stays local; nothing ships off your machine. But two things are
+worth knowing:
+
+1. The `claude --resume` picker (no args) lists everything in the current
+   directory, mixed together. Meeting sessions appear alongside coding
+   sessions — that's the feature, but also: don't accidentally pick the
+   wrong one.
+2. The folder grows over time. Same retention semantics as your regular
+   Claude Code work — manage it however you already manage that. To
+   inspect or prune by hand: `ls -lt ~/.claude/projects/<dir>/`.
+
+The other bundled agents (`pm`, `codex`, custom bots) don't use this path —
+they talk to the LLM via API and don't write to `~/.claude/projects/`.
+
 ### Never commit these
 
 API keys live in a single `.env` at `~/.operator/.env`, shared across all
