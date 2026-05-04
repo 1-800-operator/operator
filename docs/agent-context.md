@@ -1,7 +1,26 @@
 # Operator — Agent Context
 
-*Working memory for coding agents. Human-readable roadmap: `docs/roadmap.md`.*
+*Working memory for coding agents. Human-readable roadmap: `docs/roadmap.md`. Forward strategy: `docs/product-strategy.md`.*
 *Living document — update at the end of each session.*
+
+---
+
+## ⚠️ STRATEGIC PIVOT — Session 183 (May 3, 2026)
+
+**Operator pivoted from OSS CLI to a closed-source two-product trajectory.** Working agents touching this codebase need to know:
+
+- **v1 Operator** = cloud-hosted web switchboard (`1-800-operator.com`) + Claude Code plugin (`claude plugin install operator`) that bridges meeting events to the user's local Claude Code via WebSocket. Cloud headless Chrome joins Meet as an acknowledged participant; user's local Claude does the thinking. Self-hosted browser fleet on Fly.io. Mac-only, Meet-only, Claude-Code-only at launch (Codex parity = Phase 1.5). Free for N meeting-hours/mo, then $19/mo flat. BYO-LLM (we never see Anthropic bills).
+- **v2 Brainchild** = desktop build-your-own-bot product, gated on v1 validation (~50 paying users).
+
+**The OSS CLI is being archived at v1 launch.** Phase 14.13 / 14.5 / 16 trajectory in this doc and `docs/roadmap.md` is **superseded**. New phases are v1 A1–A9 — see `docs/product-strategy.md` for the phase plan.
+
+**What ports forward (don't rewrite):** `connectors/macos_adapter.py` (Playwright Meet automation), `pipeline/chat_runner.py` (chat loop, trigger detection, tool confirmation), `pipeline/mcp_client.py`, `pipeline/meeting_record.py`, `pipeline/guardrails.py`, `mcp_servers/transcript_server.py`. All carry into v1 cloud browser + plugin bridge.
+
+**What's going away:** the CLI entry (`__main__.py`), the setup wizard (`pipeline/setup.py`), the bundled agent presets (`agents/<name>/`), `operator dial` / `operator setup` / `operator edit` commands as user-facing surfaces. The four-layer wizard view of an agent (agent / llm / mcp / skills / system_prompt) is a Brainchild concern, not v1.
+
+**Sessions 184+ work in this codebase is repackaging, not rewriting.** New code lives in two surfaces: a `cloud/` (or new repo) for the switchboard + browser orchestrator, and a `plugin/` (or `@operator/bridge` npm package) for the Claude Code plugin. The pipeline modules above get extracted into a shared library both surfaces depend on.
+
+Everything below this marker is **historical OSS-phase context** preserved as record. Useful for understanding why current code looks the way it does. Not the active trajectory.
 
 ---
 
