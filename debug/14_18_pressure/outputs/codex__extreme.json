@@ -1,0 +1,73 @@
+{
+  "bot": "codex",
+  "elapsed_seconds": 65.3,
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout": "\n\u001b[36m[Codex]\u001b[0m Hold for Codex...\n\n\n\u001b[36m[Codex]\u001b[0m Hi, I\u2019m Codex. I can summarize what was said and turn decisions into clear next steps.\n\n\n\u001b[36m[Codex]\u001b[0m Hi Alice, the last person-name I see mentioned was Priya: \u201cPriya raised a concern about the approval policy.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m Main points from the last 5 minutes: rollout should be narrowed to 10%, the launch is still blocked on Codex parity, and the migration timeline is slipping. Repeated action items were to revoke the leaked token, check the byte ceiling behavior, confirm the marker-file crash path, pull up the GitHub issue, and coordinate with the mobile release branch.\n\n\n\u001b[36m[Codex]\u001b[0m Several people repeated the same point: \u201cSentry alerts are firing on the auth path.\u201d It was often paired with sharing the dashboard link, pulling up the GitHub issue, revoking the leaked token, and coordinating with mobile release.\n\n\n\u001b[36m[Codex]\u001b[0m Speakers so far: Alice, Bob, Carol, Dan, and Eve.\n\n\n\u001b[36m[Codex]\u001b[0m 8 to 10 minutes ago, the discussion was mostly about rollout risk and blockers: Sentry auth alerts, revoking a leaked token, narrowing rollout to 10%, and the launch being blocked on Codex parity. There was also a recurring technical thread about marker file vs env var startup ordering, byte-ceiling retry behavior, and testing gaps from skipping a live Meet run.\n\n\n\u001b[36m[Codex]\u001b[0m Yes. Multiple people said \u201cthe launch is blocked on the codex parity work,\u201d including Alice, Eve, Dan, Bob, and Carol.\n\n\n\u001b[36m[Codex]\u001b[0m The meeting focused on launch readiness and risk. Main themes: launch is blocked on Codex parity, rollout should likely narrow to 10%, the migration timeline is slipping, Sentry alerts are firing on the auth path, and a leaked token still needs revocation.\n\n\n\u001b[36m[Codex]\u001b[0m Technical threads: marker-file startup ordering was favored over env vars, byte-ceiling behavior needs checking to avoid repeated truncation retries, and live Meet testing is being skipped with known gaps around caption observation, meet.new resolution, and participant auto-leave. Other notes: prompt cache looked good, Sonnet coding benchmarks looked strong, wizard re-import is idempotent, QA found a flaky chat hardening test, and mobile release coordination is needed.\n\n\n\u001b[36m[Codex]\u001b[0m Carol said: \u201cPostgres for prod SQLite for tests is the standard split \u2014 Mohammed pinged about the database pick \u2014 let me share the dashboard link.\u201d\n\n",
+  "stderr_tail": "\n\u2584\u2584\u2584\u2584\u2584\u2584   Codex\n\u2588 \u2a2f\u2a2f \u2588   OpenAI Codex CLI in your meeting \u2014 sandboxed shell + chat-gated\n\u2588 \u2582\u2582 \u2588   approvals\n\u2580\u2580\u2580\u2580\u2580\u2580   codex \u00b7 codex_mcp (subscription)\n\n\nchat ready \u2014 type to message, /quit or Ctrl+D to exit\n\n\u2713 Joined as @@codex \u00b7 solo (1-on-1 mode)\n\u2713 Replied \u2014 18.4s\n\u2713 Replied \u2014 3.7s\n\u2713 Replied \u2014 3.2s\n\u2713 Replied \u2014 3.7s\n\u2713 Replied \u2014 11.3s\n\u2713 Replied \u2014 3.0s\n\u2713 Replied \u2014 7.1s\n\u2713 Replied \u2014 4.0s\n\u2713 Goodbye.\n",
+  "queries": [
+    "what name did I just say",
+    "summarize the last 5 minutes",
+    "what did anyone say about Sentry",
+    "who has spoken so far",
+    "what was the topic 8 to 10 minutes ago",
+    "did anyone mention launch",
+    "summarize the whole meeting",
+    "quote the part where someone talked about the database"
+  ],
+  "per_query": [
+    {
+      "query": "what name did I just say",
+      "timed_out": false,
+      "reply": "Hi, I\u2019m Codex. I can summarize what was said and turn decisions into clear next steps.\n--- next message ---\nHi Alice, the last person-name I see mentioned was Priya: \u201cPriya raised a concern about the approval policy.\u201d",
+      "elapsed_s": 21.9
+    },
+    {
+      "query": "summarize the last 5 minutes",
+      "timed_out": false,
+      "reply": "Main points from the last 5 minutes: rollout should be narrowed to 10%, the launch is still blocked on Codex parity, and the migration timeline is slipping. Repeated action items were to revoke the leaked token, check the byte ceiling behavior, confirm the marker-file crash path, pull up the GitHub issue, and coordinate with the mobile release branch.",
+      "elapsed_s": 4.6
+    },
+    {
+      "query": "what did anyone say about Sentry",
+      "timed_out": false,
+      "reply": "Several people repeated the same point: \u201cSentry alerts are firing on the auth path.\u201d It was often paired with sharing the dashboard link, pulling up the GitHub issue, revoking the leaked token, and coordinating with mobile release.",
+      "elapsed_s": 4.0
+    },
+    {
+      "query": "who has spoken so far",
+      "timed_out": false,
+      "reply": "Speakers so far: Alice, Bob, Carol, Dan, and Eve.",
+      "elapsed_s": 4.3
+    },
+    {
+      "query": "what was the topic 8 to 10 minutes ago",
+      "timed_out": false,
+      "reply": "8 to 10 minutes ago, the discussion was mostly about rollout risk and blockers: Sentry auth alerts, revoking a leaked token, narrowing rollout to 10%, and the launch being blocked on Codex parity. There was also a recurring technical thread about marker file vs env var startup ordering, byte-ceiling retry behavior, and testing gaps from skipping a live Meet run.",
+      "elapsed_s": 12.2
+    },
+    {
+      "query": "did anyone mention launch",
+      "timed_out": false,
+      "reply": "Yes. Multiple people said \u201cthe launch is blocked on the codex parity work,\u201d including Alice, Eve, Dan, Bob, and Carol.",
+      "elapsed_s": 3.7
+    },
+    {
+      "query": "summarize the whole meeting",
+      "timed_out": false,
+      "reply": "The meeting focused on launch readiness and risk. Main themes: launch is blocked on Codex parity, rollout should likely narrow to 10%, the migration timeline is slipping, Sentry alerts are firing on the auth path, and a leaked token still needs revocation.\n--- next message ---\nTechnical threads: marker-file startup ordering was favored over env vars, byte-ceiling behavior needs checking to avoid repeated truncation retries, and live Meet testing is being skipped with known gaps around caption observation, meet.new resolution, and participant auto-leave. Other notes: prompt cache looked good, Sonnet coding benchmarks looked strong, wizard re-import is idempotent, QA found a flaky chat hardening test, and mobile release coordination is needed.",
+      "elapsed_s": 8.0
+    },
+    {
+      "query": "quote the part where someone talked about the database",
+      "timed_out": false,
+      "reply": "Carol said: \u201cPostgres for prod SQLite for tests is the standard split \u2014 Mohammed pinged about the database pick \u2014 let me share the dashboard link.\u201d",
+      "elapsed_s": 5.0
+    }
+  ],
+  "claude_injection_target": null,
+  "load": "extreme",
+  "fixture_lines": 20001,
+  "fixture_bytes": 4151148,
+  "n_answered": 8
+}

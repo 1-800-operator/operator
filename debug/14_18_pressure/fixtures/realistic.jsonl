@@ -1,0 +1,31 @@
+{"kind": "session_start", "timestamp": 1777941379.513921}
+{"kind": "caption", "sender": "Alice", "text": "I want to bring up the launch timeline", "timestamp": 1777941385.413921}
+{"kind": "caption", "sender": "Carol", "text": "the captions stopped appearing for a stretch", "timestamp": 1777941422.7418551}
+{"kind": "caption", "sender": "Carol", "text": "we still need to revoke that leaked token", "timestamp": 1777941438.2888992}
+{"kind": "caption", "sender": "Bob", "text": "did anyone hear from Mohammed today", "timestamp": 1777941472.4472022}
+{"kind": "caption", "sender": "Bob", "text": "the wizard re-import flow is finally idempotent \u2014 I think we should narrow the rollout to ten percent first", "timestamp": 1777941511.2169976}
+{"kind": "caption", "sender": "Alice", "text": "let me share the dashboard link \u2014 Sentry alerts are firing on the auth path \u2014 Sentry alerts are firing on the auth path", "timestamp": 1777941534.928059}
+{"kind": "caption", "sender": "Carol", "text": "the Sentry alerts are firing again", "timestamp": 1777941558.728911}
+{"kind": "caption", "sender": "Bob", "text": "Postgres for prod SQLite for tests is the standard split", "timestamp": 1777941601.832038}
+{"kind": "caption", "sender": "Bob", "text": "I'm seeing weird latency on the MCP startup path \u2014 double-check the byte ceiling on the tool result", "timestamp": 1777941627.5507882}
+{"kind": "caption", "sender": "Alice", "text": "Postgres for prod SQLite for tests is the standard split", "timestamp": 1777941648.1650417}
+{"kind": "caption", "sender": "Alice", "text": "the captions stopped appearing for a stretch", "timestamp": 1777941680.7221057}
+{"kind": "caption", "sender": "Bob", "text": "we still need to revoke that leaked token \u2014 I think we should narrow the rollout to ten percent first", "timestamp": 1777941709.5673962}
+{"kind": "caption", "sender": "Alice", "text": "Mohammed pinged me about the database pick", "timestamp": 1777941743.2150888}
+{"kind": "caption", "sender": "Carol", "text": "Priya raised a concern about the approval policy \u2014 the new Sonnet benchmarks looked strong on coding tasks \u2014 the prompt cache hit rate looked great in the last run", "timestamp": 1777941772.1642432}
+{"kind": "caption", "sender": "Alice", "text": "the thing about the marker file approach versus the env var is that they have different startup ordering implications \u2014 codex spawns the transcript MCP at codex startup which is before the meeting URL exists in some flows so we can't bake the path into the spawn args which is exactly the problem the marker file solves", "timestamp": 1777941808.7053077}
+{"kind": "caption", "sender": "Bob", "text": "the captions stopped appearing for a stretch \u2014 the prompt cache hit rate looked great in the last run \u2014 let's pull up the GitHub issue for that bug", "timestamp": 1777941831.5793118}
+{"kind": "caption", "sender": "Alice", "text": "the migration timeline keeps slipping", "timestamp": 1777941855.8961349}
+{"kind": "caption", "sender": "Alice", "text": "Priya raised a concern about the approval policy \u2014 double-check the byte ceiling on the tool result", "timestamp": 1777941888.2130792}
+{"kind": "caption", "sender": "Dan", "text": "the launch is the priority this week", "timestamp": 1777941928.4187098}
+{"kind": "caption", "sender": "Alice", "text": "let me share the dashboard link \u2014 we still need to revoke that leaked token", "timestamp": 1777941949.2103174}
+{"kind": "caption", "sender": "Bob", "text": "let's confirm the marker file mechanism survives a crash", "timestamp": 1777941983.613738}
+{"kind": "caption", "sender": "Bob", "text": "the wizard re-import flow is finally idempotent \u2014 we should write a fixture for that edge case \u2014 Priya raised a concern about the approval policy", "timestamp": 1777942008.8262777}
+{"kind": "caption", "sender": "Bob", "text": "I'm seeing weird latency on the MCP startup path \u2014 the wizard re-import flow is finally idempotent \u2014 the captions stopped appearing for a stretch", "timestamp": 1777942043.0512626}
+{"kind": "caption", "sender": "Alice", "text": "I'm seeing weird latency on the MCP startup path \u2014 Priya raised a concern about the approval policy \u2014 double-check the byte ceiling on the tool result", "timestamp": 1777942079.91412}
+{"kind": "caption", "sender": "Bob", "text": "the captions stopped appearing for a stretch", "timestamp": 1777942102.972479}
+{"kind": "caption", "sender": "Eve", "text": "let me check Sentry one more time", "timestamp": 1777942142.3102028}
+{"kind": "caption", "sender": "Alice", "text": "Priya raised a concern about the approval policy \u2014 I think we should narrow the rollout to ten percent first", "timestamp": 1777942167.9746642}
+{"kind": "caption", "sender": "Alice", "text": "Postgres for prod SQLite for tests is the standard split", "timestamp": 1777942198.8907173}
+{"kind": "caption", "sender": "Bob", "text": "the captions stopped appearing for a stretch \u2014 let's confirm the marker file mechanism survives a crash", "timestamp": 1777942222.9679291}
+{"kind": "caption", "sender": "Carol", "text": "the wizard re-import flow is finally idempotent", "timestamp": 1777942258.037353}

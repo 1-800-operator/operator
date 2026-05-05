@@ -1,0 +1,73 @@
+{
+  "bot": "claude",
+  "elapsed_seconds": 107.1,
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout": "\n\u001b[36m[Claude]\u001b[0m Hold for Claude...\n\n\n\u001b[36m[Claude]\u001b[0m Hi! I'm Claude, an AI assistant in this meeting. I can look things up and answer questions in real time, or help track action items and next steps as we go.\n\n\n\u001b[36m[Claude]\u001b[0m Let me check the live captions for that.\n\n\n\u001b[36m[Claude]\u001b[0m Let me pull more captions to find where you said your name.\n\n\n\u001b[36m[Claude]\u001b[0m The captions show several speakers \u2014 Alice, Bob, Carol, Dan, Eve \u2014 but I didn't catch anyone explicitly stating their name. Could you tell me which one is you, or say your name again?\n\n\n\u001b[36m[Claude]\u001b[0m Three threads in the last 5 minutes: Alice flagged slow startup and wants to double-check a size limit on tool output. Alice and Priya have a concern about the approval policy, with a lean toward a 10% rollout first. Bob wants to confirm the marker file holds up through a crash.\n\n\n\u001b[36m[Claude]\u001b[0m Alice flagged Sentry alerts firing on the auth path around 17:37 and shared a dashboard link. Carol echoed it. Eve said she'd check Sentry again at 17:47 \u2014 no follow-up captured after that.\n\n\n\u001b[36m[Claude]\u001b[0m Five speakers: Alice and Bob have been the most active, Carol has chipped in a few times, and Dan and Eve each said one thing.\n\n\n\u001b[36m[Claude]\u001b[0m Two overlapping threads: Alice explained why the marker file approach beats an env var for a startup-ordering problem in codex. Separately, good news on prompt cache hit rates, but Bob wanted to pull up a GitHub issue for a related bug, and Alice noted the migration timeline is slipping.\n\n\n\u001b[36m[Claude]\u001b[0m Yes \u2014 Alice raised the launch timeline early on, and Dan said the launch is the priority this week. No follow-up captured on either.\n\n\n\u001b[36m[Claude]\u001b[0m Based on everything captured so far:\n\n\n\u001b[36m[Claude]\u001b[0m **Infra / reliability:** The marker file approach won out over env vars for a startup-ordering problem in codex. Bob wants to confirm it survives a crash. There's unexplained latency on the MCP startup path, and captions dropped for a stretch mid-meeting.\n\n\n\u001b[36m[Claude]\u001b[0m **Rollout / policy:** Priya has concerns about the approval policy. The lean is toward a 10% rollout first. The migration timeline is slipping.\n\n\n\u001b[36m[Claude]\u001b[0m **Incidents:** Sentry alerts have been firing on the auth path \u2014 Alice shared a dashboard link, Eve said she'd check it again, no resolution captured. A leaked token still needs to be revoked.\n\n\n\u001b[36m[Claude]\u001b[0m **Good news:** Prompt cache hit rates looked strong. The wizard re-import flow is now idempotent. New Sonnet benchmarks looked good on coding tasks.\n\n\n\u001b[36m[Claude]\u001b[0m **Priority:** Dan said the launch is the top priority this week. Alice flagged it at the start too, but there was no detailed discussion captured on timeline.\n\n\n\u001b[36m[Claude]\u001b[0m Three hits. Bob said it first, Alice echoed it twice:\n\n\n\u001b[36m[Claude]\u001b[0m > \"Postgres for prod SQLite for tests is the standard split.\" \u2014 Bob, 17:38\n> \"Mohammed pinged me about the database pick.\" \u2014 Alice, 17:40\n\n",
+  "stderr_tail": "\n\u2584\u2584\u2584\u2584\u2584\u2584   Claude\n\u2588 \u25c8\u25c8 \u2588   Claude Code, in your meeting \u2014 your full setup, gated by chat\n\u2588 \u223f\u223f \u2588   confirmation\n\u2580\u2580\u2580\u2580\u2580\u2580   github \u00b7 sentry \u00b7 claude-ai-google-calendar \u00b7 claude-ai-gmail \u00b7\n         claude-ai-google-drive \u00b7 claude-ai-linear \u00b7 2 skills \u00b7 claude_cli\n         (subscription)\n\n\nchat ready \u2014 type to message, /quit or Ctrl+D to exit\n\n\u2713 Joined as @@claude \u00b7 solo (1-on-1 mode)\n\u2713 Replied \u2014 50.0s\n\u2713 Replied \u2014 4.9s\n\u2713 Replied \u2014 5.4s\n\u2713 Replied \u2014 5.0s\n\u2713 Replied \u2014 4.2s\n\u2713 Replied \u2014 3.3s\n\u2713 Replied \u2014 10.6s\n\u2713 Replied \u2014 6.2s\n\u2713 Goodbye.\n",
+  "queries": [
+    "what name did I just say",
+    "summarize the last 5 minutes",
+    "what did anyone say about Sentry",
+    "who has spoken so far",
+    "what was the topic 8 to 10 minutes ago",
+    "did anyone mention launch",
+    "summarize the whole meeting",
+    "quote the part where someone talked about the database"
+  ],
+  "per_query": [
+    {
+      "query": "what name did I just say",
+      "timed_out": false,
+      "reply": "Hi! I'm Claude, an AI assistant in this meeting. I can look things up and answer questions in real time, or help track action items and next steps as we go.\n--- next message ---\nLet me check the live captions for that.\n--- next message ---\nLet me pull more captions to find where you said your name.\n--- next message ---\nThe captions show several speakers \u2014 Alice, Bob, Carol, Dan, Eve \u2014 but I didn't catch anyone explicitly stating their name. Could you tell me which one is you, or say your name again?",
+      "elapsed_s": 56.5
+    },
+    {
+      "query": "summarize the last 5 minutes",
+      "timed_out": false,
+      "reply": "Three threads in the last 5 minutes: Alice flagged slow startup and wants to double-check a size limit on tool output. Alice and Priya have a concern about the approval policy, with a lean toward a 10% rollout first. Bob wants to confirm the marker file holds up through a crash.",
+      "elapsed_s": 5.9
+    },
+    {
+      "query": "what did anyone say about Sentry",
+      "timed_out": false,
+      "reply": "Alice flagged Sentry alerts firing on the auth path around 17:37 and shared a dashboard link. Carol echoed it. Eve said she'd check Sentry again at 17:47 \u2014 no follow-up captured after that.",
+      "elapsed_s": 6.2
+    },
+    {
+      "query": "who has spoken so far",
+      "timed_out": false,
+      "reply": "Five speakers: Alice and Bob have been the most active, Carol has chipped in a few times, and Dan and Eve each said one thing.",
+      "elapsed_s": 5.5
+    },
+    {
+      "query": "what was the topic 8 to 10 minutes ago",
+      "timed_out": false,
+      "reply": "Two overlapping threads: Alice explained why the marker file approach beats an env var for a startup-ordering problem in codex. Separately, good news on prompt cache hit rates, but Bob wanted to pull up a GitHub issue for a related bug, and Alice noted the migration timeline is slipping.",
+      "elapsed_s": 5.3
+    },
+    {
+      "query": "did anyone mention launch",
+      "timed_out": false,
+      "reply": "Yes \u2014 Alice raised the launch timeline early on, and Dan said the launch is the priority this week. No follow-up captured on either.",
+      "elapsed_s": 4.4
+    },
+    {
+      "query": "summarize the whole meeting",
+      "timed_out": false,
+      "reply": "Based on everything captured so far:\n--- next message ---\n**Infra / reliability:** The marker file approach won out over env vars for a startup-ordering problem in codex. Bob wants to confirm it survives a crash. There's unexplained latency on the MCP startup path, and captions dropped for a stretch mid-meeting.\n--- next message ---\n**Rollout / policy:** Priya has concerns about the approval policy. The lean is toward a 10% rollout first. The migration timeline is slipping.\n--- next message ---\n**Incidents:** Sentry alerts have been firing on the auth path \u2014 Alice shared a dashboard link, Eve said she'd check it again, no resolution captured. A leaked token still needs to be revoked.\n--- next message ---\n**Good news:** Prompt cache hit rates looked strong. The wizard re-import flow is now idempotent. New Sonnet benchmarks looked good on coding tasks.\n--- next message ---\n**Priority:** Dan said the launch is the top priority this week. Alice flagged it at the start too, but there was no detailed discussion captured on timeline.",
+      "elapsed_s": 11.6
+    },
+    {
+      "query": "quote the part where someone talked about the database",
+      "timed_out": false,
+      "reply": "Three hits. Bob said it first, Alice echoed it twice:\n--- next message ---\n> \"Postgres for prod SQLite for tests is the standard split.\" \u2014 Bob, 17:38\n> \"Mohammed pinged me about the database pick.\" \u2014 Alice, 17:40",
+      "elapsed_s": 7.1
+    }
+  ],
+  "claude_injection_target": "/Users/jojo/.operator/history/terminal-1777942176.jsonl",
+  "load": "realistic",
+  "fixture_lines": 31,
+  "fixture_bytes": 5222,
+  "n_answered": 8
+}

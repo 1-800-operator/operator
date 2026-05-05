@@ -60,6 +60,12 @@ permissions:
     # ToolSearch?" prompt every time the model first reaches for a tool from
     # any deferred MCP server (Sentry, Linear, etc).
     - ToolSearch
+    # Bundled transcript MCP server — pure read of the meeting JSONL on the
+    # local filesystem. No side effects. Without auto-approving these the
+    # bot would prompt the user before every "what did we just say" query.
+    - mcp__transcript__search_captions
+    - mcp__transcript__list_captions
+    - mcp__transcript__list_speakers
   always_ask:
     - Bash
     - Write

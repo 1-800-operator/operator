@@ -186,19 +186,24 @@ class ClaudeCLIProvider(LLMProvider):
         is fine because mid-meeting record changes don't happen.
 
         Also appends a runtime backstop to `_append_system_prompt` so the
-        recall_transcript hint survives even if a user nukes the agent's
-        system_prompt. The MCP tool's own description is the primary
+        transcript tool hints survive even if a user nukes the agent's
+        system_prompt. The MCP tools' own descriptions are the primary
         signal; this is defense in depth.
         """
         self._meeting_record_path = str(path) if path else None
         if self._meeting_record_path:
             backstop = (
-                "\n\nA tool named `recall_transcript` is available this meeting. "
-                "Call it when a chat message asks about something said aloud — "
-                "spoken audio is not in your prompt context."
+                "\n\nThree transcript tools are available this meeting: "
+                "`search_captions(query, speaker?, start_minutes_ago?, "
+                "end_minutes_ago?, context_lines?)` for keyword lookups, "
+                "`list_captions(start_minutes_ago?, end_minutes_ago?, "
+                "last_n?, speaker?)` for chronological browse, and "
+                "`list_speakers()` to see who's spoken. Call them when a "
+                "chat message asks about something said aloud — spoken "
+                "audio is not in your prompt context."
             )
             existing = self._append_system_prompt or ""
-            if "recall_transcript" not in existing:
+            if "search_captions" not in existing:
                 self._append_system_prompt = existing + backstop
 
     # --- lifecycle -----------------------------------------------------
@@ -334,7 +339,7 @@ class ClaudeCLIProvider(LLMProvider):
             "mcpServers": {
                 "transcript": {
                     "command": sys.executable,
-                    "args": ["-m", "operator.mcp_servers.transcript_server"],
+                    "args": ["-m", "_1_800_operator.mcp_servers.transcript_server"],
                     "env": {
                         "OPERATOR_MEETING_RECORD_PATH": self._meeting_record_path,
                     },

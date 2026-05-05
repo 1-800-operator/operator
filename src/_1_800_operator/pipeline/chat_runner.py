@@ -495,6 +495,10 @@ class ChatRunner:
                     buffered = self._pre_intro_buffer
                     self._pre_intro_buffer = []
                     for buf in buffered:
+                        if self._record is not None:
+                            self._record.append(
+                                sender=buf["sender"], text=buf["text"], kind=buf["kind"],
+                            )
                         self._dispatch_user_message(buf["text"], buf["one_on_one"])
 
             try:
@@ -588,19 +592,27 @@ class ChatRunner:
                 # Tag it `confirmation` so it's audited but filtered out of the
                 # LLM prompt (pipeline/llm.py only replays kind in {chat, caption}).
                 msg_kind = "confirmation" if self._pending_tool_call else "chat"
+
+                # Pre-intro user messages: buffer in memory and persist at
+                # drain time, AFTER the intro has been written to the record.
+                # If we persisted now, the JSONL would order user→assistant→…
+                # which leaves _tail_messages ending in role='assistant' on
+                # Q1 — claude_cli rejects that. Holding the record.append
+                # until drain forces the on-disk order to match the
+                # processing order: assistant(intro) before user(Q1).
+                if not self._intro_posted and not self._pending_tool_call:
+                    self._pre_intro_buffer.append({
+                        "text": text, "one_on_one": one_on_one,
+                        "sender": sender, "kind": msg_kind,
+                    })
+                    continue
+
                 if self._record is not None:
                     self._record.append(sender=sender, text=text, kind=msg_kind)
 
                 # If we're waiting for tool confirmation, any message is a response
                 if self._pending_tool_call:
                     self._handle_confirmation(text)
-                    continue
-
-                # Defer LLM-side processing until the self-intro has posted —
-                # buffered messages drain in order at the top of the iteration
-                # that observes the intro completing.
-                if not self._intro_posted:
-                    self._pre_intro_buffer.append({"text": text, "one_on_one": one_on_one})
                     continue
 
                 self._dispatch_user_message(text, one_on_one)

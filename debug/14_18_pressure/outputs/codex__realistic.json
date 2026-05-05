@@ -1,0 +1,73 @@
+{
+  "bot": "codex",
+  "elapsed_seconds": 69.3,
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout": "\n\u001b[36m[Codex]\u001b[0m Hold for Codex...\n\n\n\u001b[36m[Codex]\u001b[0m Hi, I\u2019m Codex. I can summarize what was discussed and turn decisions into concrete next steps, or quickly inspect project files and report the relevant answer.\n\n\n\u001b[36m[Codex]\u001b[0m Priya, the last person\u2019s name I see spoken in the captions was \u201cPriya.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m Last 5 minutes: the group focused on rollout risk and reliability checks. Main points were confirming the marker-file mechanism survives a crash, writing a fixture for the wizard re-import edge case, checking MCP startup latency and byte limits, watching Sentry again, and narrowing rollout to 10%.\n\n\n\u001b[36m[Codex]\u001b[0m Alice said, \u201clet me share the dashboard link \u2014 Sentry alerts are firing on the auth path \u2014 Sentry alerts are firing on the auth path.\u201d Carol said, \u201cthe Sentry alerts are firing again,\u201d and Eve said, \u201clet me check Sentry one more time.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m So far, the captioned speakers are Alice, Bob, Carol, Dan, and Eve. Mohammed and Priya were mentioned, but I don\u2019t see them speaking in the captions.\n\n\n\u001b[36m[Codex]\u001b[0m About 8\u201310 minutes ago, the discussion was around test/database setup, caption issues, rollout risk, a leaked token, Mohammed\u2019s database input, and Priya\u2019s approval-policy concern. The clearest thread was reliability and launch readiness: database choice, token cleanup, and whether to narrow rollout to 10%.\n\n\n\u001b[36m[Codex]\u001b[0m Yes. Alice said, \u201cI want to bring up the launch timeline,\u201d and Dan said, \u201cthe launch is the priority this week.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m The meeting centered on launch readiness and reliability. Key issues were Sentry alerts on the auth path, revoking a leaked token, rollout risk with a suggested 10% rollout, the wizard re-import flow now being idempotent, and checking marker-file crash handling.\n\n\n\u001b[36m[Codex]\u001b[0m Other threads included the database split of Postgres for production and SQLite for tests, slipped migration timing, caption gaps, MCP startup latency, byte-limit checks, and Priya\u2019s concern about the approval policy.\n\n\n\u001b[36m[Codex]\u001b[0m Bob said, \u201cPostgres for prod SQLite for tests is the standard split.\u201d Alice repeated the same line later, and also said, \u201cMohammed pinged me about the database pick.\u201d\n\n",
+  "stderr_tail": "\n\u2584\u2584\u2584\u2584\u2584\u2584   Codex\n\u2588 \u2a2f\u2a2f \u2588   OpenAI Codex CLI in your meeting \u2014 sandboxed shell + chat-gated\n\u2588 \u2582\u2582 \u2588   approvals\n\u2580\u2580\u2580\u2580\u2580\u2580   codex \u00b7 codex_mcp (subscription)\n\n\nchat ready \u2014 type to message, /quit or Ctrl+D to exit\n\n\u2713 Joined as @@codex \u00b7 solo (1-on-1 mode)\n\u2713 Replied \u2014 13.1s\n\u2713 Replied \u2014 15.1s\n\u2713 Replied \u2014 7.7s\n\u2713 Replied \u2014 5.8s\n\u2713 Replied \u2014 3.6s\n\u2713 Replied \u2014 3.3s\n\u2713 Replied \u2014 2.8s\n\u2713 Replied \u2014 3.3s\n\u2713 Goodbye.\n",
+  "queries": [
+    "what name did I just say",
+    "summarize the last 5 minutes",
+    "what did anyone say about Sentry",
+    "who has spoken so far",
+    "what was the topic 8 to 10 minutes ago",
+    "did anyone mention launch",
+    "summarize the whole meeting",
+    "quote the part where someone talked about the database"
+  ],
+  "per_query": [
+    {
+      "query": "what name did I just say",
+      "timed_out": false,
+      "reply": "Hi, I\u2019m Codex. I can summarize what was discussed and turn decisions into concrete next steps, or quickly inspect project files and report the relevant answer.\n--- next message ---\nPriya, the last person\u2019s name I see spoken in the captions was \u201cPriya.\u201d",
+      "elapsed_s": 20.1
+    },
+    {
+      "query": "summarize the last 5 minutes",
+      "timed_out": false,
+      "reply": "Last 5 minutes: the group focused on rollout risk and reliability checks. Main points were confirming the marker-file mechanism survives a crash, writing a fixture for the wizard re-import edge case, checking MCP startup latency and byte limits, watching Sentry again, and narrowing rollout to 10%.",
+      "elapsed_s": 16.2
+    },
+    {
+      "query": "what did anyone say about Sentry",
+      "timed_out": false,
+      "reply": "Alice said, \u201clet me share the dashboard link \u2014 Sentry alerts are firing on the auth path \u2014 Sentry alerts are firing on the auth path.\u201d Carol said, \u201cthe Sentry alerts are firing again,\u201d and Eve said, \u201clet me check Sentry one more time.\u201d",
+      "elapsed_s": 8.6
+    },
+    {
+      "query": "who has spoken so far",
+      "timed_out": false,
+      "reply": "So far, the captioned speakers are Alice, Bob, Carol, Dan, and Eve. Mohammed and Priya were mentioned, but I don\u2019t see them speaking in the captions.",
+      "elapsed_s": 6.5
+    },
+    {
+      "query": "what was the topic 8 to 10 minutes ago",
+      "timed_out": false,
+      "reply": "About 8\u201310 minutes ago, the discussion was around test/database setup, caption issues, rollout risk, a leaked token, Mohammed\u2019s database input, and Priya\u2019s approval-policy concern. The clearest thread was reliability and launch readiness: database choice, token cleanup, and whether to narrow rollout to 10%.",
+      "elapsed_s": 4.6
+    },
+    {
+      "query": "did anyone mention launch",
+      "timed_out": false,
+      "reply": "Yes. Alice said, \u201cI want to bring up the launch timeline,\u201d and Dan said, \u201cthe launch is the priority this week.\u201d",
+      "elapsed_s": 4.3
+    },
+    {
+      "query": "summarize the whole meeting",
+      "timed_out": false,
+      "reply": "The meeting centered on launch readiness and reliability. Key issues were Sentry alerts on the auth path, revoking a leaked token, rollout risk with a suggested 10% rollout, the wizard re-import flow now being idempotent, and checking marker-file crash handling.\n--- next message ---\nOther threads included the database split of Postgres for production and SQLite for tests, slipped migration timing, caption gaps, MCP startup latency, byte-limit checks, and Priya\u2019s concern about the approval policy.",
+      "elapsed_s": 3.7
+    },
+    {
+      "query": "quote the part where someone talked about the database",
+      "timed_out": false,
+      "reply": "Bob said, \u201cPostgres for prod SQLite for tests is the standard split.\u201d Alice repeated the same line later, and also said, \u201cMohammed pinged me about the database pick.\u201d",
+      "elapsed_s": 3.7
+    }
+  ],
+  "claude_injection_target": null,
+  "load": "realistic",
+  "fixture_lines": 31,
+  "fixture_bytes": 5222,
+  "n_answered": 8
+}

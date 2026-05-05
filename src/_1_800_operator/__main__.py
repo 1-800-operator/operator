@@ -1008,6 +1008,16 @@ def _run_macos(meeting_url=None, force=False):
         slug = slug_from_url(url)
         record = MeetingRecord(slug=slug, meta={"meet_url": url})
         llm.set_record(record)
+        # Write the active meeting path to a marker file so MCP servers
+        # registered via fully-static config (e.g. codex) can locate the
+        # current meeting without per-spawn env-var interpolation. Cleanup
+        # happens in _shutdown.
+        try:
+            marker = Path.home() / ".operator" / ".current_meeting"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(record.path), encoding="utf-8")
+        except OSError as e:
+            log.warning(f"could not write current-meeting marker: {e}")
         finalizer = TranscriptFinalizer(record, silence_seconds=config.CAPTION_SILENCE_SECONDS)
         connector.set_caption_callback(finalizer.on_caption_update)
         log.info("captions enabled — transcript will be appended to meeting record")
@@ -1102,6 +1112,12 @@ def _run_macos(meeting_url=None, force=False):
         runner.stop()
         if transcript_finalizer:
             transcript_finalizer.stop()
+        try:
+            marker = Path.home() / ".operator" / ".current_meeting"
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
         if mcp:
             mcp.shutdown()
         connector.leave()

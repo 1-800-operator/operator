@@ -1,0 +1,73 @@
+{
+  "bot": "codex",
+  "elapsed_seconds": 64.5,
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout": "\n\u001b[36m[Codex]\u001b[0m Hold for Codex...\n\n\n\u001b[36m[Codex]\u001b[0m Hi, I\u2019m Codex. I can pull context from the meeting and workspace, and I can turn decisions into concrete code changes or concise summaries.\n\n\n\u001b[36m[Codex]\u001b[0m Hi Alice, the last person name I see mentioned aloud was Priya. The line was: \u201cPriya raised a concern about the approval policy.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m Main thread: launch is still blocked on Codex parity, with repeated concerns about the byte ceiling causing retry loops, caption reliability, and startup ordering.\n\n\n\u001b[36m[Codex]\u001b[0m Decisions or likely actions: keep rollout to 10% first, verify the marker-file crash path, write a fixture for the edge case, revoke the leaked token, check Sentry auth alerts, and coordinate with the mobile release branch. Testing gap noted: skipping live Meet leaves caption observer, meet.new resolution, and auto-leave paths untested, but the team considered that risk bounded.\n\n\n\u001b[36m[Codex]\u001b[0m Several people repeatedly said \u201cSentry alerts are firing on the auth path.\u201d Carol also said \u201cthe Sentry alerts are firing again,\u201d and Eve said \u201clet me check Sentry one more time.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m Alice, Bob, Carol, Dan, and Eve have spoken so far.\n\n\n\u001b[36m[Codex]\u001b[0m 8\u201310 minutes ago, the main topic was launch risk around Codex parity: byte-ceiling retry behavior, testing gaps from skipping live Meet, and whether to narrow rollout to 10%.\n\n\n\u001b[36m[Codex]\u001b[0m Other repeated items were Sentry/auth alerts, revoking a leaked token, writing a fixture for an edge case, checking the marker-file crash path, and pulling up the GitHub issue/dashboard.\n\n\n\u001b[36m[Codex]\u001b[0m Yes. Alice said \u201cI want to bring up the launch timeline,\u201d Dan said \u201cthe launch is the priority this week,\u201d and many people repeated that \u201cthe launch is blocked on the codex parity work.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m The meeting centered on launch readiness. The recurring conclusion was that launch is blocked on Codex parity work, with the team leaning toward a 10% rollout first.\n\n\n\u001b[36m[Codex]\u001b[0m Main risks discussed: Sentry alerts on the auth path, a leaked token that still needs revocation, flaky chat-hardening tests, caption reliability gaps, and a byte-ceiling issue that could cause repeated retries instead of narrowing results.\n\n\n\u001b[36m[Codex]\u001b[0m Technical direction: keep Postgres for production and SQLite for tests, use the marker-file approach because startup ordering makes env vars awkward, and confirm that path survives a crash. Action items mentioned: pull up the GitHub issue/dashboard, write a fixture for the edge case, coordinate with the mobile release branch, check Sentry, and verify the marker-file crash behavior.\n\n\n\u001b[36m[Codex]\u001b[0m Carol: \u201cPostgres for prod SQLite for tests is the standard split.\u201d\n\n\n\u001b[36m[Codex]\u001b[0m Alice also said: \u201cMohammed pinged me about the database pick.\u201d\n\n",
+  "stderr_tail": "\n\u2584\u2584\u2584\u2584\u2584\u2584   Codex\n\u2588 \u2a2f\u2a2f \u2588   OpenAI Codex CLI in your meeting \u2014 sandboxed shell + chat-gated\n\u2588 \u2582\u2582 \u2588   approvals\n\u2580\u2580\u2580\u2580\u2580\u2580   codex \u00b7 codex_mcp (subscription)\n\n\nchat ready \u2014 type to message, /quit or Ctrl+D to exit\n\n\u2713 Joined as @@codex \u00b7 solo (1-on-1 mode)\n\u2713 Replied \u2014 16.0s\n\u2713 Replied \u2014 5.6s\n\u2713 Replied \u2014 5.6s\n\u2713 Replied \u2014 2.8s\n\u2713 Replied \u2014 9.7s\n\u2713 Replied \u2014 4.7s\n\u2713 Replied \u2014 5.2s\n\u2713 Replied \u2014 3.2s\n\u2713 Goodbye.\n",
+  "queries": [
+    "what name did I just say",
+    "summarize the last 5 minutes",
+    "what did anyone say about Sentry",
+    "who has spoken so far",
+    "what was the topic 8 to 10 minutes ago",
+    "did anyone mention launch",
+    "summarize the whole meeting",
+    "quote the part where someone talked about the database"
+  ],
+  "per_query": [
+    {
+      "query": "what name did I just say",
+      "timed_out": false,
+      "reply": "Hi, I\u2019m Codex. I can pull context from the meeting and workspace, and I can turn decisions into concrete code changes or concise summaries.\n--- next message ---\nHi Alice, the last person name I see mentioned aloud was Priya. The line was: \u201cPriya raised a concern about the approval policy.\u201d",
+      "elapsed_s": 20.2
+    },
+    {
+      "query": "summarize the last 5 minutes",
+      "timed_out": false,
+      "reply": "Main thread: launch is still blocked on Codex parity, with repeated concerns about the byte ceiling causing retry loops, caption reliability, and startup ordering.\n--- next message ---\nDecisions or likely actions: keep rollout to 10% first, verify the marker-file crash path, write a fixture for the edge case, revoke the leaked token, check Sentry auth alerts, and coordinate with the mobile release branch. Testing gap noted: skipping live Meet leaves caption observer, meet.new resolution, and auto-leave paths untested, but the team considered that risk bounded.",
+      "elapsed_s": 6.5
+    },
+    {
+      "query": "what did anyone say about Sentry",
+      "timed_out": false,
+      "reply": "Several people repeatedly said \u201cSentry alerts are firing on the auth path.\u201d Carol also said \u201cthe Sentry alerts are firing again,\u201d and Eve said \u201clet me check Sentry one more time.\u201d",
+      "elapsed_s": 6.8
+    },
+    {
+      "query": "who has spoken so far",
+      "timed_out": false,
+      "reply": "Alice, Bob, Carol, Dan, and Eve have spoken so far.",
+      "elapsed_s": 3.7
+    },
+    {
+      "query": "what was the topic 8 to 10 minutes ago",
+      "timed_out": false,
+      "reply": "8\u201310 minutes ago, the main topic was launch risk around Codex parity: byte-ceiling retry behavior, testing gaps from skipping live Meet, and whether to narrow rollout to 10%.\n--- next message ---\nOther repeated items were Sentry/auth alerts, revoking a leaked token, writing a fixture for an edge case, checking the marker-file crash path, and pulling up the GitHub issue/dashboard.",
+      "elapsed_s": 10.7
+    },
+    {
+      "query": "did anyone mention launch",
+      "timed_out": false,
+      "reply": "Yes. Alice said \u201cI want to bring up the launch timeline,\u201d Dan said \u201cthe launch is the priority this week,\u201d and many people repeated that \u201cthe launch is blocked on the codex parity work.\u201d",
+      "elapsed_s": 5.6
+    },
+    {
+      "query": "summarize the whole meeting",
+      "timed_out": false,
+      "reply": "The meeting centered on launch readiness. The recurring conclusion was that launch is blocked on Codex parity work, with the team leaning toward a 10% rollout first.\n--- next message ---\nMain risks discussed: Sentry alerts on the auth path, a leaked token that still needs revocation, flaky chat-hardening tests, caption reliability gaps, and a byte-ceiling issue that could cause repeated retries instead of narrowing results.\n--- next message ---\nTechnical direction: keep Postgres for production and SQLite for tests, use the marker-file approach because startup ordering makes env vars awkward, and confirm that path survives a crash. Action items mentioned: pull up the GitHub issue/dashboard, write a fixture for the edge case, coordinate with the mobile release branch, check Sentry, and verify the marker-file crash behavior.",
+      "elapsed_s": 5.9
+    },
+    {
+      "query": "quote the part where someone talked about the database",
+      "timed_out": false,
+      "reply": "Carol: \u201cPostgres for prod SQLite for tests is the standard split.\u201d\n--- next message ---\nAlice also said: \u201cMohammed pinged me about the database pick.\u201d",
+      "elapsed_s": 4.1
+    }
+  ],
+  "claude_injection_target": null,
+  "load": "heavy",
+  "fixture_lines": 1001,
+  "fixture_bytes": 212742,
+  "n_answered": 8
+}
