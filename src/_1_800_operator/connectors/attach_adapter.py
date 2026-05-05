@@ -38,6 +38,12 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 from .base import MeetingConnector
+from .session import JoinStatus
+# Reuse the strict Meet-room URL check from macos_adapter (matches the
+# `abc-defg-hij` room-code pattern, rejects /landing, /lookup, /new, etc).
+# Cross-adapter import of a private helper is a temporary smell — if a
+# third adapter ever needs this, promote _is_real_meet_room to session.py.
+from .macos_adapter import _is_real_meet_room
 
 
 log = logging.getLogger(__name__)
@@ -58,14 +64,6 @@ class SlipAttachError(RuntimeError):
     Caught by _run_slip and presented to the user as a clean stderr
     message with a fix hint, not a stack trace.
     """
-
-
-def _is_meet_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return False
-    return "meet.google.com" in (parsed.netloc or "")
 
 
 def _chrome_is_running() -> bool:
@@ -227,24 +225,37 @@ class AttachAdapter(MeetingConnector):
     # ------------------------------------------------------------------
 
     def join(self, meeting_url):
+        # Populate join_status — ChatRunner inspects connector.join_status
+        # to decide whether the join succeeded (matches macos_adapter
+        # contract). Both signal_success() and signal_failure() set
+        # the underlying threading.Event, so callers blocking on it
+        # never deadlock no matter which branch we take.
+        self.join_status = JoinStatus()
+        js = self.join_status
+
         if sys.platform != "darwin":
+            js.signal_failure("linux_unsupported")
             raise SlipAttachError(
                 "slip mode is currently macOS-only. Linux support is "
                 "tracked for a follow-up phase. Use `operator dial claude` "
                 "or `operator deploy claude <url>` on Linux."
             )
         if not meeting_url:
+            js.signal_failure("missing_url")
             raise SlipAttachError(
                 "slip mode requires a meeting URL. Run "
                 "`operator slip claude <https://meet.google.com/xxx-xxxx-xxx>`."
             )
-        if not _is_meet_url(meeting_url):
+        if not _is_real_meet_room(meeting_url):
+            js.signal_failure("not_meet_room_url")
             raise SlipAttachError(
-                f"slip mode requires a Google Meet URL; got {meeting_url!r}."
+                f"slip mode requires a Google Meet room URL like "
+                f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
         if _chrome_is_running():
             if not _confirm_chrome_quit_with_user():
+                js.signal_failure("user_declined_chrome_quit")
                 raise SlipAttachError(
                     "slip mode requires closing Chrome. Aborted at user request."
                 )
@@ -252,19 +263,25 @@ class AttachAdapter(MeetingConnector):
             if not _chrome_quit_graceful():
                 log.warning("AttachAdapter: graceful quit timed out — falling back to pkill")
                 if not _chrome_kill_force():
+                    js.signal_failure("chrome_quit_failed")
                     raise SlipAttachError(
                         "Could not close Chrome — it is still running after both "
                         "graceful quit and force kill. Quit Chrome manually and re-run."
                     )
 
         self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
-        _wait_for_cdp_ready()
+        try:
+            _wait_for_cdp_ready()
+        except SlipAttachError:
+            js.signal_failure("cdp_not_ready")
+            raise
 
         self._playwright = sync_playwright().start()
         try:
             self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
         except Exception as e:
             self._teardown_playwright()
+            js.signal_failure("cdp_attach_failed")
             raise SlipAttachError(
                 f"Failed to attach to Chrome via CDP at {CDP_URL}: {e}. "
                 "Chrome may have launched without the debugging port — try again."
@@ -273,12 +290,19 @@ class AttachAdapter(MeetingConnector):
         self._page = self._find_meet_page(meeting_url)
         if self._page is None:
             self._teardown_playwright()
+            js.signal_failure("meet_tab_not_found")
+            # save_debug intentionally not called here — at this point we
+            # have the user's other tabs but no Meet tab to screenshot;
+            # snapshotting an unrelated page is more confusing than useful.
+            # 14.19.3b will add save_debug to the in-Meet error paths
+            # (chat observer can't attach, lobby never admits, etc).
             raise SlipAttachError(
                 f"Could not find a Meet tab pointing at {meeting_url!r} in the "
                 "relaunched Chrome. The tab may have failed to load — open it "
-                "manually and re-run, or pass --force to retry."
+                "manually and re-run."
             )
         log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
+        js.signal_success()
 
     def send_chat(self, message):
         raise NotImplementedError(

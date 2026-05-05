@@ -31,6 +31,15 @@ REPLY_PREFIX_DEPLOY = ""
 # Base spawn argv for the claude CLI. `--yolo` on slip/dial/deploy appends
 # `--dangerously-skip-permissions`. Built lazily so sys.executable is the
 # venv's python at call time, not import time.
+#
+# DUPLICATION — for 14.19.7's implementer:
+# These flags are also hardcoded inside `pipeline/providers/claude_cli.py:_spawn`
+# (lines ~244-258). Both produce the same argv today, so nothing breaks; but
+# they are parallel sources of truth that *will* drift if a flag is added in
+# one place and not the other. The intended end state after 14.19.7 is that
+# the wizard-era `pipeline/providers/claude_cli.py` is deleted entirely and
+# only this function builds claude's argv. Until then, keep the two in sync
+# manually.
 def spawn_argv(yolo: bool = False) -> list[str]:
     argv = [
         "claude",
@@ -49,6 +58,12 @@ def spawn_argv(yolo: bool = False) -> list[str]:
 # (search_captions / list_captions / list_speakers) reads the meeting JSONL
 # at OPERATOR_MEETING_RECORD_PATH. Claude inherits MCPs from its own
 # settings hierarchy; this MCP block is appended via `--mcp-config`.
+#
+# DUPLICATION — for 14.19.7's implementer:
+# Same dict shape lives in `pipeline/providers/claude_cli.py:_maybe_write_mcp_config`
+# (~line 338-348). Same drift risk as spawn_argv above. Same intended end
+# state — wizard-era provider deletes; this function becomes the single
+# source of truth.
 def transcript_mcp_spec(meeting_record_path: str) -> dict:
     return {
         "mcpServers": {
