@@ -35,3 +35,28 @@ def require_chrome_or_exit() -> None:
     print("Google Chrome is required but not installed.", file=sys.stderr)
     print(f"Install it from {INSTALL_URL} and re-run.", file=sys.stderr)
     sys.exit(2)
+
+
+def require_signed_in_or_exit() -> None:
+    """Exit 2 with a clear hint if the persistent Chrome profile is missing.
+
+    The profile at `~/.operator/browser_profile/` is created and populated
+    during the wizard's Google sign-in step. Without it, the headless
+    Chromium at dial time has no Google session and `meet.new` redirects
+    to a sign-in page that the bot can't fill in — the dial then hangs
+    until Playwright's 30s navigation timeout. Catching this up front
+    saves the user 30 seconds and a misleading "did not redirect" error.
+    """
+    from _1_800_operator import config
+    profile = Path(config.BROWSER_PROFILE_DIR)
+    if profile.is_dir():
+        return
+    print(
+        "Google sign-in not done — `~/.operator/browser_profile/` is missing.",
+        file=sys.stderr,
+    )
+    print(
+        "Run `operator setup` and complete the sign-in step, then retry.",
+        file=sys.stderr,
+    )
+    sys.exit(2)

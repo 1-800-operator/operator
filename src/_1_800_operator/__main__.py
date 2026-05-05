@@ -954,8 +954,12 @@ def _run_bot(name, rest):
 
 def _run_macos(meeting_url=None, force=False):
     """Run on macOS — direct URL or meet.new auto-launch."""
-    from _1_800_operator.pipeline.chrome_preflight import require_chrome_or_exit
+    from _1_800_operator.pipeline.chrome_preflight import (
+        require_chrome_or_exit,
+        require_signed_in_or_exit,
+    )
     require_chrome_or_exit()
+    require_signed_in_or_exit()
 
     import logging
     import signal
