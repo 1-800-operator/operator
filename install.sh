@@ -12,7 +12,8 @@
 #   5. Downloads Playwright's Chromium runtime (~170 MB).
 #   6. Seeds ~/.operator/.env with commented API-key placeholders.
 #   7. On macOS, checks for Google Chrome and prints an install nudge if missing.
-#   8. Verifies `operator` is on PATH.
+#   8. Prints sendoff with the next-step command (auto-prefixed with
+#      `source ~/.local/bin/env` if uv's tool dir wasn't already on PATH).
 #
 # Idempotent — safe to re-run. Does not modify shell rc files.
 
@@ -27,6 +28,11 @@ bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
 warn() { printf '\033[33m  %s\033[0m\n' "$1"; }
 err()  { printf '\033[31m  %s\033[0m\n' "$1" >&2; }
+
+# Snapshot PATH before we mutate it in step 2 — used at the end to decide
+# whether the user's future shells will already find `operator` (in which
+# case we skip the `source ~/.local/bin/env` prefix in the sendoff).
+INITIAL_PATH="${PATH:-}"
 
 bold "Operator installer"
 echo
@@ -129,18 +135,23 @@ if [ "${OS}" = "macos" ]; then
   fi
 fi
 
-# -- 8. Verify on PATH -------------------------------------------------------
+# -- 8. Sendoff --------------------------------------------------------------
 
-if ! command -v operator >/dev/null 2>&1; then
-  warn "operator installed but not on PATH yet."
-  warn "Open a new shell, or add uv's tool dir to PATH:"
-  warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-  echo
-fi
+# Detect whether the user's shells already have ~/.local/bin on PATH (so
+# `operator` will be found in this terminal *and* future ones). If not, the
+# sendoff prefixes the next-step command with `source ~/.local/bin/env &&`
+# so the user can run operator without opening a new terminal.
+case ":${INITIAL_PATH}:" in
+  *":${HOME}/.local/bin:"*) OPERATOR_ON_PATH=1 ;;
+  *) OPERATOR_ON_PATH=0 ;;
+esac
 
-bold "Done."
+printf '\033[1;32m✓\033[0m \033[1moperator successfully installed!\033[0m\n'
 echo
-info "Next: run \`operator setup\` to configure your first agent."
-info "Or \`operator dial claude\` (or your bot name) to join a meeting."
-info "Or \`operator dial claude <meet-url>\` to join a specific meeting."
 info "Docs: https://github.com/1-800-operator/operator"
+echo
+if [ "${OPERATOR_ON_PATH}" = "1" ]; then
+  printf '  Next: run \033[1;95moperator setup\033[0m to get started\n'
+else
+  printf '  Next: run \033[1;95msource ~/.local/bin/env && operator setup\033[0m to get started\n'
+fi
