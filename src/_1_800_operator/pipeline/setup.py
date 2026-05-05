@@ -113,7 +113,14 @@ yaml.add_representer(str, _str_representer, Dumper=yaml.SafeDumper)
 
 
 class WizardCancel(Exception):
-    """User aborted the wizard."""
+    """Wizard exited before completion. Pass silent=True when the caller
+    has already printed its own context (e.g. a prereq-gate failure with
+    a clear next-step hint) so the top-level handler can skip its
+    generic "Cancelled." line.
+    """
+    def __init__(self, *args, silent: bool = False):
+        super().__init__(*args)
+        self.silent = silent
 
 
 # ── Wizard state — passed through every step ──────────────────────────────
@@ -315,34 +322,32 @@ def _step1_fighter_select() -> WizardState:
         ),
     ]
 
-    # Loop the picker (not the heading) so a gate failure re-prompts
-    # without reprinting "1. Choose your base agent" each time.
-    while True:
-        picked = select_one("", choices, console=console)
-        console.print()
-        if picked.value == "__custom__":
-            return _from_scratch()
-        # Both presets hard-depend on their CLI being installed + logged in
-        # — the whole agent identity is "inherit the user's <CLI> setup."
-        # Gate selection at the picker so the user fixes the prereq first
-        # rather than discovering it mid-wizard. The `reason` string from
-        # the readiness probe already includes the action to take (e.g.
-        # "run `claude auth login`"), so don't pad it with a redundant
-        # follow-up sentence.
-        if picked.value == "claude":
-            ok, reason = claude_code_installed_and_logged_in()
-            if not ok:
-                console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}, then rerun `operator setup`\n")
-                continue
-        elif picked.value == "codex":
-            from _1_800_operator.pipeline.codex_import import (
-                codex_installed_and_logged_in,
-            )
-            ok, reason = codex_installed_and_logged_in()
-            if not ok:
-                console.print(f"  [red]✗ codex preset requires Codex CLI:[/red] {reason}, then rerun `operator setup`\n")
-                continue
-        return _edit_preset(picked.value)
+    picked = select_one("", choices, console=console)
+    console.print()
+    if picked.value == "__custom__":
+        return _from_scratch()
+    # Both presets hard-depend on their CLI being installed + logged in
+    # — the whole agent identity is "inherit the user's <CLI> setup."
+    # Exit cleanly on gate failure (rather than re-prompting the picker)
+    # because the fix is out-of-band: the user has to install/sign-in to
+    # their CLI in another shell, then rerun `operator setup`. The
+    # warning already says exactly that, so a re-prompt would just look
+    # like the wizard glitched. The `reason` string from the readiness
+    # probe already includes the action to take.
+    if picked.value == "claude":
+        ok, reason = claude_code_installed_and_logged_in()
+        if not ok:
+            console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}, then rerun `operator setup`\n")
+            raise WizardCancel(silent=True)
+    elif picked.value == "codex":
+        from _1_800_operator.pipeline.codex_import import (
+            codex_installed_and_logged_in,
+        )
+        ok, reason = codex_installed_and_logged_in()
+        if not ok:
+            console.print(f"  [red]✗ codex preset requires Codex CLI:[/red] {reason}, then rerun `operator setup`\n")
+            raise WizardCancel(silent=True)
+    return _edit_preset(picked.value)
 
 
 def _bundled_tagline(name: str) -> str:
@@ -1570,11 +1575,7 @@ def run(
                 if not ok:
                     console.print(
                         f"  [red]✗ claude agent requires Claude Code:[/red] "
-                        f"{reason}"
-                    )
-                    console.print(
-                        "  [dim]Install Claude Code (https://claude.ai/code) "
-                        "and run `claude login`, then re-run.[/dim]\n"
+                        f"{reason}, then rerun `operator edit claude`\n"
                     )
                     return 1
             state = _edit_preset(target_agent, reset_allowed=reset_allowed)
@@ -1628,8 +1629,9 @@ def run(
 
         console.clear()
         _reveal(state)
-    except (KeyboardInterrupt, PickerCancelled, WizardCancel):
-        console.print("\nCancelled.")
+    except (KeyboardInterrupt, PickerCancelled, WizardCancel) as exc:
+        if not getattr(exc, "silent", False):
+            console.print("\nCancelled.")
         return 1
     except Exception as e:
         console.print(f"\n✗ build failed: {e}")
