@@ -17,6 +17,45 @@
 
 ## Current Status
 
+**Session 191 (May 5, 2026) — Strategic pivot session. No code changes. Major roadmap restructure: bridge architecture cutover queued as Phase 14.19, custom-bot work deferred to Post-MVP "Operator Studio", Claude Code Plugin vision locked in Post-MVP as Shape E (terminal replacement for Operator users).**
+
+This was a conversation-and-roadmap session, not an implementation session. Started from S190's just-shipped install path A, pivoted to broader pre-launch product questions, then arrived at a major v0.0.1 scope reduction.
+
+**The core decision:** Cut the entire custom-bot construction surface from v0.0.1. Operator stops being "a meeting-bot platform" (a category nobody currently shops for) and becomes "the way to bring the Claude you already trust into your Google Meet" (a category that maps to a real, immediate desire). The wizard, the agent presets (`pm`/`engineer`/`designer`), the `system_prompt` composition layer, the multi-agent dispatch — all of it asks users to evaluate a bot Operator constructed before they've decided they trust AI presence in meetings at all. That's a backwards trust ladder. The bridge model inverts it.
+
+**The new product surface (Phase 14.19, ~22h, blocks launch):**
+- Three commands: **`slip`** (CDP-attach to user's Chrome, Claude responds as user with marker), **`dial`** (fresh Meet with Claude as separate participant, private), **`deploy`** (Claude joins user's existing meeting with real participants). Each rung escalates commitment.
+- Two purpose-built setup commands: **`operator login claude`** (Google sign-in for bot account, dial/deploy only — single-purpose, NOT a wizard), **`operator doctor`** (diagnostic checker analogous to `brew doctor`).
+- `--yolo` flag on slip/dial/deploy — passes through claude's `--dangerously-skip-permissions`. Default = ask-mode (claude prompts per-tool, Operator surfaces in Meet chat).
+- **v0.0.1 = claude only.** Codex + Gemini are explicit fast-follows. The S188 codex parity work re-homes under v0.0.2.
+- **Zero user-facing config files.** No `.env`, no `config.yaml`. All hardcoded code constants in `bridges/claude.py`. Persistent state files only (`auth_state.json`, `browser_profile/`, `history/`, `debug/`).
+- Reply attribution in slip mode: robot emoji `🤖 ` prefix as leading default; final pick after side-by-side mockup of 3 candidates (brackets / robot / italics).
+- Trigger phrase: `@claude` hardcoded.
+- READ_TOOLS allowlist deleted — permission policy fully delegated to claude.
+
+**Mass deletions queued (Phase 14.19 step 7):** `setup_wizard.py`, `edit.py`, `agents/{pm,engineer,designer,codex}/`, `OPERATOR_BOT` env routing, agent/llm/mcp_servers/skills/system_prompt config schema, `_sync_claude_imports`, `READ_TOOLS` + auto-approve branch in `chat_runner.py`, `load_dotenv` calls + every `.env` reference, `intro_on_join`, `first_contact_hint`, `tagline`. Conservatively half the codebase.
+
+**Operator Studio (Post-MVP)** captures the deferred wizard work — not as "wizard, but later" but as a fully-realized second product. Trigger criteria locked: 25% of v0.0.1 users on dial/deploy + multiple "can I make my own bot?" asks.
+
+**Claude Code Plugin (Post-MVP)** locked as Shape E — terminal-replacement for Operator users. 8 slash commands (`/operator:slip`/`dial`/`deploy`/`login`/`doctor`/`status`/`tail`/`hangup`) that shell out to locally-installed `operator` binary; backgrounding via `nohup ... &` in SKILL.md, NOT via Operator-side flag. S187 + S190 spikes locked Shapes A–D as non-viable. Trigger: 2–4 weeks of real curl-install signal first. ~5h work post-launch.
+
+**Spike findings (May 2026 plugin model):** Postinstall hooks still missing (Issue #11240 + #9394 both open). Plugin primitives now include `bin/` (executables on PATH while plugin enabled), `monitors/monitors.json` (long-running command stdout piped to Claude as notifications during session), `hooks/hooks.json` (event handlers like PostToolUse). None of these enable bootstrap-installing Operator or driving Chrome/Playwright from inside Claude. Shape E (slash commands + transcript MCP, plugin assumes Operator already installed) is the only viable plugin shape at present.
+
+**`docs/scratchpad.md` created** as running pool for marketing copy, taglines, and verb-logic notes. Locked verbs: `slip → dial → deploy`. Considered and rejected: merge (git collision + no try-feel), channel (too metaphysical), patch (more about connecting than blending), tag (wrestling sub implies tag-out), pair (too software-coded). One-line product description leading candidate: "The Claude you already trust, but in your meeting."
+
+**Exact next step (session 192):** Begin Phase 14.19 implementation. Recommended starting point: step 14.19.1 (create `bridges/claude.py` with hardcoded constants — spawn cmd, trigger phrase, reply prefix, transcript-MCP wiring). This is the foundation everything else replaces references to. Then step 14.19.2 (wire the three commands in `__main__.py` with JIT preflights and `--yolo` flag). Step 14.19.3 (CDP attach for slip mode in `connectors/attach_adapter.py`) is the meaty one — quit-Chrome-relaunch dance + reply-attribution prefix injection. Steps 14.19.7 (mass deletion) and 14.19.8 (permission flow rewrite) come once the new shape is functional.
+
+**Open questions for session 192 start:**
+- Reply prefix iteration (step 14.19.6) — the side-by-side mockup needs to happen in a real Meet to eye-check what reads cleanest. User picks; we hardcode. Don't lock the choice from a markdown file.
+- The S190 carry-over warnings (`[claude] ⚠ MCP needs attention: ...` for hosted connectors) — likely become moot once `_sync_claude_imports` is deleted in step 14.19.7. Verify when that step lands.
+- `docs/pre-launch-audit.md` (untracked, S187-era) — most passes (1–3, 5–8) survive the bridge cutover. Pass 4 (dead code) gets *easier* because we're deleting half the codebase first. Re-run audit *after* Phase 14.19 lands, not before.
+
+**S191 git state:** One commit (`0870966`) on origin/main containing roadmap + scratchpad changes. Nothing pushed to public — this is dev-only planning work, no public-facing changes.
+
+---
+
+## Prior Status (preserved)
+
 **Session 190 (May 4, 2026) — Phase 14.8 install path A verified end-to-end on a fresh Mac. Thirteen fix commits across install.sh, wizard, dial, and macOS adapter — all driven by real QA observations, not pre-emptive cleanup.**
 
 The session was structured as: user runs through every user-facing surface on a never-used MacBook, reports observations, I diagnose + fix + push to both `origin/main` (private dev) and `public/main` (1-800-operator/operator). End state: first successful `operator dial claude` on a fresh machine, redirecting from `meet.new` to a real meeting URL via the green-room flow.
