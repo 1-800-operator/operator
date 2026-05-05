@@ -1,6 +1,6 @@
 # Operator
 
-> Operator is an open-source CLI tool that drops AI participants into your Google Meet. Install via pip, configure via YAML, run from your terminal.
+> Operator is an open-source CLI tool that drops AI participants into your Google Meet. Install in one command, configure via YAML, run from your terminal.
 
 Joins, reads chat, replies via an LLM with tool access (Linear, GitHub, and
 other MCP servers you wire up), and leaves when everyone else does.
@@ -13,6 +13,62 @@ operator                                               # show available agents
 ```
 
 `pm` is a sample bot under `agents/`. Drop in `operator build` to create your own.
+
+## Install
+
+macOS or Linux. Python 3.10+. Pick the path that matches how much you want to read first.
+
+### Option A — one command (default)
+
+```bash
+curl -fsSL https://1-800-operator.com/install | sh
+```
+
+Bootstraps [`uv`](https://github.com/astral-sh/uv) if missing, installs the CLI, downloads Playwright's Chromium runtime (~170 MB), seeds `~/.operator/.env` with API-key placeholders, and on macOS nudges you to install Chrome if it isn't already. Idempotent — safe to re-run.
+
+### Option B — read the script first
+
+```bash
+curl -fsSL https://1-800-operator.com/install -o install.sh
+less install.sh           # actually look at it
+sh install.sh
+```
+
+Same outcome as Option A — you just read the script before running it. Recommended if you've never installed anything from us before.
+
+### Option C — package manager only (no shell script from us)
+
+Trust only `uv` and the GitHub repo, no shell pipeline:
+
+```bash
+# 1. Install uv (Astral's package manager) — once, via its own installer.
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Install the operator CLI from this repo.
+uv tool install git+https://github.com/1-800-operator/operator.git
+
+# 3. Run setup. The wizard detects missing dependencies (Playwright Chromium,
+#    ~/.operator/.env, Chrome.app on macOS) and offers to provision them.
+operator setup
+```
+
+`operator setup` also runs the agent build wizard. After it finishes:
+
+```bash
+operator dial claude          # join a meeting (or `pm`, `codex`, or your own)
+```
+
+### After install
+
+Add API keys to `~/.operator/.env` (the file is mode 600 by default):
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GITHUB_TOKEN=ghp_...
+```
+
+Then `operator setup` to configure your first agent, and `operator dial <bot>` to join a meeting.
 
 ## Privacy & logs
 

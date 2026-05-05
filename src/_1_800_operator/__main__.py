@@ -589,8 +589,8 @@ def _run_edit(argv):
         )
         _print_usage()
         return 2
-    from _1_800_operator.pipeline.chrome_preflight import require_chrome_or_exit
-    require_chrome_or_exit()
+    from _1_800_operator.pipeline.install_preflight import run_install_preflight
+    run_install_preflight()
     from _1_800_operator.pipeline.setup import run as _wizard_run
     return _wizard_run([], target_agent=target, reset_allowed=False)
 
@@ -633,8 +633,8 @@ def _run_where(argv):
 
 
 def _run_setup():
-    from _1_800_operator.pipeline.chrome_preflight import require_chrome_or_exit
-    require_chrome_or_exit()
+    from _1_800_operator.pipeline.install_preflight import run_install_preflight
+    run_install_preflight()
     from _1_800_operator.pipeline.setup import run as _wizard_run
     return _wizard_run([])
 
