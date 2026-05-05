@@ -63,7 +63,10 @@ CHROME_BINARY_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 CHROME_USER_DATA_DIR_MACOS = os.path.expanduser("~/Library/Application Support/Google/Chrome")
 GRACEFUL_QUIT_TIMEOUT_SECONDS = 5
 PKILL_FALLBACK_TIMEOUT_SECONDS = 5
-RELAUNCH_READY_TIMEOUT_SECONDS = 15
+# Full user profile with many tabs / extensions can take 20+s to spin up
+# the debug server. 30s is generous without being painful when something
+# is genuinely wrong.
+RELAUNCH_READY_TIMEOUT_SECONDS = 30
 
 
 class SlipAttachError(RuntimeError):
@@ -187,8 +190,17 @@ def _launch_chrome_with_debug_port(meeting_url: str) -> subprocess.Popen:
     """Spawn Chrome with the remote debugging port enabled, the user's
     real profile, and the meeting URL as the initial tab.
 
-    Returns the Popen handle. Caller is responsible for waiting until
-    the CDP endpoint is reachable (via _wait_for_cdp_ready).
+    Uses `open -na 'Google Chrome' --args ...` instead of direct binary
+    exec via subprocess.Popen — macOS LaunchServices can intercept a
+    direct binary launch and merge it with an existing/quitting Chrome
+    process, silently dropping the --remote-debugging-port flag in the
+    process. `open -na` forces a brand-new instance and reliably
+    propagates flags through `--args`.
+
+    The returned Popen handle is the `open` command itself, which exits
+    quickly after dispatching the launch. The actual Chrome process is
+    owned by LaunchServices; track it via _chrome_is_running, not this
+    handle.
     """
     if not os.path.exists(CHROME_BINARY_MACOS):
         raise SlipAttachError(
@@ -196,12 +208,12 @@ def _launch_chrome_with_debug_port(meeting_url: str) -> subprocess.Popen:
             "Install Chrome from https://www.google.com/chrome/ and re-run."
         )
     args = [
-        CHROME_BINARY_MACOS,
+        "open", "-na", "Google Chrome", "--args",
         f"--remote-debugging-port={CDP_PORT}",
         f"--user-data-dir={CHROME_USER_DATA_DIR_MACOS}",
         meeting_url,
     ]
-    log.info(f"AttachAdapter: launching Chrome with CDP port {CDP_PORT}")
+    log.info(f"AttachAdapter: launching Chrome via: {' '.join(args)}")
     return subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -213,22 +225,41 @@ def _launch_chrome_with_debug_port(meeting_url: str) -> subprocess.Popen:
 def _wait_for_cdp_ready(timeout_seconds: int = RELAUNCH_READY_TIMEOUT_SECONDS) -> None:
     """Block until the CDP endpoint accepts a TCP connection.
 
-    Chrome publishes the debugging port a fraction of a second after
-    process launch — polling beats sleeping a fixed duration. Raises
-    SlipAttachError on timeout.
+    Chrome publishes the debugging port shortly after process launch —
+    polling beats sleeping a fixed duration. Raises SlipAttachError on
+    timeout, with a diagnostic line in /tmp/operator.log capturing
+    whether Chrome is actually running (disambiguates "Chrome failed
+    to launch" from "Chrome launched but didn't bind 9222").
     """
     import socket
-    deadline = time.monotonic() + timeout_seconds
+    log.info(f"AttachAdapter: waiting for CDP endpoint at {CDP_URL} (timeout {timeout_seconds}s)")
+    t_start = time.monotonic()
+    deadline = t_start + timeout_seconds
     while time.monotonic() < deadline:
         try:
             with socket.create_connection(("localhost", CDP_PORT), timeout=0.5):
+                log.info(f"AttachAdapter: CDP ready after {time.monotonic() - t_start:.1f}s")
                 return
         except (ConnectionRefusedError, socket.timeout, OSError):
             time.sleep(0.1)
+    chrome_alive = _chrome_is_running()
+    log.warning(
+        f"AttachAdapter: CDP timeout after {timeout_seconds}s; "
+        f"chrome_running={chrome_alive}"
+    )
+    if chrome_alive:
+        hint = (
+            "Chrome is running but did not expose the debug port. Quit Chrome "
+            "fully (Cmd+Q, not just close window) and re-run."
+        )
+    else:
+        hint = (
+            "Chrome did not stay running. Try launching Chrome manually first "
+            "(open -na 'Google Chrome'), then re-run slip."
+        )
     raise SlipAttachError(
         f"Chrome CDP endpoint at {CDP_URL} did not become ready within "
-        f"{timeout_seconds}s. Chrome may have failed to launch — check "
-        "that no other process is using port 9222 and try again."
+        f"{timeout_seconds}s. {hint}"
     )
 
 
