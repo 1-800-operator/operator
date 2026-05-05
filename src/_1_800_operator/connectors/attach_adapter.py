@@ -313,6 +313,20 @@ class AttachAdapter(MeetingConnector):
                 "manually and re-run."
             )
         log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
+
+        # The user's Chrome opened the meeting URL but they may still be in
+        # the green room (pre-join screen). Block until they've clicked
+        # 'Join now' — otherwise ChatRunner's first read_chat poll fires
+        # against an empty green-room DOM, _ensure_chat_open silently
+        # no-ops, and slip appears hung.
+        if not self._wait_for_meeting_entry(self._page):
+            self._teardown_playwright()
+            js.signal_failure("meeting_entry_timeout")
+            raise SlipAttachError(
+                "Timed out waiting for you to join the meeting. Click 'Join "
+                "now' in your Chrome, then re-run `operator slip claude <url>`."
+            )
+
         js.signal_success()
 
     def send_chat(self, message):
@@ -410,6 +424,44 @@ class AttachAdapter(MeetingConnector):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _wait_for_meeting_entry(self, page, timeout_seconds=300):
+        """Poll until the user has clicked 'Join now' and entered the meeting.
+
+        Detects entry via the 'Leave call' button — only present in-meeting,
+        never in the green room. Same selector macos_adapter uses for its
+        `already_in_meeting` short-circuit (~line 743). Polls every 1s,
+        matching the cadence in macos_adapter._wait_for_admission.
+
+        Bails early if Chrome was closed during the wait. Logs progress
+        every 30s to /tmp/operator.log; one-time stderr message at the
+        start tells the user we're waiting on them.
+        """
+        print(
+            "\nWaiting for you to join the meeting in Chrome — click 'Join now'…",
+            file=sys.stderr, flush=True,
+        )
+        deadline = time.monotonic() + timeout_seconds
+        last_log = time.monotonic()
+        while time.monotonic() < deadline:
+            try:
+                leave_btn = page.get_by_role("button", name="Leave call")
+                if leave_btn.count() > 0 and leave_btn.first.is_visible():
+                    log.info("AttachAdapter: meeting entry detected")
+                    print("Joined — claude is listening.\n", file=sys.stderr, flush=True)
+                    return True
+            except Exception:
+                pass
+            if not self.is_connected():
+                log.warning("AttachAdapter: Chrome closed during meeting-entry wait")
+                return False
+            now = time.monotonic()
+            if now - last_log > 30:
+                log.info("AttachAdapter: still waiting for meeting entry…")
+                last_log = now
+            time.sleep(1.0)
+        log.warning(f"AttachAdapter: meeting entry timed out after {timeout_seconds}s")
+        return False
 
     def _ensure_chat_open(self, page):
         """Open the chat panel if it isn't already.
