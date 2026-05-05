@@ -1,29 +1,43 @@
 """
-CDP-attach connector for `operator slip` mode (Phase 14.19.3).
+CDP-attach connector for `operator slip` mode.
 
-Where dial/deploy launch a fresh persistent-context Chrome under a separate
-user data dir (operator's own profile), slip attaches to the user's
-*existing* Chrome — same profile, same tabs, same logged-in identity. The
-user's typing, claude's typing, and meeting participants all coexist in
-one Meet tab; claude's replies are prefixed with a marker so the room can
-tell what's the user and what's claude.
+Slip launches a SEPARATE Chrome window under operator's own profile dir
+(~/.operator/slip_profile/), opens the meeting URL there, and CDP-attaches
+to it. The user's main Chrome is NEVER touched — original tabs / browsing
+session / current meetings stay intact.
+
+The original design (attach to user's existing Chrome) is not technically
+viable on modern Chrome: starting around Chrome 121, Chromium silently
+disables `--remote-debugging-port` when the `--user-data-dir` matches
+the user's logged-in default profile. The flag is accepted into argv but
+the TCP listener is never created. This is a security mitigation against
+malware harvesting OAuth tokens via DevTools (Chromium issue 40066423,
+unbypassable by design). Using a fresh profile dir sidesteps the
+restriction entirely.
+
+The user-perceived UX:
+    - Slip Chrome is a dedicated meeting window — different from main
+      browser. User signs into Google in this profile once (operator's
+      own first-run flow); cookies persist across slip sessions.
+    - Meeting joins as the user (same Google identity), so the room
+      sees one participant entry "User Name". claude posts chat with
+      a marker prefix so user vs. claude is distinguishable.
+    - User must run slip BEFORE joining the meeting in main Chrome —
+      otherwise the same identity is in the meeting twice. JIT
+      preflights / friendly notices handle this.
 
 Lifecycle:
-    1. Detect Chrome running (pgrep)
-    2. Prompt the user to confirm closing Chrome (interactive yes/no)
-    3. Graceful quit via AppleScript (5s timeout) → pkill fallback
-    4. Wait for the process to actually exit
-    5. Relaunch Chrome with `--remote-debugging-port=9222` against the
-       user's actual profile dir, opening the Meet URL in a new tab
-    6. `playwright.chromium.connect_over_cdp("http://localhost:9222")`
-    7. Locate the Meet tab among open pages
-    8. (Future commits) install chat observer / send / read / participants
-    9. On leave(): disconnect from CDP but do NOT quit Chrome — the user's
-       browser remains running with all their tabs intact.
-
-Phase 14.19.3a scope (this file's first cut): lifecycle through step 7.
-Chat observer + send/read/participants land in 14.19.3b. _run_slip wiring
-in __main__.py lands in 14.19.3c.
+    1. Probe CDP — if a prior slip session left slip Chrome running,
+       skip launch and reuse it
+    2. Otherwise launch Chrome with --user-data-dir=SLIP_PROFILE_DIR,
+       --remote-debugging-port=9222, and the meeting URL via `open -na`
+    3. Wait for CDP endpoint
+    4. `playwright.chromium.connect_over_cdp("http://localhost:9222")`
+    5. Find or open the Meet tab (strict room-code match)
+    6. Wait for the user to click 'Join now' (indefinite poll)
+    7. Hand back to ChatRunner
+    8. On leave(): disconnect CDP only — slip Chrome stays running so
+       the user can keep the meeting going after claude detaches.
 """
 
 from __future__ import annotations
@@ -60,13 +74,15 @@ log = logging.getLogger(__name__)
 CDP_PORT = 9222
 CDP_URL = f"http://localhost:{CDP_PORT}"
 CHROME_BINARY_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-CHROME_USER_DATA_DIR_MACOS = os.path.expanduser("~/Library/Application Support/Google/Chrome")
-GRACEFUL_QUIT_TIMEOUT_SECONDS = 5
-PKILL_FALLBACK_TIMEOUT_SECONDS = 5
-# Full user profile with many tabs / extensions can take 20+s to spin up
-# the debug server. 30s is generous without being painful when something
-# is genuinely wrong.
-RELAUNCH_READY_TIMEOUT_SECONDS = 30
+# Operator-owned slip profile — never touches the user's main Chrome.
+# Stays signed in across slip sessions (cookies / Google session
+# persist on disk like any Chrome profile dir). First-run sign-in is
+# handled by _run_slip in __main__.py.
+SLIP_PROFILE_DIR = os.path.expanduser("~/.operator/slip_profile")
+# Chrome can take 20+s to bring up the debug server on a profile with
+# extensions or syncing data. 30s is generous; failure beyond that
+# points at a real problem (port collision, Chrome crash, OS issue).
+CDP_READY_TIMEOUT_SECONDS = 30
 
 
 class SlipAttachError(RuntimeError):
@@ -97,156 +113,37 @@ def _cdp_endpoint_alive(timeout: float = 1.0) -> bool:
         return False
 
 
-def _chrome_is_running() -> bool:
-    """True iff a Google Chrome process is currently alive on this Mac.
+def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
+    """Spawn slip's dedicated Chrome window with debug port + meeting URL.
 
-    Uses `pgrep -x "Google Chrome"` to match only the main browser process,
-    not Chrome Helpers / renderers / GPU process / Login items.
-    """
-    try:
-        r = subprocess.run(
-            ["pgrep", "-x", "Google Chrome"],
-            capture_output=True, text=True, timeout=2,
-        )
-        return r.returncode == 0 and bool(r.stdout.strip())
-    except Exception as e:
-        log.warning(f"AttachAdapter: pgrep Chrome failed: {e}")
-        return False
+    Uses `open -na 'Google Chrome' --args ...` (macOS-canonical pattern;
+    `-n` forces a new instance, `--args` propagates flags reliably).
+    The user-data-dir is operator-owned (SLIP_PROFILE_DIR), separate
+    from the user's main Chrome profile — sidesteps Chrome's silent
+    debug-port disable for the default profile.
 
+    Returns the Popen handle of the `open` command itself, which exits
+    after dispatching. The actual Chrome process is owned by
+    LaunchServices.
 
-def _clear_stale_singleton_lock() -> bool:
-    """Remove the Chrome SingletonLock symlink if its PID is dead.
-
-    Chrome's exit path normally clears this, but on fast quit/relaunch
-    sequences (graceful osascript quit immediately followed by `open -na`)
-    the lock can persist for a moment. A new Chrome instance launched
-    against a locked user-data-dir won't expose `--remote-debugging-port`
-    cleanly — it either silently merges with the existing-but-quitting
-    process or skips the flag.
-
-    Reuses _chrome_lock_is_live from connectors/session.py — same
-    PID-existence-check logic macos_adapter uses for its own lock dance.
-    Returns True if a stale lock was removed; False otherwise.
-    """
-    from .session import _chrome_lock_is_live
-    lock_path = os.path.join(CHROME_USER_DATA_DIR_MACOS, "SingletonLock")
-    if not (os.path.islink(lock_path) or os.path.exists(lock_path)):
-        return False
-    if _chrome_lock_is_live(lock_path):
-        log.warning(
-            "AttachAdapter: SingletonLock points to a live PID — "
-            "not removing (Chrome may still be quitting)"
-        )
-        return False
-    try:
-        os.remove(lock_path)
-        log.info("AttachAdapter: removed stale SingletonLock")
-        return True
-    except OSError as e:
-        log.warning(f"AttachAdapter: could not remove stale SingletonLock: {e}")
-        return False
-
-
-def _chrome_quit_graceful() -> bool:
-    """Ask Chrome to quit via AppleScript. Returns True if Chrome exits
-    within GRACEFUL_QUIT_TIMEOUT_SECONDS, False otherwise.
-
-    AppleScript `quit` triggers Chrome's normal exit path: tab state is
-    persisted, no "restore tabs?" prompt on next launch, no LevelDB
-    corruption. Falls back to pkill on timeout.
-    """
-    try:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Google Chrome" to quit'],
-            capture_output=True, timeout=2,
-        )
-    except Exception as e:
-        log.warning(f"AttachAdapter: osascript quit failed: {e}")
-        return False
-
-    deadline = time.monotonic() + GRACEFUL_QUIT_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not _chrome_is_running():
-            return True
-        time.sleep(0.2)
-    return False
-
-
-def _chrome_kill_force() -> bool:
-    """SIGKILL Chrome via pkill. Used only when graceful quit times out.
-
-    May leave Chrome in 'crashed' state — next launch will show
-    'Restore tabs?'. Acceptable as a fallback because the alternative is
-    a hung slip command.
-    """
-    try:
-        subprocess.run(
-            ["pkill", "-x", "-9", "Google Chrome"],
-            capture_output=True, timeout=2,
-        )
-    except Exception as e:
-        log.warning(f"AttachAdapter: pkill Chrome failed: {e}")
-        return False
-
-    deadline = time.monotonic() + PKILL_FALLBACK_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not _chrome_is_running():
-            return True
-        time.sleep(0.2)
-    return False
-
-
-def _confirm_chrome_quit_with_user() -> bool:
-    """Interactive prompt asking the user to consent to Chrome quit.
-
-    Returns True if the user typed y/yes (case-insensitive). Anything
-    else (n/no/empty/Ctrl+D) returns False so the caller can exit
-    cleanly without touching Chrome. The prompt is explicit about
-    impact: all Chrome windows will close.
-    """
-    sys.stderr.write(
-        "\nOperator needs to relaunch Chrome with debugging enabled so claude can\n"
-        "slip into your meeting. This will close all open Chrome windows; tabs\n"
-        "will be restored when Chrome reopens.\n\n"
-        "Continue? [y/N] "
-    )
-    sys.stderr.flush()
-    try:
-        answer = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        sys.stderr.write("\n")
-        return False
-    return answer in ("y", "yes")
-
-
-def _launch_chrome_with_debug_port(meeting_url: str) -> subprocess.Popen:
-    """Spawn Chrome with the remote debugging port enabled, the user's
-    real profile, and the meeting URL as the initial tab.
-
-    Uses `open -na 'Google Chrome' --args ...` instead of direct binary
-    exec via subprocess.Popen — macOS LaunchServices can intercept a
-    direct binary launch and merge it with an existing/quitting Chrome
-    process, silently dropping the --remote-debugging-port flag in the
-    process. `open -na` forces a brand-new instance and reliably
-    propagates flags through `--args`.
-
-    The returned Popen handle is the `open` command itself, which exits
-    quickly after dispatching the launch. The actual Chrome process is
-    owned by LaunchServices; track it via _chrome_is_running, not this
-    handle.
+    First-run behavior: if SLIP_PROFILE_DIR doesn't exist yet, Chrome
+    creates it on launch. The user lands on the meeting URL, will see
+    Google's sign-in prompt (slip profile has no cookies yet), can
+    sign in once, and the profile persists for future runs.
     """
     if not os.path.exists(CHROME_BINARY_MACOS):
         raise SlipAttachError(
             f"Could not find Google Chrome at {CHROME_BINARY_MACOS!r}. "
             "Install Chrome from https://www.google.com/chrome/ and re-run."
         )
+    os.makedirs(SLIP_PROFILE_DIR, exist_ok=True, mode=0o700)
     args = [
         "open", "-na", "Google Chrome", "--args",
         f"--remote-debugging-port={CDP_PORT}",
-        f"--user-data-dir={CHROME_USER_DATA_DIR_MACOS}",
+        f"--user-data-dir={SLIP_PROFILE_DIR}",
         meeting_url,
     ]
-    log.info(f"AttachAdapter: launching Chrome via: {' '.join(args)}")
+    log.info(f"AttachAdapter: launching slip Chrome via: {' '.join(args)}")
     return subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -255,14 +152,13 @@ def _launch_chrome_with_debug_port(meeting_url: str) -> subprocess.Popen:
     )
 
 
-def _wait_for_cdp_ready(timeout_seconds: int = RELAUNCH_READY_TIMEOUT_SECONDS) -> None:
+def _wait_for_cdp_ready(timeout_seconds: int = CDP_READY_TIMEOUT_SECONDS) -> None:
     """Block until the CDP endpoint accepts a TCP connection.
 
-    Chrome publishes the debugging port shortly after process launch —
-    polling beats sleeping a fixed duration. Raises SlipAttachError on
-    timeout, with a diagnostic line in /tmp/operator.log capturing
-    whether Chrome is actually running (disambiguates "Chrome failed
-    to launch" from "Chrome launched but didn't bind 9222").
+    Chrome publishes the debugging port shortly after process launch.
+    Polling at 100ms beats a fixed sleep. Raises SlipAttachError on
+    timeout — by which point Chrome has either crashed or is bound up
+    on something we can't disambiguate from here.
     """
     import socket
     log.info(f"AttachAdapter: waiting for CDP endpoint at {CDP_URL} (timeout {timeout_seconds}s)")
@@ -275,34 +171,29 @@ def _wait_for_cdp_ready(timeout_seconds: int = RELAUNCH_READY_TIMEOUT_SECONDS) -
                 return
         except (ConnectionRefusedError, socket.timeout, OSError):
             time.sleep(0.1)
-    chrome_alive = _chrome_is_running()
-    log.warning(
-        f"AttachAdapter: CDP timeout after {timeout_seconds}s; "
-        f"chrome_running={chrome_alive}"
-    )
-    if chrome_alive:
-        hint = (
-            "Chrome is running but did not expose the debug port. Quit Chrome "
-            "fully (Cmd+Q, not just close window) and re-run."
-        )
-    else:
-        hint = (
-            "Chrome did not stay running. Try launching Chrome manually first "
-            "(open -na 'Google Chrome'), then re-run slip."
-        )
+    log.warning(f"AttachAdapter: CDP timeout after {timeout_seconds}s")
     raise SlipAttachError(
-        f"Chrome CDP endpoint at {CDP_URL} did not become ready within "
-        f"{timeout_seconds}s. {hint}"
+        f"Slip Chrome's CDP endpoint at {CDP_URL} did not become ready "
+        f"within {timeout_seconds}s. Chrome may have crashed during launch — "
+        "try `pkill -f operator-slip-chrome` then re-run. If the problem "
+        "persists, delete ~/.operator/slip_profile/ to start with a fresh "
+        "profile."
     )
 
 
 class AttachAdapter(MeetingConnector):
-    """MeetingConnector for slip mode — CDP-attached to user's Chrome.
+    """MeetingConnector for slip mode — CDP-attached to slip's dedicated
+    Chrome window.
 
-    Chat methods (send/read/participants) and Chrome lifecycle (join/
-    is_connected/leave) all functional from 14.19.3b onward. Wired into
-    `operator slip` in 14.19.3c (which builds the LLM/MCP/ChatRunner
-    pipeline and hands the adapter to ChatRunner.run()).
+    Each slip session launches Chrome with --user-data-dir=SLIP_PROFILE_DIR
+    and CDP-attaches via Playwright. The user's main Chrome is never
+    touched. Re-running slip while a slip Chrome is still alive (the
+    user just hit Ctrl+C and is firing it back up) reuses the existing
+    Chrome via the CDP probe — no second window, no relaunch.
+
+    First-run: SLIP_PROFILE_DIR is created on launch; Chrome lands the
+    user on the meeting URL with no Google session. They sign in once,
+    cookies persist, and subsequent slip runs skip the sign-in.
     """
 
     def __init__(self, reply_prefix: str = ""):
@@ -347,43 +238,13 @@ class AttachAdapter(MeetingConnector):
                 f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
-        # Probe CDP first — if a prior slip session left Chrome running with
-        # the debug port open, skip the quit/relaunch dance entirely. The
-        # user shouldn't have to re-quit their browser on the second slip.
+        # Probe CDP first — if a prior slip session left slip Chrome
+        # running with the debug port open, skip launch entirely.
+        # Re-running slip after Ctrl+C should be instant.
         if _cdp_endpoint_alive():
-            log.info(f"AttachAdapter: CDP already alive at {CDP_URL} — attaching to existing Chrome")
-        elif _chrome_is_running():
-            # Chrome running but no debug port — must quit + relaunch.
-            if not _confirm_chrome_quit_with_user():
-                js.signal_failure("user_declined_chrome_quit")
-                raise SlipAttachError(
-                    "slip mode requires closing Chrome. Aborted at user request."
-                )
-            log.info("AttachAdapter: quitting Chrome (graceful)")
-            if not _chrome_quit_graceful():
-                log.warning("AttachAdapter: graceful quit timed out — falling back to pkill")
-                if not _chrome_kill_force():
-                    js.signal_failure("chrome_quit_failed")
-                    raise SlipAttachError(
-                        "Could not close Chrome — it is still running after both "
-                        "graceful quit and force kill. Quit Chrome manually and re-run."
-                    )
-            # Settle: Chrome's main process is dead, but Helper subprocesses
-            # may still be exiting and the SingletonLock may still be on
-            # disk. A new Chrome launched while either is true won't expose
-            # --remote-debugging-port cleanly. 1.5s is comfortably above
-            # the helper-cleanup window observed in practice.
-            time.sleep(1.5)
-            _clear_stale_singleton_lock()
-            self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
-            try:
-                _wait_for_cdp_ready()
-            except SlipAttachError:
-                js.signal_failure("cdp_not_ready")
-                raise
+            log.info(f"AttachAdapter: CDP already alive at {CDP_URL} — reusing existing slip Chrome")
         else:
-            # Chrome not running at all — fresh launch with debug port.
-            self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
+            self._chrome_proc = _launch_slip_chrome(meeting_url)
             try:
                 _wait_for_cdp_ready()
             except SlipAttachError:

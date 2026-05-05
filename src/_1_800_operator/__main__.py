@@ -899,15 +899,18 @@ def _consume_yolo(args):
 
 
 def _run_slip(name, rest):
-    """slip mode — CDP-attach to user's existing Chrome.
+    """slip mode — launch a dedicated Chrome window for the meeting and
+    CDP-attach claude to it.
 
-    Pipeline mirrors _run_macos's construction but swaps connectors and
-    drops two layers: the meet.new auto-open path (slip always takes a
-    URL — the meeting is whatever the user has open) and the auto-open-
-    in-default-browser step (Chrome IS the user's browser already).
-    Track A only — claude owns its MCPs; no MCPClient setup. Caption
-    capture is deferred to 14.19.3c.5 (STT-based, Swift binaries +
-    Whisper); this commit lands chat-only slip end-to-end.
+    Slip Chrome lives at ~/.operator/slip_profile/ — operator-owned,
+    separate from the user's main browser. First run: user signs into
+    Google in slip Chrome once, cookies persist for future sessions.
+    User's main Chrome is never touched.
+
+    Pipeline mirrors _run_macos's construction but swaps connectors,
+    skips the meet.new auto-open (slip always takes a URL), and drops
+    the user-browser auto-open (slip Chrome IS where the meeting opens).
+    Track A only — claude owns its MCPs; no MCPClient setup.
 
     OPERATOR_BOT=claude is set early (temporary; 14.19.7 deletes the
     config layer entirely).
@@ -1042,7 +1045,7 @@ def _run_slip(name, rest):
 
     connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
 
-    ui.say("Attaching to your Chrome…")
+    ui.say("Launching slip Chrome…")
     try:
         connector.join(url)
     except SlipAttachError as e:
@@ -1088,7 +1091,7 @@ def _run_slip(name, rest):
         log.info("Interrupted — detaching")
     finally:
         _shutdown()
-        ui.ok("Detached from Chrome — your browser stays open. Goodbye.")
+        ui.ok("Detached — slip Chrome stays open so the meeting can continue. Goodbye.")
     return 0
 
 
