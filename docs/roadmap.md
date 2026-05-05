@@ -60,6 +60,79 @@
 
 ---
 
+## Phase 14.19: Bridge architecture cutover — slip/dial/deploy (~3 days) ← BLOCKS LAUNCH
+
+*Strategic pivot, session 190. Cut the entire custom-bot-construction surface from v0.0.1. Operator stops being "a meeting-bot platform" (a category nobody currently shops for) and becomes "the way to bring the Claude you already trust into your Google Meet" (a category that maps to a real, immediate desire).*
+
+### Why this pivot
+
+The wizard, the agent presets (`pm`/`engineer`/`designer`), the `system_prompt` composition layer, the multi-agent dispatch — all of it asks users to evaluate **a bot Operator constructed**, before they've decided they trust AI presence in meetings at all. That's a backwards trust ladder. The bridge model inverts it: Operator becomes a *thin meeting-presence layer* over a tool the user already has and trusts (Claude Code). Trust transfers; we don't have to earn it from scratch.
+
+This is also a massive code reduction. We delete the wizard, the edit command, the `OPERATOR_BOT` env-routing, the `agents/` directory, the entire `agent`/`llm`/`mcp_servers`/`skills`/`system_prompt` config schema, `.env` loading, `READ_TOOLS` allowlist, much of `config.py`. Conservatively half the codebase. Less to slop, less to support, less to test.
+
+The custom-bot work isn't lost — it's deferred to its right product moment as **Operator Studio** (see Post-MVP). Ships when users have already trusted AI presence in meetings and *now* want to compose their own.
+
+### The three-rung ladder (locked verbs)
+
+**slip → dial → deploy.** Each rung escalates one variable while holding others constant:
+
+- **`operator slip claude [meet-url]`** — Claude responds *as you*; no second account; no separate participant. Lowest stakes. CDP-attach to user's existing Chrome session. Replies surface through your identity with a marker (default: `🤖 ` prefix, pending iteration — see step 14.19.6) so the room knows what's you and what's Claude. This is the entry rung; most users start here.
+- **`operator dial claude [meet-url]`** — Claude has its own identity; you and Claude join a *fresh* Meet together; no other participants. Private one-on-one with AI. Echoes the 1-800-Operator brand metaphor. Good for solo brainstorms, voice-style sessions, transcribed interviews with yourself. Requires `operator login claude` to have been run once.
+- **`operator deploy claude <meet-url>`** — Claude has its own identity; joins your existing meeting with real participants. Full commitment, full visibility. Used for note-taking, project management, real-time research while you focus on the people. Requires `operator login claude`.
+
+`--yolo` flag available on all three: maps to spawning `claude` with `--dangerously-skip-permissions`. Default is ask-mode (claude pauses per-tool; Operator surfaces the prompt in Meet chat; user types y/n in chat to forward back).
+
+### v0.0.1 = claude only
+
+Codex and Gemini are explicit fast-follows, not launch blockers. The Phase 14.18B codex parity work (already shipped) gets re-homed under v0.0.2 once the bridge architecture is stable. v0.0.1 ships one bridge done extremely well.
+
+### Zero user-facing config files
+
+No `.env`. No `config.yaml`. No user-editable settings of any kind. Everything is hardcoded code constants in `bridges/claude.py`. Persistent state files in `~/.operator/` are runtime state only (`auth_state.json`, `browser_profile/`, `history/`, `debug/`) — written by code, never human-edited.
+
+If a user wants persistent `--yolo` behavior, the answer is a shell alias. Operator stays config-free.
+
+### Steps
+
+| Step | Description | Status | Est. |
+|------|-------------|--------|------|
+| 14.19.1 | **Create `bridges/claude.py`** with hardcoded constants: spawn cmd (`claude -p --output-format stream-json --include-partial-messages --resume? ...`), trigger phrase (`@claude`), default reply prefix, transcript-MCP wiring. ~50 LOC replacing the entire current `agents/claude/config.yaml` + per-agent config-loading machinery. | ⬜ | ~2h |
+| 14.19.2 | **Wire the three commands** in `__main__.py` — `slip`, `dial`, `deploy`. Each runs its own JIT preflight (claude binary check, `claude auth status`, Chrome present, plus `auth_state.json` for dial/deploy). All three accept `--yolo` which appends `--dangerously-skip-permissions` to the spawn cmd. `dial` keeps current "open `meet.new`" semantics; `deploy` is the renamed `dial <name> <url>` path; `slip` is new (CDP attach). | ⬜ | ~3h |
+| 14.19.3 | **Implement `slip` mode (CDP attach)** in a new `connectors/attach_adapter.py`. Detect running Chrome → prompt to quit → `pkill -f "Google Chrome"` → wait for exit → relaunch with `--remote-debugging-port=9222 --user-data-dir=~/Library/Application\ Support/Google/Chrome` → navigate to Meet URL → `browser.connect_over_cdp("http://localhost:9222")` → find Meet tab → install observers → ready. On `leave()`: detach but leave Chrome running (don't quit user's Chrome from under them). Reply attribution prefix injected into `send_chat()` at the connector layer. | ⬜ | ~5h |
+| 14.19.4 | **Implement `operator login claude`** — single-purpose command, not a wizard. Opens Chrome via Playwright, navigates to accounts.google.com, persists `auth_state.json` after sign-in. Lifted from the existing wizard's step-2 auth code. Idempotent — running twice refreshes session. No name-your-bot, no trigger-phrase prompt, no system-prompt composition. Just the auth dance. | ⬜ | ~1.5h |
+| 14.19.5 | **Implement `operator doctor`** — diagnostic checker (analogous to `brew doctor`/`flutter doctor`). Prints checklist: claude binary present, claude logged in, Chrome installed, git installed, `auth_state.json` exists (notes "only needed for dial/deploy"). For each missing item, prints the exact fix command. No decisions, no creativity, no construction. | ⬜ | ~1h |
+| 14.19.6 | **Reply attribution mockup + lock.** Build a side-by-side comparison of three styles in `slip` mode: `[Claude] ...` (brackets), `🤖 ...` (robot emoji), `_..._` (italics, Meet-rendered). Test in a real Meet, eye-check what reads cleanest at a glance. Hardcode the winner in `bridges/claude.py`. No user-facing config knob. | ⬜ | ~30m |
+| 14.19.7 | **Mass deletion pass.** Remove: `setup_wizard.py`, `edit.py`, `agents/{pm,engineer,designer,codex}/` directories, `OPERATOR_BOT` env routing in `__main__.py` and `config.py`, `agent`/`llm`/`mcp_servers`/`skills`/`system_prompt` config-schema parsing, `_sync_claude_imports` (claude owns its own MCPs/skills now), `READ_TOOLS` allowlist + the auto-approve branch in `chat_runner.py`, `load_dotenv` calls + every reference to `~/.operator/.env`, `intro_on_join`, `first_contact_hint`, `tagline`. Run all existing tests; expect mass test deletion alongside. | ⬜ | ~3h |
+| 14.19.8 | **Permission flow rewrite in `chat_runner.py`.** When claude pauses with a permission prompt (stream-json `permission_request` event), surface the prompt in Meet chat, wait for user's chat reply, forward y/n back to claude's stdin. Replaces the current Operator-side intercept-and-confirm flow which assumed Operator owned the LLM loop. With `--yolo`, this codepath never fires (claude runs unprompted). | ⬜ | ~2h |
+| 14.19.9 | **Update `install.sh` sendoff + welcome copy** to reflect new command surface. Sendoff hint becomes `operator slip claude` (the entry rung) instead of `operator setup`. README quickstart rewritten to lead with the ladder narrative. | ⬜ | ~1h |
+| 14.19.10 | **Live-test the ladder end-to-end.** On a fresh Mac (or via `~/.operator` reset): `curl \| sh` install → `operator doctor` (expect Chrome + claude checks) → `operator slip claude <url>` against a real Meet → `@claude what's the linear ticket for X` → confirm reply prefixed correctly. Then `operator login claude` → `operator dial claude` (fresh Meet, claude as separate participant) → confirm bot identity, no `🤖 ` prefix. Then `operator deploy claude <url>` against a real meeting with another participant → confirm deploy posture works. Then `operator slip claude --yolo <url>` → confirm tools auto-execute without chat prompts. | ⬜ | ~2h |
+| 14.19.11 | **Documentation refresh** — `CLAUDE.md` rewrite (kill the agent-config block, the `OPERATOR_BOT` paragraph, the wizard mentions; add the bridge model + three commands), `docs/handoff.md` update, `docs/scratchpad.md` left intact (already aligned), runbook (Pass 8 of pre-launch audit) absorbs the new commands. | ⬜ | ~1.5h |
+
+**Phase total: ~22h (~3 days).**
+
+### Decisions locked from S190 conversation
+
+- **Verbs: `slip / dial / deploy`.** Considered and rejected: `merge` (git collision, doesn't carry try-feel), `channel` (too metaphysical), `patch` (more about connecting than blending), `tag` (wrestling sub implies tag-out), `pair` (too software-jargon). `slip` is the entry rung's right-feel; `dial` keeps the brand metaphor; `deploy` carries appropriate commitment-weight for the public-meeting rung.
+- **Trigger phrase: `@claude` (hardcoded).** No per-bot configurability. Edge case (user's actual name is Claude) is acceptable collateral.
+- **`--yolo` is the only permission flag.** Maps to claude's `--dangerously-skip-permissions`. No `--allowedTools`/`--disallowedTools` exposed in v0.0.1.
+- **No persistent permission preference.** Shell alias if a user wants persistent yolo. Stays consistent with zero-config-file goal.
+- **Reply prefix: pending iteration.** Three candidates (brackets / robot emoji / italics) get mocked side-by-side; user picks; hardcoded. Robot emoji is the leading default.
+- **`operator login claude` is not a wizard** — single-purpose auth command. Renaming away from the `setup` namespace deliberately to avoid evoking the deleted wizard surface.
+- **Operator delegates MCP auth + skill management entirely to claude.** Operator's only "is the world ready" check is "does claude itself work." The transitive correctness of claude's GitHub MCP / Linear MCP / etc. is claude's problem, surfaced to the user via `claude mcp list` if they want to investigate. Operator does not duplicate this surface.
+
+### Carry-overs that survive the cutover
+
+- **Phase 14.18 transcript MCP** stays in v0.0.1 — it's the bridge's killer add over "just run claude in your terminal next to a Meet window." Ships unchanged at `mcp_servers/transcript_server.py`. The `~/.operator/.current_meeting` marker file mechanism (Phase 14.18.B1/B2) becomes the canonical way the transcript server finds the active meeting in slip/dial/deploy modes.
+- **Phase 14.17 `--resume` crash recovery** stays — implemented inside the bridge, transparent to the user.
+- **Captions** stay enabled by default (the YAML toggle disappears, the captions-on default behavior in `connectors/macos_adapter.py` remains).
+- **`READ_TOOLS` allowlist DELETED.** Permission policy fully delegated to claude. Two states only: ask-mode (claude prompts per-tool) or yolo-mode (claude skips). No hybrid.
+
+### Done when
+
+Three commands work end-to-end on a fresh Mac. Zero user-editable config files exist. The `agents/` directory is gone. The wizard is gone. `operator doctor` cleanly reports world-readiness. The README and `CLAUDE.md` describe a thin bridge product, not a bot platform.
+
+---
+
 ## Phase 14.18: transcript tool API beef-up + codex captions parity (~1 day) ✅ shipped S188 (`3ed5ff2`)
 
 **Why launch-blocking.** v1 ships two bots — claude and codex — and the user wants feature parity at launch. Today only the claude bot has caption awareness (via the bundled transcript MCP at `mcp_servers/transcript_server.py`); codex has the documented gap from S179 (R8). Bot parity is a launch promise.
@@ -593,7 +666,7 @@ Audio quality, TTS 3-tier architecture, latency masking, STT accuracy (mlx-whisp
 
 ---
 
-**MVP total: ~34–37.5h remaining** (session 159 shipped Phase 14.10 = 2h closed + added Phase 14.11 wizard MCP copy tweak + Phase 15.10 pre-launch hardening cluster + expanded 14.8 to absorb 15.10.3 + 15.10.4 live-QA = +~8–10h pre-launch; session 150 shipped Phase 15.8 = 1.5h closed; session 149 added Phase 15.8 CLI verb rename = +~1.5h pre-launch; session 147 added Phase 15.7 MCP hardening + team completion = +~9–11h pre-launch; session 142 progress: DNS async = 30m shaved, 14.3 Commit 1 package-restructure core = 1.5h shaved, 14.3 Commit 2 agents → templates = 2h shaved, 14.3 Commit 3 main() export + smoke test = 45m shaved; session 141 reshape of Phase 14 from "minimal packaging" to "curl-installable package" added ~11h of new work — package restructure + install.sh + DNS/hosting + clean-mac smoke test that absorbs the five-session-overdue live-smoke into 14.8). **Execution order (revised session 159):** 12 ✅ → 15.5.0–15.5.7 ✅ → 13 ✅ → 15.6.1 ✅ → ~~15.6.2~~ (moved to post-MVP gallery) → 14.3 ✅ → 14.4 ✅ → 15.7 ✅ → 15.8 ✅ → 15.9 ✅ → 14.10 ✅ → **14.11 (wizard MCP "context, not just tools" copy tweak)** → **15.10 (pre-launch hardening — clustered edge-case audit + claude top-10 use-case research + other-bot live-test checklist)** → 14.5 (install.sh) → 14.6 (DNS + host) → 14.7 (uninstall) → 14.8 (clean-mac fresh-user live-QA marathon — absorbs 131+132+136+137 + 15.10.3 + 15.10.4) → 15.1 (Linux run) → 15.11 (community + support infra) → 16 (README + landing + launch). PyPI upload deferred to post-MVP (see Packaging & Community) — shape B (`uv tool install git+https://...`) gives the same install UX without PyPI account overhead. Core-repo security (15.6.1) is uncuttable and shipped. Gallery trust model is the post-MVP evolution of what 15.6.2 was trying to solve. **Launch target: session 159 added ~8–10h of pre-launch hardening (edge-case audit + live-QA scripts + MCP wizard copy); previous Apr 28–30 aspirational / May 1–2 acceptable slip pushes out correspondingly. Session 147 absorbed the 15.7 scope as a deliberate launch-quality bet — shipping hardened MCP flows and a complete team-arc story is worth 2 days of calendar. Session 159 is the same bet for pre-launch hardening and a real flagship-agent test script.**
+**MVP total: ~34–37.5h remaining** (session 159 shipped Phase 14.10 = 2h closed + added Phase 14.11 wizard MCP copy tweak + Phase 15.10 pre-launch hardening cluster + expanded 14.8 to absorb 15.10.3 + 15.10.4 live-QA = +~8–10h pre-launch; session 150 shipped Phase 15.8 = 1.5h closed; session 149 added Phase 15.8 CLI verb rename = +~1.5h pre-launch; session 147 added Phase 15.7 MCP hardening + team completion = +~9–11h pre-launch; session 142 progress: DNS async = 30m shaved, 14.3 Commit 1 package-restructure core = 1.5h shaved, 14.3 Commit 2 agents → templates = 2h shaved, 14.3 Commit 3 main() export + smoke test = 45m shaved; session 141 reshape of Phase 14 from "minimal packaging" to "curl-installable package" added ~11h of new work — package restructure + install.sh + DNS/hosting + clean-mac smoke test that absorbs the five-session-overdue live-smoke into 14.8). **Execution order (revised session 159):** 12 ✅ → 15.5.0–15.5.7 ✅ → 13 ✅ → 15.6.1 ✅ → ~~15.6.2~~ (moved to post-MVP gallery) → 14.3 ✅ → 14.4 ✅ → 15.7 ✅ → 15.8 ✅ → 15.9 ✅ → 14.10 ✅ → **14.11 (wizard MCP "context, not just tools" copy tweak)** → **15.10 (pre-launch hardening — clustered edge-case audit + claude top-10 use-case research + other-bot live-test checklist)** → 14.5 (install.sh) → 14.6 (DNS + host) → 14.7 (uninstall) → 14.8 (clean-mac fresh-user live-QA marathon — absorbs 131+132+136+137 + 15.10.3 + 15.10.4) → 15.1 (Linux run) → 15.11 (community + support infra) ✅ → **14.19 (BRIDGE CUTOVER — slip/dial/deploy, kill wizard, kill agents/, kill .env + config.yaml)** → 16 (README + landing + launch). PyPI upload deferred to post-MVP (see Packaging & Community) — shape B (`uv tool install git+https://...`) gives the same install UX without PyPI account overhead. Core-repo security (15.6.1) is uncuttable and shipped. Gallery trust model is the post-MVP evolution of what 15.6.2 was trying to solve. **Launch target: session 159 added ~8–10h of pre-launch hardening (edge-case audit + live-QA scripts + MCP wizard copy); previous Apr 28–30 aspirational / May 1–2 acceptable slip pushes out correspondingly. Session 147 absorbed the 15.7 scope as a deliberate launch-quality bet — shipping hardened MCP flows and a complete team-arc story is worth 2 days of calendar. Session 159 is the same bet for pre-launch hardening and a real flagship-agent test script.**
 
 ---
 
@@ -688,10 +761,112 @@ Audio quality, TTS 3-tier architecture, latency masking, STT accuracy (mlx-whisp
 |------|--------|-------------|
 | Participation scalar | session 105 | Configurable how-much-the-bot-talks dial. Modes: `silent` (notetaker, never replies — implementation is trivial: skip `send_chat`), `prompted` (current default — only responds when triggered or in 1-on-1), `interjects` (LLM judges when its input is wanted and chimes in unprompted). Lives as `agent.participation` in `config.yaml`. `silent` is ~30min and could underpin a `notetaker` agent flavor. `interjects` is the hard one — needs a tuned prompt + heuristic gate (e.g. silence threshold + topic-match score) to avoid being annoying. Defer the full thing; consider shipping `silent` early as a quick gallery-multiplier. |
 
+### Operator Studio — custom-bot construction (the deferred wizard product)
+
+*The custom-bot work was cut from v0.0.1 in Phase 14.19. It returns here as its own product when users have already trusted AI presence in meetings (via slip/dial/deploy) and now want to compose their own bots. This is not "the wizard, but later" — it's a fully-realized second product, sequenced after v0.0.1's bridge model has earned the trust that justifies it.*
+
+**Trigger to revisit:** at least 25% of active v0.0.1 users have run `dial` or `deploy` (showing they've graduated past slip), AND multiple users have asked "can I make my own bot?" in Discussions/Issues. Until both signals fire, Studio stays parked.
+
+**What returns:**
+- The 4-step wizard (`operator studio create <name>`) — agent identity (name, trigger, tagline), LLM provider/model, MCPs + skills picker, system prompt composer.
+- The `agents/` directory + per-agent `config.yaml` schema — restored as the artifact `studio create` writes.
+- `operator studio edit <name>` — re-enter the wizard for any field.
+- The `pm` / `engineer` / `designer` presets — restored as starter templates, not as launch-shipped bots.
+- Multi-agent dispatch (`operator dial <custom-bot-name>`).
+
+**What stays cut even at Studio launch:**
+- The `OPERATOR_BOT` env-routing indirection (find a cleaner shape).
+- `.env` for API keys (Studio inherits the bridge model — claude-code/codex still own LLM auth even for custom bots).
+
+### Claude Code Plugin — terminal-free experience for Operator users
+
+*Goal:* once the user has run `curl \| sh` once to install Operator, they should never need to open a terminal again. All three commands (`slip` / `dial` / `deploy`) plus `login`, `doctor`, `status`, `tail`, `hangup` are reachable from inside the Claude desktop app via plugin slash commands. The plugin is a **terminal replacement for Operator users** — explicitly not a distribution mechanism for Operator itself, and not an attempt to do anything a plugin can't do.
+
+**Trigger to revisit:** `curl \| sh` install path has 2–4 weeks of real signal (~25+ successful installs, recurring weekly users, no major install-flow regressions). Don't build until then — debugging two install paths simultaneously is the AI-slop trap, and we won't know which slash commands users actually want until we see real-meeting usage patterns.
+
+**Shape verdict (S187 + S190 spikes).** Five shapes considered; only one survives:
+
+| Shape | Description | Verdict |
+|------|-------------|---------|
+| A — cloud bridge | Plugin bridges to a hosted relay; replaces the local CLI entirely | Out of scope — that's the operator-cloud product. |
+| B — bootstrap install | Plugin runs `curl \| sh` at install time | Dead. Postinstall hooks not shipped (Issue [#11240](https://github.com/anthropics/claude-code/issues/11240) still open as of May 2026). |
+| C — skills + transcript MCP only | Plugin ships meeting-aware skills + the bundled transcript server; no command shortcuts | Viable, but partial — doesn't address the user's actual ask (terminal-free CLI access). |
+| D — full runtime as MCP | Re-implement Operator's pipeline as MCP servers running inside Claude | Over-engineered. Plugin can't drive Chrome/Playwright; this just shifts where the impossibility lives. |
+| **E — terminal replacement (chosen)** | **Slash commands shell out to a locally-installed `operator` binary; plugin assumes `curl \| sh` has been run separately** | **Right shape.** Achievable, valuable, scoped. |
+
+**What the plugin ships (Shape E):**
+
+```
+operator-claude-plugin/
+├── .claude-plugin/plugin.json
+├── skills/
+│   ├── slip/SKILL.md         → bash: nohup operator slip claude $ARGUMENTS > /tmp/operator-current.log 2>&1 &
+│   ├── dial/SKILL.md         → bash: nohup operator dial claude $ARGUMENTS > /tmp/operator-current.log 2>&1 &
+│   ├── deploy/SKILL.md       → bash: nohup operator deploy claude $ARGUMENTS > /tmp/operator-current.log 2>&1 &
+│   ├── login/SKILL.md        → bash: operator login claude  (interactive — Google sign-in)
+│   ├── doctor/SKILL.md       → bash: operator doctor
+│   ├── status/SKILL.md       → bash: operator status (reports running command + URL + uptime via marker file)
+│   ├── tail/SKILL.md         → bash: tail -n 50 /tmp/operator-current.log
+│   └── hangup/SKILL.md       → bash: pkill -f "operator (slip|dial|deploy)"
+└── README.md
+```
+
+The slip/dial/deploy slash commands daemonize the call via plain shell (`nohup ... &`) so the user's Claude desktop session is freed immediately. **Backgrounding lives in the plugin's SKILL.md, NOT as an Operator CLI flag** — we explicitly decided in S190 not to add `--background` to Operator since terminal users want foreground/streaming output and shouldn't pay surface-area cost for a hypothetical plugin's ergonomics.
+
+**Bonus inclusions:**
+- The bundled transcript MCP server gets registered via plugin's `.mcp.json` so the user's Claude desktop can query the active meeting's captions via `recall_transcript` — turns Claude desktop into a "second screen" for in-progress meetings.
+- 2–3 meeting-aware skills (e.g., "summarize this meeting so far", "draft a follow-up email from the action items in this meeting") that compose with the transcript MCP.
+
+**User flow:**
+
+```
+[user installs Operator once via curl | sh]
+[user installs the plugin via /plugin install operator]
+
+> /operator:doctor
+[Claude prints checklist — claude binary ✓, Chrome ✓, etc.]
+
+> /operator:slip https://meet.google.com/abc-defg-hij
+[bash returns immediately: "Operator started (PID 12345). Use /operator:hangup to stop."]
+
+[user opens Chrome, joins meeting normally; operator attaches via CDP in background]
+[during meeting: user types @claude in Meet chat; bot responds]
+
+> /operator:transcript what did we just discuss
+[Claude desktop queries the live transcript MCP, summarizes]
+
+> /operator:hangup
+[operator process killed; meeting machinery teardown]
+```
+
+The user spends zero time in iTerm/Terminal.app after the one-time `curl \| sh`.
+
+**Sub-steps (~5h total):**
+
+| Step | Description | Est. |
+|------|-------------|------|
+| 1 | Create `operator-claude-plugin` repo with `.claude-plugin/plugin.json`. Decide name + version + author block. | 30m |
+| 2 | Author 8 slash-command SKILL.md files (slip/dial/deploy/login/doctor/status/tail/hangup). Each is ~20 lines: frontmatter `description` + bash invocation + brief usage hint. | 1h |
+| 3 | Add `operator status` to Operator itself (reads marker file, prints PID + URL + uptime). New CLI subcommand, ~30 LOC. Genuinely useful for terminal users too — not speculative surface like `--background` would have been. | 1h |
+| 4 | Wire transcript MCP into plugin's `.mcp.json` so Claude desktop can call `recall_transcript` against the live meeting's record. Reuses the existing `mcp_servers/transcript_server.py` and the `~/.operator/.current_meeting` marker file. | 30m |
+| 5 | Author 2–3 meeting-aware skills (summarize, draft follow-up, action-item extraction). Reuse logic from any skills the user has already written for this in their personal `~/.claude/skills/`. | 1h |
+| 6 | Submit to the [official Anthropic marketplace](https://github.com/anthropics/claude-plugins-official) via [claude.ai/settings/plugins/submit](https://claude.ai/settings/plugins/submit). Listing copy: "Bring Operator's three meeting-presence modes (slip/dial/deploy) into Claude desktop. Requires Operator installed (curl-script at 1-800-operator.com)." | 30m |
+| 7 | README cross-link — Operator's main README mentions the plugin under a "Prefer to live in Claude desktop?" section. | 15m |
+
+**What this is NOT:**
+- Not a way to install Operator without the curl script. The plugin assumes Operator is already on PATH; if it isn't, slash commands exit with an error pointing to the install URL.
+- Not a replacement for the Playwright/Chrome meeting machinery. That stays in the local Operator binary.
+- Not an attempt to bundle Chromium / Python / Playwright into the plugin (verified non-viable in S190 spike — postinstall hooks missing, plugin size constraints).
+
+**Spike findings to keep in mind:**
+- Plugin model surface (May 2026): `skills/`, `agents/`, `commands/` (legacy), `hooks/hooks.json`, `.mcp.json`, `.lsp.json`, `monitors/monitors.json`, `bin/` (executables on PATH while plugin enabled), `settings.json` (limited to `agent` + `subagentStatusLine` keys).
+- No lifecycle hooks — Issue [#11240](https://github.com/anthropics/claude-code/issues/11240) and [#9394](https://github.com/anthropics/claude-code/issues/9394) both still open. If those land, **revisit Shape B** (plugin bootstrap-installs Operator) — that's the unlock condition.
+- Background monitors (`monitors/`) run inside Claude's session lifetime and pipe stdout to Claude as notifications. Not relevant for Shape E but worth noting if we ever want a "live meeting events stream into Claude desktop" feature.
+- `bin/` directory adds executables to PATH while the plugin is enabled. Not used in Shape E (we want the user's `~/.local/bin/operator` from curl-install, not a plugin-shipped duplicate), but available if needed later.
+
 ### Setup & Onboarding
 | Item | Origin | Description |
 |------|--------|-------------|
-| Setup wizard (full) | 15.1 | `operator setup` — full guided experience: API key entry, voice selection, MCP server auth, model selection UI, rerun-safe state. Minimal version shipped in Phase 15.5.2 (agent-picker + keys + config write); this is the expanded version with voice, MCP OAuth, and polished UX. |
 | Roster expansion | 15.5 | Grow `agents/` beyond the 3 launch members (engineer, pm, designer). **Week-1 seeded PRs (committed session 105):** `debriefer` (joins with prior-meeting context via Granola or local meeting-record search), `spec-scribe` (drafts a PRD from product discussion, opens GitHub PR with the doc), `incident-commander` (opens GitHub issues during incident calls, cross-links, pings oncall), `customer-call` (joins sales/CS calls, files feature requests as Linear tickets in real time), `research` (live web lookup via Tavily MCP, drops citations mid-meeting). **Heavier candidates pending the security pass:** `engineer-bash` (engineer + bash/shell MCP for direct code execution), `scraper` (Playwright MCP for live web scraping), `computer-use` (Anthropic computer-use). Translator and Shopify-expert also queued as voice/vertical examples. Curate community contributions, maintain an `awesome-operator` list for externally-hosted roster members. Ongoing post-launch. |
 | MCP OAuth setup step | 15.2 | Authenticate each MCP server during onboarding so tokens are cached |
 | Auto-populate per-MCP hints | 15.3 | Resolve identity (GitHub `get_me`, etc.) during onboarding |
