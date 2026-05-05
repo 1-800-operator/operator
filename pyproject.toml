@@ -33,6 +33,7 @@ dependencies = [
     "playwright==1.58.0",
     "mcp==1.27.0",
     "ruamel.yaml>=0.18.0",
+    "pyyaml==6.0.3",
     "rich==14.3.3",
     "readchar==4.2.2",
     # Security floors for transitive deps (pip-audit, session 138) — left as
