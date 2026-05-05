@@ -64,7 +64,6 @@ CHROME_USER_DATA_DIR_MACOS = os.path.expanduser("~/Library/Application Support/G
 GRACEFUL_QUIT_TIMEOUT_SECONDS = 5
 PKILL_FALLBACK_TIMEOUT_SECONDS = 5
 RELAUNCH_READY_TIMEOUT_SECONDS = 15
-MEET_TAB_FIND_TIMEOUT_SECONDS = 10
 
 
 class SlipAttachError(RuntimeError):
@@ -73,6 +72,26 @@ class SlipAttachError(RuntimeError):
     Caught by _run_slip and presented to the user as a clean stderr
     message with a fix hint, not a stack trace.
     """
+
+
+def _cdp_endpoint_alive(timeout: float = 1.0) -> bool:
+    """Check if CDP debug endpoint is already accepting connections.
+
+    Used to short-circuit the Chrome quit/relaunch dance when Chrome was
+    already started with --remote-debugging-port=9222 — typically because
+    a prior slip session left it that way. Re-running slip should not
+    require re-quitting Chrome.
+
+    A successful TCP accept on localhost:9222 means *some* Chrome process
+    is exposing CDP; we still verify connect_over_cdp works downstream
+    before committing to the attach path.
+    """
+    import socket
+    try:
+        with socket.create_connection(("localhost", CDP_PORT), timeout=timeout):
+            return True
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        return False
 
 
 def _chrome_is_running() -> bool:
@@ -264,7 +283,13 @@ class AttachAdapter(MeetingConnector):
                 f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
-        if _chrome_is_running():
+        # Probe CDP first — if a prior slip session left Chrome running with
+        # the debug port open, skip the quit/relaunch dance entirely. The
+        # user shouldn't have to re-quit their browser on the second slip.
+        if _cdp_endpoint_alive():
+            log.info(f"AttachAdapter: CDP already alive at {CDP_URL} — attaching to existing Chrome")
+        elif _chrome_is_running():
+            # Chrome running but no debug port — must quit + relaunch.
             if not _confirm_chrome_quit_with_user():
                 js.signal_failure("user_declined_chrome_quit")
                 raise SlipAttachError(
@@ -279,13 +304,20 @@ class AttachAdapter(MeetingConnector):
                         "Could not close Chrome — it is still running after both "
                         "graceful quit and force kill. Quit Chrome manually and re-run."
                     )
-
-        self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
-        try:
-            _wait_for_cdp_ready()
-        except SlipAttachError:
-            js.signal_failure("cdp_not_ready")
-            raise
+            self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
+            try:
+                _wait_for_cdp_ready()
+            except SlipAttachError:
+                js.signal_failure("cdp_not_ready")
+                raise
+        else:
+            # Chrome not running at all — fresh launch with debug port.
+            self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
+            try:
+                _wait_for_cdp_ready()
+            except SlipAttachError:
+                js.signal_failure("cdp_not_ready")
+                raise
 
         self._playwright = sync_playwright().start()
         try:
@@ -298,19 +330,13 @@ class AttachAdapter(MeetingConnector):
                 "Chrome may have launched without the debugging port — try again."
             )
 
-        self._page = self._find_meet_page(meeting_url)
+        self._page = self._find_or_open_meet_page(meeting_url)
         if self._page is None:
             self._teardown_playwright()
-            js.signal_failure("meet_tab_not_found")
-            # save_debug intentionally not called here — at this point we
-            # have the user's other tabs but no Meet tab to screenshot;
-            # snapshotting an unrelated page is more confusing than useful.
-            # 14.19.3b will add save_debug to the in-Meet error paths
-            # (chat observer can't attach, lobby never admits, etc).
+            js.signal_failure("meet_tab_open_failed")
             raise SlipAttachError(
-                f"Could not find a Meet tab pointing at {meeting_url!r} in the "
-                "relaunched Chrome. The tab may have failed to load — open it "
-                "manually and re-run."
+                f"Could not find or open a Meet tab for {meeting_url!r}. "
+                "Open it manually in Chrome and re-run."
             )
         log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
 
@@ -513,27 +539,48 @@ class AttachAdapter(MeetingConnector):
         except Exception as e:
             log.warning(f"AttachAdapter: failed to install chat observer: {e}")
 
-    def _find_meet_page(self, meeting_url):
-        """Locate the Meet tab among the relaunched Chrome's open pages.
+    def _find_or_open_meet_page(self, meeting_url):
+        """Find an existing Meet tab for this exact room, or open a new one.
 
-        Polls every 250ms up to MEET_TAB_FIND_TIMEOUT_SECONDS — the tab
-        we asked Chrome to open isn't always immediately discoverable
-        via CDP (Chrome's startup race). Match by hostname rather than
-        exact URL because Meet appends query strings post-redirect.
+        Strict match on the room-code path (e.g. `/abc-defg-hij`) — not
+        just the meet.google.com host. If the user has another Meet tab
+        open for a different room, attaching to the wrong one would be
+        a silent disaster.
+
+        Polls briefly for fresh-launch races (Chrome was just relaunched
+        with the URL as argv — tab might lag CDP attach by a few hundred
+        ms). If still not found, opens a new tab via Playwright. Covers
+        both relaunch and attach-to-existing-debug-Chrome cases without
+        a parallel code path.
         """
-        target_host = urlparse(meeting_url).netloc
-        deadline = time.monotonic() + MEET_TAB_FIND_TIMEOUT_SECONDS
+        target_path = urlparse(meeting_url).path.rstrip('/')
+
+        # Pass 1: scan for an existing exact-room match. Brief poll (~3s)
+        # handles the post-relaunch race where Chrome's tab list hasn't
+        # propagated to CDP yet.
+        deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             for context in self._browser.contexts:
                 for page in context.pages:
                     try:
-                        host = urlparse(page.url).netloc
+                        if urlparse(page.url).path.rstrip('/') == target_path:
+                            log.info(f"AttachAdapter: found existing Meet tab at {page.url}")
+                            return page
                     except Exception:
                         continue
-                    if host == target_host:
-                        return page
             time.sleep(0.25)
-        return None
+
+        # Pass 2: not found — open a new tab with the URL. This is the
+        # path for "attach to existing debug Chrome where this room
+        # isn't currently open."
+        log.info(f"AttachAdapter: no existing tab for {meeting_url} — opening new tab")
+        try:
+            page = self._browser.contexts[0].new_page()
+            page.goto(meeting_url, wait_until="domcontentloaded", timeout=30000)
+            return page
+        except Exception as e:
+            log.warning(f"AttachAdapter: failed to open new tab: {e}")
+            return None
 
     def _teardown_playwright(self):
         if self._browser is not None:
