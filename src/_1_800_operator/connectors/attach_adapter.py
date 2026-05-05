@@ -114,6 +114,39 @@ def _chrome_is_running() -> bool:
         return False
 
 
+def _clear_stale_singleton_lock() -> bool:
+    """Remove the Chrome SingletonLock symlink if its PID is dead.
+
+    Chrome's exit path normally clears this, but on fast quit/relaunch
+    sequences (graceful osascript quit immediately followed by `open -na`)
+    the lock can persist for a moment. A new Chrome instance launched
+    against a locked user-data-dir won't expose `--remote-debugging-port`
+    cleanly — it either silently merges with the existing-but-quitting
+    process or skips the flag.
+
+    Reuses _chrome_lock_is_live from connectors/session.py — same
+    PID-existence-check logic macos_adapter uses for its own lock dance.
+    Returns True if a stale lock was removed; False otherwise.
+    """
+    from .session import _chrome_lock_is_live
+    lock_path = os.path.join(CHROME_USER_DATA_DIR_MACOS, "SingletonLock")
+    if not (os.path.islink(lock_path) or os.path.exists(lock_path)):
+        return False
+    if _chrome_lock_is_live(lock_path):
+        log.warning(
+            "AttachAdapter: SingletonLock points to a live PID — "
+            "not removing (Chrome may still be quitting)"
+        )
+        return False
+    try:
+        os.remove(lock_path)
+        log.info("AttachAdapter: removed stale SingletonLock")
+        return True
+    except OSError as e:
+        log.warning(f"AttachAdapter: could not remove stale SingletonLock: {e}")
+        return False
+
+
 def _chrome_quit_graceful() -> bool:
     """Ask Chrome to quit via AppleScript. Returns True if Chrome exits
     within GRACEFUL_QUIT_TIMEOUT_SECONDS, False otherwise.
@@ -335,6 +368,13 @@ class AttachAdapter(MeetingConnector):
                         "Could not close Chrome — it is still running after both "
                         "graceful quit and force kill. Quit Chrome manually and re-run."
                     )
+            # Settle: Chrome's main process is dead, but Helper subprocesses
+            # may still be exiting and the SingletonLock may still be on
+            # disk. A new Chrome launched while either is true won't expose
+            # --remote-debugging-port cleanly. 1.5s is comfortably above
+            # the helper-cleanup window observed in practice.
+            time.sleep(1.5)
+            _clear_stale_singleton_lock()
             self._chrome_proc = _launch_chrome_with_debug_port(meeting_url)
             try:
                 _wait_for_cdp_ready()
