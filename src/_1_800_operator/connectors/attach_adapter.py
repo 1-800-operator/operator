@@ -93,6 +93,73 @@ class SlipAttachError(RuntimeError):
     """
 
 
+def _evict_other_chrome_on_cdp_port() -> bool:
+    """Kill the non-slip Chrome process holding CDP_PORT, if any.
+
+    slip launches its own dedicated Chrome with --remote-debugging-port=9222.
+    If port 9222 is already held by some other Chrome (a leftover spike,
+    a debugger window from another tool, a stale instance from a crashed
+    slip session) we silently SIGTERM that Chrome ourselves rather than
+    asking the user to run pkill. Identifies the PID via lsof, verifies
+    it's a Chrome process via ps, then sends SIGTERM. Escalates to
+    SIGKILL after 2s if it doesn't exit.
+
+    Returns True if a Chrome was evicted; False if no Chrome was found
+    on the port or eviction failed.
+    """
+    try:
+        r = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{CDP_PORT}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return False
+        pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+    except Exception as e:
+        log.warning(f"AttachAdapter: lsof failed during eviction: {e}")
+        return False
+
+    evicted_any = False
+    for pid in pids:
+        try:
+            ps_r = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            )
+            command = ps_r.stdout.strip()
+            if "Google Chrome" not in command:
+                # Whatever's on 9222 isn't Chrome — leave it alone, slip
+                # will fail downstream with a clearer launch error.
+                log.warning(
+                    f"AttachAdapter: pid {pid} on port {CDP_PORT} is not "
+                    f"Chrome ({command[:80]!r}) — not evicting"
+                )
+                continue
+            log.info(f"AttachAdapter: evicting non-slip Chrome pid={pid}")
+            os.kill(pid, 15)  # SIGTERM
+            # Wait up to 2s for graceful exit, escalate to SIGKILL if needed
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)  # check if alive
+                    time.sleep(0.1)
+                except OSError:
+                    evicted_any = True
+                    break
+            else:
+                try:
+                    os.kill(pid, 9)  # SIGKILL
+                    log.warning(f"AttachAdapter: SIGKILL'd pid={pid} after SIGTERM timeout")
+                    evicted_any = True
+                except Exception as e:
+                    log.warning(f"AttachAdapter: SIGKILL failed pid={pid}: {e}")
+        except ProcessLookupError:
+            # Already gone
+            evicted_any = True
+        except Exception as e:
+            log.warning(f"AttachAdapter: eviction failed pid={pid}: {e}")
+    return evicted_any
+
+
 def _cdp_belongs_to_slip() -> bool:
     """True iff the Chrome currently listening on CDP_PORT was launched
     against SLIP_PROFILE_DIR.
@@ -224,11 +291,7 @@ def _wait_for_cdp_ready(timeout_seconds: int = CDP_READY_TIMEOUT_SECONDS) -> Non
             time.sleep(0.1)
     log.warning(f"AttachAdapter: CDP timeout after {timeout_seconds}s")
     raise SlipAttachError(
-        f"Slip Chrome's CDP endpoint at {CDP_URL} did not become ready "
-        f"within {timeout_seconds}s. Chrome may have crashed during launch — "
-        "try `pkill -f operator-slip-chrome` then re-run. If the problem "
-        "persists, delete ~/.operator/slip_profile/ to start with a fresh "
-        "profile."
+        "Slip Chrome didn't come up in time. Try running slip again."
     )
 
 
@@ -289,26 +352,22 @@ class AttachAdapter(MeetingConnector):
                 f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
-        # Probe CDP. Three cases:
-        #   - alive AND belongs to slip Chrome → reuse instantly (Ctrl+C
-        #     and re-run case)
-        #   - alive but NOT slip's Chrome → another debugger Chrome is on
-        #     port 9222 (leftover validation spike, manual debug session,
-        #     conflicting tool). Refuse — attaching to it fails with
-        #     confusing downstream errors and isn't what the user wants.
-        #   - not alive → launch slip Chrome fresh.
-        if _cdp_endpoint_alive():
-            if _cdp_belongs_to_slip():
-                log.info(f"AttachAdapter: CDP at {CDP_URL} is slip Chrome — reusing")
-            else:
-                js.signal_failure("port_9222_in_use_by_other_chrome")
-                raise SlipAttachError(
-                    f"Port {CDP_PORT} is in use by another Chrome process — not "
-                    f"slip's. Find it with `lsof -nP -iTCP:{CDP_PORT} -sTCP:LISTEN` "
-                    f"and quit it, or run `pkill -f 'remote-debugging-port={CDP_PORT}'` "
-                    "to clear it. Then re-run slip."
-                )
+        # Probe CDP. Three cases, all handled silently:
+        #   - alive AND belongs to slip Chrome → reuse (Ctrl+C and re-run)
+        #   - alive but NOT slip's Chrome → silently SIGTERM that Chrome,
+        #     then launch our own (handles leftover spikes, stale
+        #     debugger sessions, crashed previous slip Chromes)
+        #   - not alive → launch slip Chrome fresh
+        if _cdp_endpoint_alive() and _cdp_belongs_to_slip():
+            log.info(f"AttachAdapter: CDP at {CDP_URL} is slip Chrome — reusing")
         else:
+            if _cdp_endpoint_alive():
+                # Some other Chrome is hogging the port. Evict it
+                # silently — the user shouldn't have to know.
+                _evict_other_chrome_on_cdp_port()
+                # Brief settle so the kernel releases the port before
+                # we try to bind.
+                time.sleep(0.5)
             self._chrome_proc = _launch_slip_chrome(meeting_url)
             try:
                 _wait_for_cdp_ready()
@@ -322,13 +381,10 @@ class AttachAdapter(MeetingConnector):
         except Exception as e:
             self._teardown_playwright()
             js.signal_failure("cdp_attach_failed")
+            log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
             raise SlipAttachError(
-                f"Playwright could not attach to Chrome at {CDP_URL}.\n"
-                f"  Underlying error: {e}\n"
-                "If you see 'Browser context management is not supported', the "
-                "Chrome on port 9222 may not be slip's. Try `pkill -f "
-                f"'remote-debugging-port={CDP_PORT}'` to clear stale Chromes, "
-                "then re-run."
+                "Slip couldn't attach to its Chrome window. Try running "
+                "slip again — the connection sometimes settles on a retry."
             )
 
         self._page = self._find_or_open_meet_page(meeting_url)
