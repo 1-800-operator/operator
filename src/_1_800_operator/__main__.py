@@ -735,14 +735,13 @@ def main():
             os.environ["OPERATOR_YOLO"] = "1"
         return _run_bot(name, [url] + rest)
 
-    # Phase 14.19.2 — `slip <name> [url]`. CDP-attach to user's existing
+    # Phase 14.19.2/3 — `slip <name> <url>`. CDP-attach to user's existing
     # Chrome session; agent responds *as the user* with a marker prefix.
-    # Implementation lives in connectors/attach_adapter.py (Phase 14.19.3);
-    # this branch is a stub that exits with the deferred-implementation
-    # message until that lands.
+    # claude-only in v0.0.1; URL required (no meet.new auto-open in slip
+    # because the meeting is whatever the user has open).
     if first == "slip":
         if len(argv) < 2:
-            print("Usage: operator slip <name> [url]\n")
+            print("Usage: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>\n")
             _print_usage()
             return 2
         name = argv[1]
@@ -750,7 +749,10 @@ def main():
             print(f"Unknown bot: {name!r}\n")
             _print_usage()
             return 2
-        return _run_slip(name, argv[2:])
+        rest, yolo = _consume_yolo(argv[2:])
+        if yolo:
+            os.environ["OPERATOR_YOLO"] = "1"
+        return _run_slip(name, rest)
 
     if first.startswith("-"):
         print(f"Unknown option: {first}\n")
@@ -899,19 +901,195 @@ def _consume_yolo(args):
 def _run_slip(name, rest):
     """slip mode — CDP-attach to user's existing Chrome.
 
-    Stub for Phase 14.19.2. Real implementation lands in 14.19.3 in a new
-    connectors/attach_adapter.py: detect running Chrome → prompt to quit →
-    relaunch with --remote-debugging-port=9222 → connect_over_cdp → find
-    Meet tab → install observers. Reply attribution prefix injected at
-    the connector layer in send_chat().
+    Pipeline mirrors _run_macos's construction but swaps connectors and
+    drops two layers: the meet.new auto-open path (slip always takes a
+    URL — the meeting is whatever the user has open) and the auto-open-
+    in-default-browser step (Chrome IS the user's browser already).
+    Track A only — claude owns its MCPs; no MCPClient setup. Caption
+    capture is deferred to 14.19.3c.5 (STT-based, Swift binaries +
+    Whisper); this commit lands chat-only slip end-to-end.
+
+    OPERATOR_BOT=claude is set early (temporary; 14.19.7 deletes the
+    config layer entirely).
     """
-    print(
-        "slip mode is not yet implemented (Phase 14.19.3 — CDP attach in "
-        "connectors/attach_adapter.py). Use `operator dial claude` or "
-        "`operator deploy claude <url>` for now.",
-        file=sys.stderr,
+    if name != "claude":
+        print(
+            f"slip mode is claude-only in v0.0.1; got {name!r}. "
+            f"Use `operator dial {name}` or `operator deploy {name} <url>` instead.",
+            file=sys.stderr,
+        )
+        return 2
+
+    url = None
+    for arg in rest:
+        if arg.startswith("-"):
+            print(f"Unknown flag: {arg}", file=sys.stderr)
+            return 2
+        elif url is None:
+            url = arg
+        else:
+            print(f"Unexpected argument: {arg}", file=sys.stderr)
+            return 2
+
+    if not url:
+        print(
+            "slip requires a Meet URL: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>",
+            file=sys.stderr,
+        )
+        return 2
+
+    if sys.platform != "darwin":
+        print(
+            "slip mode is currently macOS-only. Use `operator dial claude` or "
+            "`operator deploy claude <url>` on Linux.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Set OPERATOR_BOT before any config import — config.py exits 2 on import
+    # without it. Pipeline modules read it transitively. Phase 14.19.7
+    # collapses this when the config layer dies.
+    os.environ["OPERATOR_BOT"] = name
+
+    # claude binary preflight — same gate _run_bot uses for the claude agent.
+    # Fail loud and early; no browser dance, no config load if claude isn't
+    # installed or logged in.
+    from _1_800_operator.pipeline.claude_code_import import (
+        claude_code_installed_and_logged_in,
     )
-    return 2
+    ok, reason = claude_code_installed_and_logged_in()
+    if not ok:
+        print(
+            f"\nslip claude requires the Claude Code CLI.\n"
+            f"  {reason}\n"
+            f"\nInstall Claude Code (https://claude.ai/code) and run "
+            f"`claude login`, then re-run.\n",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Sync claude MCPs (parity with _run_bot — picks up servers added/removed
+    # in ~/.claude.json since last run).
+    import time as _time_init
+    _t_sync = _time_init.monotonic()
+    _sync_claude_imports()
+
+    import logging
+    import signal
+    import time as _time
+
+    logging.basicConfig(
+        filename="/tmp/operator.log",
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    )
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    log = logging.getLogger("operator")
+    log.info(f"TIMING claude_sync={_time.monotonic() - _t_sync:.2f}s")
+
+    from _1_800_operator import config
+    from _1_800_operator.bridges import claude as claude_bridge
+    from _1_800_operator.connectors.attach_adapter import AttachAdapter, SlipAttachError
+    from _1_800_operator.pipeline import ui
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.llm import LLMClient
+    from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
+    from _1_800_operator.pipeline.providers import build_provider
+    from _1_800_operator.pipeline.skills import load_skills
+
+    # Track A guard — slip is claude-only and claude is the only track-A
+    # provider. If something exotic is wired in config, fail before the
+    # user's Chrome gets quit.
+    if config.LLM_PROVIDER != "claude_cli":
+        print(
+            f"slip mode requires the claude_cli LLM provider; "
+            f"config has {config.LLM_PROVIDER!r}. Re-import claude or check "
+            f"~/.operator/agents/claude/config.yaml.",
+            file=sys.stderr,
+        )
+        return 2
+
+    t_start = _time.monotonic()
+
+    skills = load_skills(
+        config.SKILLS_ENABLED,
+        external_paths=config.SKILLS_EXTERNAL_PATHS,
+        shared_library_dir=config.SKILLS_SHARED_LIBRARY,
+    )
+    _print_startup_banner(skills)
+
+    # Build meeting record up-front — URL is known, no meet.new resolution
+    # gymnastics needed. The transcript MCP server (spawned by claude via
+    # --mcp-config) reads from this path.
+    slug = slug_from_url(url)
+    meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
+
+    llm = LLMClient(build_provider())
+    llm.inject_skills(skills, config.SKILLS_PROGRESSIVE_DISCLOSURE)
+    llm.set_record(meeting_record)
+
+    # Active-meeting marker (parity with _run_macos — useful for any
+    # static-config MCPs that need the active meeting JSONL path).
+    try:
+        marker = Path.home() / ".operator" / ".current_meeting"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(meeting_record.path), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"could not write current-meeting marker: {e}")
+
+    connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
+
+    ui.say("Attaching to your Chrome…")
+    try:
+        connector.join(url)
+    except SlipAttachError as e:
+        ui.err(str(e))
+        return 2
+
+    log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")
+    runner = ChatRunner(
+        connector,
+        llm,
+        mcp_client=None,  # track A — claude owns its MCPs
+        meeting_record=meeting_record,
+        skills=skills,
+        skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
+    )
+
+    _shutdown_called = False
+
+    def _shutdown(signum=None, frame=None):
+        nonlocal _shutdown_called
+        if _shutdown_called:
+            return
+        _shutdown_called = True
+        if signum:
+            log.info(f"Received signal {signum} — shutting down")
+        runner.stop()
+        try:
+            marker = Path.home() / ".operator" / ".current_meeting"
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
+        connector.leave()
+        _kill_orphaned_children()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        log.info(f"Starting Operator slip mode — attached to {url}")
+        runner.run(url)
+    except KeyboardInterrupt:
+        log.info("Interrupted — detaching")
+    finally:
+        _shutdown()
+        ui.ok("Detached from Chrome — your browser stays open. Goodbye.")
+    return 0
 
 
 def _run_bot(name, rest):
