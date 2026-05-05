@@ -103,11 +103,18 @@ class ChatRunner:
         meeting_record: MeetingRecord | None = None,
         skills: list | None = None,
         skills_progressive: bool = True,
+        quiet_mode: bool = False,
     ):
         self._connector = connector
         self._llm = llm
         self._mcp = mcp_client
         self._record = meeting_record
+        # Slip mode: claude is "speak when spoken to." No intro, no
+        # "Hold for Claude..." filler, no 1-on-1 trigger bypass —
+        # claude only responds when explicitly addressed via
+        # config.TRIGGER_PHRASE. Dial/deploy leave this False so the
+        # original speak-up behavior holds.
+        self._quiet_mode = quiet_mode
         self._stop_event = threading.Event()
         # Track messages we've sent so we can ignore our own echoes
         self._own_messages: set[str] = set()
@@ -137,7 +144,10 @@ class ChatRunner:
         # for in-order replay once the intro posts.
         self._intro_ready = threading.Event()
         self._intro_text = ""
-        self._intro_posted = not config.INTRO_ON_JOIN
+        # Quiet mode forces _intro_posted=True so the polling loop never
+        # generates / sends an intro and never buffers pre-intro user
+        # messages. Equivalent effect to INTRO_ON_JOIN=False.
+        self._intro_posted = self._quiet_mode or (not config.INTRO_ON_JOIN)
         self._hold_posted_at: float | None = None
         self._pre_intro_buffer: list[dict] = []
         # Progress narrator state (track A only). _last_send_time is
@@ -329,7 +339,9 @@ class ChatRunner:
         except Exception:
             seed_count = 0
         trigger = config.TRIGGER_PHRASE
-        if seed_count and seed_count <= ONE_ON_ONE_THRESHOLD:
+        if self._quiet_mode:
+            ui.ok(f"Listening for @{trigger} — quiet mode (won't speak unless addressed).")
+        elif seed_count and seed_count <= ONE_ON_ONE_THRESHOLD:
             ui.ok(f"Joined as @{trigger} · solo (1-on-1 mode)")
         elif seed_count:
             ui.ok(f"Joined as @{trigger} · {seed_count} participants")
@@ -459,7 +471,7 @@ class ChatRunner:
             # floor. We also kick off intro generation here (rather than at
             # run() start) so we can scrape participant names/count first
             # and bake them into the LLM prompt.
-            if self._hold_posted_at is None and saw_others:
+            if not self._quiet_mode and self._hold_posted_at is None and saw_others:
                 self._send(f"Hold for {config.AGENT_NAME}...")
                 self._hold_posted_at = time.time()
                 if config.INTRO_ON_JOIN:
@@ -542,7 +554,11 @@ class ChatRunner:
                         self._connector.leave()
                         return
 
-            one_on_one = participant_count <= ONE_ON_ONE_THRESHOLD
+            # Quiet mode (slip) requires the trigger phrase regardless of
+            # participant count — claude must be explicitly addressed.
+            # Dial/deploy keep the 1-on-1 bypass since claude is a
+            # separate participant and ambient chat IS for it.
+            one_on_one = (not self._quiet_mode) and (participant_count <= ONE_ON_ONE_THRESHOLD)
 
             # Track which own-message texts matched this batch so we can
             # discard AFTER the full batch — Meet creates multiple DOM

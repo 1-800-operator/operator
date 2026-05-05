@@ -1060,6 +1060,10 @@ def _run_slip(name, rest):
         meeting_record=meeting_record,
         skills=skills,
         skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
+        # slip is "speak when spoken to": no intro, no Hold-for-Claude
+        # filler, no 1-on-1 trigger bypass. claude only responds when
+        # explicitly @claude'd. dial/deploy leave this default.
+        quiet_mode=True,
     )
 
     _shutdown_called = False

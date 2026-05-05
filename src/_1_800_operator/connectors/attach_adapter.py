@@ -457,7 +457,18 @@ class AttachAdapter(MeetingConnector):
             return None
 
     def read_chat(self):
-        """Drain the JS-side chat queue. Mirrors MacOSAdapter._do_read_chat."""
+        """Drain the JS-side chat queue. Mirrors MacOSAdapter._do_read_chat.
+
+        Slip-mode quirk: send_chat prepends self._reply_prefix (🤖 ) to
+        outgoing messages so the room can distinguish claude's words from
+        the user's typing. The DOM observer reads back the prefixed
+        text. ChatRunner's _own_messages dedup set stores the
+        UN-prefixed text (what ChatRunner._send received). Without
+        normalization the text-match dedup misses, the bot's own
+        messages get treated as new user input, and a self-reply
+        cascade kicks off. Strip the prefix here so the text passed
+        upstream matches what was added to _own_messages.
+        """
         if self._page is None:
             return []
         self._ensure_chat_open(self._page)
@@ -466,6 +477,11 @@ class AttachAdapter(MeetingConnector):
             messages = self._page.evaluate(DRAIN_CHAT_QUEUE_JS)
             if messages:
                 log.debug(f"AttachAdapter: observer drained {len(messages)} new messages")
+            if self._reply_prefix and messages:
+                for msg in messages:
+                    text = msg.get("text", "")
+                    if text.startswith(self._reply_prefix):
+                        msg["text"] = text[len(self._reply_prefix):]
             return messages
         except Exception as e:
             log.warning(f"AttachAdapter: read_chat failed: {e}")
