@@ -94,7 +94,7 @@ echo
 
 bold "Downloading Playwright Chromium runtime (~170 MB)..."
 # Run via uv tool so we use the same env operator uses.
-uv tool run --python "${UV_PY_SPEC}" --from playwright playwright install chromium
+uv tool run --python "${UV_PY_SPEC}" --from "git+${REPO_URL}" playwright install chromium
 echo
 
 # -- 6. Seed ~/.operator/.env ------------------------------------------------

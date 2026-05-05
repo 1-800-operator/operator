@@ -176,10 +176,15 @@ def _sync_claude_imports() -> None:
     for name, _url, status, healthy in discover_mcp_health():
         if healthy:
             continue
-        srv = new_overlay.get(_slugify_mcp_name(name))
+        slug = _slugify_mcp_name(name)
+        srv = new_overlay.get(slug)
         if isinstance(srv, dict) and not srv.get("enabled", True):
             continue
-        print(f"[claude] ⚠ MCP needs attention: {name} — {status}", file=sys.stderr)
+        print(
+            f"[claude] ⚠ MCP needs attention: {name} — {status} "
+            f"→ run `operator auth {slug}`",
+            file=sys.stderr,
+        )
 
 
 def _ensure_user_agents():
