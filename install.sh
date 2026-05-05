@@ -5,13 +5,14 @@
 #   curl -LsSf https://1-800-operator.com/install | sh
 #
 # What this script does (read before piping to sh):
-#   1. Verifies macOS or Linux, Python >= 3.10.
+#   1. Verifies macOS or Linux.
 #   2. Installs `uv` (Astral's package manager) if not already present.
-#   3. Installs the `operator` CLI via `uv tool install` from this repo.
-#   4. Downloads Playwright's Chromium runtime (~170 MB).
-#   5. Seeds ~/.operator/.env with commented API-key placeholders.
-#   6. On macOS, checks for Google Chrome and prints an install nudge if missing.
-#   7. Verifies `operator` is on PATH.
+#   3. Provisions Python 3.12 via `uv` if the system Python is < 3.10.
+#   4. Installs the `operator` CLI via `uv tool install` from this repo.
+#   5. Downloads Playwright's Chromium runtime (~170 MB).
+#   6. Seeds ~/.operator/.env with commented API-key placeholders.
+#   7. On macOS, checks for Google Chrome and prints an install nudge if missing.
+#   8. Verifies `operator` is on PATH.
 #
 # Idempotent — safe to re-run. Does not modify shell rc files.
 
@@ -30,7 +31,7 @@ err()  { printf '\033[31m  %s\033[0m\n' "$1" >&2; }
 bold "Operator installer"
 echo
 
-# -- 1. OS + Python preflight ------------------------------------------------
+# -- 1. OS detection ---------------------------------------------------------
 
 case "$(uname -s)" in
   Darwin) OS=macos ;;
@@ -38,19 +39,6 @@ case "$(uname -s)" in
   *) err "Unsupported OS: $(uname -s). Operator runs on macOS and Linux."; exit 1 ;;
 esac
 info "Detected OS: ${OS}"
-
-if ! command -v python3 >/dev/null 2>&1; then
-  err "python3 not found. Install Python ${MIN_PY_MAJOR}.${MIN_PY_MINOR}+ and re-run."
-  exit 1
-fi
-
-PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-PY_OK="$(python3 -c "import sys; print(1 if sys.version_info >= (${MIN_PY_MAJOR}, ${MIN_PY_MINOR}) else 0)")"
-if [ "${PY_OK}" != "1" ]; then
-  err "Python ${MIN_PY_MAJOR}.${MIN_PY_MINOR}+ required (found ${PY_VERSION})."
-  exit 1
-fi
-info "Detected Python: ${PY_VERSION}"
 echo
 
 # -- 2. uv bootstrap ---------------------------------------------------------
@@ -71,20 +59,39 @@ fi
 info "uv: $(uv --version)"
 echo
 
-# -- 3. Operator install via uv tool -----------------------------------------
+# -- 3. Python preflight (uv-provisioned if needed) --------------------------
 
-bold "Installing operator..."
-uv tool install --force "git+${REPO_URL}"
+PY_OK=0
+if command -v python3 >/dev/null 2>&1; then
+  PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  PY_OK="$(python3 -c "import sys; print(1 if sys.version_info >= (${MIN_PY_MAJOR}, ${MIN_PY_MINOR}) else 0)")"
+  info "System Python: ${PY_VERSION}"
+fi
+
+if [ "${PY_OK}" != "1" ]; then
+  bold "Installing Python 3.12 via uv (system Python is < ${MIN_PY_MAJOR}.${MIN_PY_MINOR})..."
+  uv python install 3.12
+fi
 echo
 
-# -- 4. Playwright Chromium runtime ------------------------------------------
+# -- 4. Operator install via uv tool -----------------------------------------
+
+# Pin uv to a >= 3.10 interpreter. If the system Python is too old, this picks
+# the uv-managed one provisioned in step 3.
+UV_PY_SPEC=">=${MIN_PY_MAJOR}.${MIN_PY_MINOR}"
+
+bold "Installing operator..."
+uv tool install --force --python "${UV_PY_SPEC}" "git+${REPO_URL}"
+echo
+
+# -- 5. Playwright Chromium runtime ------------------------------------------
 
 bold "Downloading Playwright Chromium runtime (~170 MB)..."
 # Run via uv tool so we use the same env operator uses.
-uv tool run --from "git+${REPO_URL}" playwright install chromium
+uv tool run --python "${UV_PY_SPEC}" --from "git+${REPO_URL}" playwright install chromium
 echo
 
-# -- 5. Seed ~/.operator/.env ------------------------------------------------
+# -- 6. Seed ~/.operator/.env ------------------------------------------------
 
 mkdir -p "${HOME}/.operator"
 if [ ! -f "${ENV_PATH}" ]; then
@@ -109,7 +116,7 @@ else
 fi
 echo
 
-# -- 6. macOS Chrome cask nudge ----------------------------------------------
+# -- 7. macOS Chrome cask nudge ----------------------------------------------
 
 if [ "${OS}" = "macos" ]; then
   if [ ! -d "/Applications/Google Chrome.app" ]; then
@@ -122,7 +129,7 @@ if [ "${OS}" = "macos" ]; then
   fi
 fi
 
-# -- 7. Verify on PATH -------------------------------------------------------
+# -- 8. Verify on PATH -------------------------------------------------------
 
 if ! command -v operator >/dev/null 2>&1; then
   warn "operator installed but not on PATH yet."
