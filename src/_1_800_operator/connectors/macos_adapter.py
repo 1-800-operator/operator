@@ -599,7 +599,17 @@ class MacOSAdapter(MeetingConnector):
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=BROWSER_PROFILE,
                     headless=True,
-                    args=["--use-fake-ui-for-media-stream", "--mute-audio"],
+                    args=[
+                        "--use-fake-ui-for-media-stream",
+                        # Synthesize a fake mic/cam so Chromium never tries to
+                        # access the real device — sidesteps the macOS-level
+                        # "allow microphone access?" prompt that the
+                        # `-ui-` flag alone can't bypass. Operator is chat-only;
+                        # there's no audio capture path that would need a real
+                        # mic anyway.
+                        "--use-fake-device-for-media-stream",
+                        "--mute-audio",
+                    ],
                 )
                 t_browser = time.monotonic()
                 log.info(f"TIMING browser_launch={t_browser - t_start:.1f}s")
