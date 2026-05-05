@@ -634,16 +634,34 @@ class MacOSAdapter(MeetingConnector):
                     if meeting_url is None:
                         log.info("MacOSAdapter: opening meet.new for fresh meeting")
                         page.goto("https://meet.new", wait_until="domcontentloaded", timeout=30000)
-                        try:
-                            page.wait_for_url(_is_real_meet_room, timeout=30000)
-                        except Exception as e:
-                            log.error(f"MacOSAdapter: meet.new did not redirect to a meeting URL: {e}")
+                        # meet.new normally redirects straight to a real meeting URL.
+                        # On a fresh persistent profile (first-time mic/cam state)
+                        # Meet may instead sit on `/new` and show a
+                        # "Do you want people to see and hear you in the meeting?"
+                        # interstitial with a "Continue without microphone and
+                        # camera" button. Poll for both: if the interstitial
+                        # appears first, click it to unblock the redirect.
+                        deadline = time.monotonic() + 30.0
+                        redirected = False
+                        while time.monotonic() < deadline:
+                            if _is_real_meet_room(page.url):
+                                redirected = True
+                                break
+                            try:
+                                decline = page.get_by_text("Continue without microphone and camera")
+                                if decline.count() > 0 and decline.first.is_visible():
+                                    decline.first.click()
+                                    log.info("MacOSAdapter: dismissed pre-redirect interstitial (Continue without microphone and camera)")
+                                    page.wait_for_timeout(500)
+                                    continue
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(500)
+                        if not redirected:
+                            log.error("MacOSAdapter: meet.new did not redirect to a meeting URL: timeout 30s")
                             # Snapshot the page so we can see what Meet was showing
                             # at the timeout (blank page? sign-in interstitial?
-                            # workspace consent? anti-automation challenge?). Without
-                            # this, the user only sees the misleading "did not
-                            # redirect" message — the screenshot is the fastest path
-                            # to root cause for first-time-on-new-machine failures.
+                            # workspace consent? anti-automation challenge?).
                             try:
                                 save_debug(page, "meet_new_no_redirect")
                             except Exception as _e:
