@@ -88,7 +88,7 @@ echo
 
 bold "Downloading Playwright Chromium runtime (~170 MB)..."
 # Run via uv tool so we use the same env operator uses.
-uv tool run --python "${UV_PY_SPEC}" --from "git+${REPO_URL}" playwright install chromium
+uv tool run --python "${UV_PY_SPEC}" --from playwright playwright install chromium
 echo
 
 # -- 6. Seed ~/.operator/.env ------------------------------------------------
@@ -141,5 +141,6 @@ fi
 bold "Done."
 echo
 info "Next: run \`operator setup\` to configure your first agent."
-info "Then \`operator dial claude\` (or your bot name) to join a meeting."
+info "Or \`operator dial claude\` (or your bot name) to join a meeting."
+info "Or \`operator dial claude <meet-url>\` to join a specific meeting."
 info "Docs: https://github.com/1-800-operator/operator"
