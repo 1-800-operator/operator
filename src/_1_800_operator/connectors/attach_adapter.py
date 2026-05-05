@@ -37,8 +37,17 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
+from _1_800_operator import config
+
 from .base import MeetingConnector
-from .session import JoinStatus
+from .chat_dom_js import (
+    DRAIN_CHAT_QUEUE_JS,
+    GET_PARTICIPANT_NAMES_JS,
+    INSTALL_CHAT_OBSERVER_JS,
+    OBSERVER_ATTACHED_CHECK_JS,
+    SNAPSHOT_MESSAGE_IDS_JS,
+)
+from .session import JoinStatus, save_debug
 # Reuse the strict Meet-room URL check from macos_adapter (matches the
 # `abc-defg-hij` room-code pattern, rejects /landing, /lookup, /new, etc).
 # Cross-adapter import of a private helper is a temporary smell — if a
@@ -207,9 +216,10 @@ def _wait_for_cdp_ready(timeout_seconds: int = RELAUNCH_READY_TIMEOUT_SECONDS) -
 class AttachAdapter(MeetingConnector):
     """MeetingConnector for slip mode — CDP-attached to user's Chrome.
 
-    Chat methods (send/read/participants) raise NotImplementedError until
-    Phase 14.19.3b lands the chat-observer wiring. is_connected and
-    leave are functional from this commit onward.
+    Chat methods (send/read/participants) and Chrome lifecycle (join/
+    is_connected/leave) all functional from 14.19.3b onward. Wired into
+    `operator slip` in 14.19.3c (which builds the LLM/MCP/ChatRunner
+    pipeline and hands the adapter to ChatRunner.run()).
     """
 
     def __init__(self, reply_prefix: str = ""):
@@ -219,6 +229,7 @@ class AttachAdapter(MeetingConnector):
         self._browser = None
         self._page = None
         self._chrome_proc = None
+        self._observer_installed = False
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -305,19 +316,80 @@ class AttachAdapter(MeetingConnector):
         js.signal_success()
 
     def send_chat(self, message):
-        raise NotImplementedError(
-            "Phase 14.19.3b will wire the chat observer + send/read."
-        )
+        """Post a message to chat with the slip-mode reply prefix.
+
+        Mirrors MacOSAdapter._do_send_chat: snapshot existing IDs,
+        fill the textarea, send, poll every 50ms (up to 1s) for one
+        new ID. Returns the new data-message-id, or None on timeout
+        (caller falls back to text-match dedup).
+
+        slip-mode quirk: the message is prefixed with self._reply_prefix
+        (e.g. '🤖 ') so the room can distinguish claude's words from the
+        user's own typing. Empty prefix (dial/deploy) means no marker.
+
+        Direct call — no queue/thread bridging needed because slip runs
+        playwright on the same thread that drives ChatRunner. The
+        queue dance in MacOSAdapter exists to bridge main → browser
+        thread under launch_persistent_context; CDP-attach has no
+        background thread.
+        """
+        if self._page is None:
+            return None
+        full_message = f"{self._reply_prefix}{message}" if self._reply_prefix else message
+        self._ensure_chat_open(self._page)
+        try:
+            pre_ids = set(self._page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
+            input_box = self._page.locator('textarea[aria-label="Send a message"]')
+            input_box.wait_for(timeout=5000)
+            input_box.fill(full_message)
+            input_box.press("Enter")
+            log.info(f"AttachAdapter: chat sent: {full_message!r}")
+            for _ in range(20):
+                current = set(self._page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
+                new_ids = current - pre_ids
+                if new_ids:
+                    return next(iter(new_ids))
+                time.sleep(0.05)
+            log.debug("AttachAdapter: send_chat ID-readback timed out — caller will fall back to text-match dedup")
+            return None
+        except Exception as e:
+            log.warning(f"AttachAdapter: send_chat failed: {e}")
+            return None
 
     def read_chat(self):
-        raise NotImplementedError(
-            "Phase 14.19.3b will wire the chat observer + send/read."
-        )
+        """Drain the JS-side chat queue. Mirrors MacOSAdapter._do_read_chat."""
+        if self._page is None:
+            return []
+        self._ensure_chat_open(self._page)
+        self._install_chat_observer(self._page)
+        try:
+            messages = self._page.evaluate(DRAIN_CHAT_QUEUE_JS)
+            if messages:
+                log.debug(f"AttachAdapter: observer drained {len(messages)} new messages")
+            return messages
+        except Exception as e:
+            log.warning(f"AttachAdapter: read_chat failed: {e}")
+            return []
 
     def get_participant_count(self):
-        raise NotImplementedError(
-            "Phase 14.19.3b will wire participant scraping."
-        )
+        """Count participants via data-requested-participant-id elements."""
+        if self._page is None:
+            return 0
+        try:
+            return self._page.locator('[data-requested-participant-id]').count()
+        except Exception as e:
+            log.warning(f"AttachAdapter: get_participant_count failed: {e}")
+            return 0
+
+    def get_participant_names(self):
+        """Best-effort participant name scrape. Mirrors MacOSAdapter."""
+        if self._page is None:
+            return []
+        try:
+            return self._page.evaluate(GET_PARTICIPANT_NAMES_JS) or []
+        except Exception as e:
+            log.warning(f"AttachAdapter: get_participant_names failed: {e}")
+            return []
 
     def is_connected(self):
         if self._browser is None:
@@ -338,6 +410,56 @@ class AttachAdapter(MeetingConnector):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _ensure_chat_open(self, page):
+        """Open the chat panel if it isn't already.
+
+        Mirrors MacOSAdapter._ensure_chat_open exactly — same Meet DOM,
+        same selectors, same debug-screenshot fallback. Idempotent.
+        """
+        try:
+            textarea = page.locator('textarea[aria-label="Send a message"]')
+            if textarea.count() > 0 and textarea.is_visible():
+                return  # already open
+        except Exception:
+            pass
+        try:
+            chat_btn = page.get_by_role("button", name="Chat with everyone")
+            chat_btn.wait_for(timeout=3000)
+            chat_btn.click()
+            log.info("AttachAdapter: clicked chat button — waiting for panel to render")
+            page.locator('textarea[aria-label="Send a message"]').wait_for(
+                state="visible", timeout=2000
+            )
+            log.info("AttachAdapter: chat panel open")
+        except Exception as e:
+            log.debug(f"AttachAdapter: could not open chat panel: {e}")
+            try:
+                os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
+                _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
+                page.screenshot(path=_shot)
+                try:
+                    os.chmod(_shot, 0o600)
+                except OSError:
+                    pass
+                log.debug(f"AttachAdapter: saved debug screenshot to {_shot}")
+            except Exception:
+                pass
+
+    def _install_chat_observer(self, page):
+        """Inject the MutationObserver. Mirrors MacOSAdapter._install_chat_observer."""
+        if self._observer_installed:
+            return
+        try:
+            page.evaluate(INSTALL_CHAT_OBSERVER_JS)
+            attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
+            if attached:
+                self._observer_installed = True
+                log.info("AttachAdapter: chat MutationObserver installed")
+            else:
+                log.warning("AttachAdapter: chat observer not attached (textarea or panel container not in DOM) — will retry next poll")
+        except Exception as e:
+            log.warning(f"AttachAdapter: failed to install chat observer: {e}")
 
     def _find_meet_page(self, meeting_url):
         """Locate the Meet tab among the relaunched Chrome's open pages.
