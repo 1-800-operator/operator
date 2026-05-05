@@ -256,6 +256,15 @@ class ClaudeCLIProvider(LLMProvider):
             # on_paragraph as they arrive.
             "--include-partial-messages",
         ]
+        # Phase 14.19.2 — `--yolo` flag on dial/deploy/slip sets
+        # OPERATOR_YOLO=1 in env before _run_bot runs. Append the
+        # claude-CLI permission-bypass flag at spawn time. The permission
+        # bridge below still gets set up (PreToolUse hook fires) but
+        # `--dangerously-skip-permissions` overrides at the CLI level so
+        # claude never pauses regardless of hook output. 14.19.8 rewrites
+        # the bridge to be conditionally skipped under yolo.
+        if os.environ.get("OPERATOR_YOLO") == "1":
+            cmd.append("--dangerously-skip-permissions")
         if self._session_id is not None:
             # Re-spawn after a crash: rehydrate the prior session so the new
             # subprocess inherits full message history (including tool use

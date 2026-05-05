@@ -540,16 +540,19 @@ def _bot_tagline(name):
 
 def _print_usage():
     print("Usage:")
-    print("  operator dial <name> [url] Dial an agent into a Meet (auto-opens one if no url)")
-    print("  operator try <name>       Terminal test-drive (no Meet)")
-    print("  operator build            Create a new agent (wizard)")
-    print("  operator auth <mcp>       Authorize an OAuth MCP (Linear, etc.)")
-    print("  operator edit <target>    Open an agent config (or .env) in $EDITOR")
-    print("  operator where <target>   Print the absolute path of a config file")
+    print("  operator dial <name> [url]      Dial an agent into a Meet (auto-opens one if no url)")
+    print("  operator deploy <name> <url>    Send an agent into an existing meeting (Phase 14.19)")
+    print("  operator slip <name> [url]      Attach an agent to your own Chrome session (Phase 14.19)")
+    print("  operator try <name>             Terminal test-drive (no Meet)")
+    print("  operator build                  Create a new agent (wizard)")
+    print("  operator auth <mcp>             Authorize an OAuth MCP (Linear, etc.)")
+    print("  operator edit <target>          Open an agent config (or .env) in $EDITOR")
+    print("  operator where <target>         Print the absolute path of a config file")
     print()
     print("Flags:")
-    print("  --force                   Retry join even if a session is flagged stuck")
-    print("  --no-preflight            Skip the MCP readiness check (for CI/scripted launches)")
+    print("  --force                         Retry join even if a session is flagged stuck")
+    print("  --no-preflight                  Skip the MCP readiness check (for CI/scripted launches)")
+    print("  --yolo                          Skip per-tool permission prompts (dial/deploy/slip)")
     print()
     bots = _available_bots()
     if bots:
@@ -707,7 +710,47 @@ def main():
             print(f"Unknown bot: {name!r}\n")
             _print_usage()
             return 2
-        return _run_bot(name, argv[2:])
+        rest, yolo = _consume_yolo(argv[2:])
+        if yolo:
+            os.environ["OPERATOR_YOLO"] = "1"
+        return _run_bot(name, rest)
+
+    # Phase 14.19.2 — `deploy <name> <url>`. Sends agent as a separate
+    # participant into an existing meeting. URL required (no meet.new
+    # auto-open). Routes through the same `_run_bot` path as dial; the
+    # only difference at this level is URL-required.
+    if first == "deploy":
+        if len(argv) < 3:
+            print("Usage: operator deploy <name> <url>\n")
+            _print_usage()
+            return 2
+        name = argv[1]
+        url = argv[2]
+        if name not in _available_bots():
+            print(f"Unknown bot: {name!r}\n")
+            _print_usage()
+            return 2
+        rest, yolo = _consume_yolo(argv[3:])
+        if yolo:
+            os.environ["OPERATOR_YOLO"] = "1"
+        return _run_bot(name, [url] + rest)
+
+    # Phase 14.19.2 — `slip <name> [url]`. CDP-attach to user's existing
+    # Chrome session; agent responds *as the user* with a marker prefix.
+    # Implementation lives in connectors/attach_adapter.py (Phase 14.19.3);
+    # this branch is a stub that exits with the deferred-implementation
+    # message until that lands.
+    if first == "slip":
+        if len(argv) < 2:
+            print("Usage: operator slip <name> [url]\n")
+            _print_usage()
+            return 2
+        name = argv[1]
+        if name not in _available_bots():
+            print(f"Unknown bot: {name!r}\n")
+            _print_usage()
+            return 2
+        return _run_slip(name, argv[2:])
 
     if first.startswith("-"):
         print(f"Unknown option: {first}\n")
@@ -840,6 +883,35 @@ def _run_try(name):
         _shutdown()
         ui.ok("Goodbye.")
     return 0
+
+
+def _consume_yolo(args):
+    """Strip `--yolo` from argv list; return (filtered_args, yolo_bool).
+
+    Centralized so dial/deploy/slip get identical handling. The flag
+    appends `--dangerously-skip-permissions` to the spawned `claude` CLI
+    via the OPERATOR_YOLO env var read in providers/claude_cli.py:_spawn.
+    """
+    yolo = "--yolo" in args
+    return [a for a in args if a != "--yolo"], yolo
+
+
+def _run_slip(name, rest):
+    """slip mode — CDP-attach to user's existing Chrome.
+
+    Stub for Phase 14.19.2. Real implementation lands in 14.19.3 in a new
+    connectors/attach_adapter.py: detect running Chrome → prompt to quit →
+    relaunch with --remote-debugging-port=9222 → connect_over_cdp → find
+    Meet tab → install observers. Reply attribution prefix injected at
+    the connector layer in send_chat().
+    """
+    print(
+        "slip mode is not yet implemented (Phase 14.19.3 — CDP attach in "
+        "connectors/attach_adapter.py). Use `operator dial claude` or "
+        "`operator deploy claude <url>` for now.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _run_bot(name, rest):
