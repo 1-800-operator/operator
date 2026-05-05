@@ -882,7 +882,10 @@ def _required_mcps_from_skills(state: WizardState) -> dict[str, list[str]]:
     from _1_800_operator.pipeline.skills import load_skills
 
     external = state.bot_cfg.get("skills", {}).get("external_paths") or []
-    skills = load_skills(state.enabled_skill_names, external_paths=external)
+    # quiet=True: this is the second load this session (skills step
+    # already loaded once and surfaced any discovery warnings). Don't
+    # re-emit them under the MCPs step heading where they look misplaced.
+    skills = load_skills(state.enabled_skill_names, external_paths=external, quiet=True)
 
     by_server: dict[str, list[str]] = {}
     for sk in skills:

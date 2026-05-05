@@ -146,28 +146,35 @@ def _parse_skill_md(path: Path) -> Skill | None:
     )
 
 
-def _resolve_external_path(entry: str) -> Path | None:
+def _resolve_external_path(entry: str, *, quiet: bool = False) -> Path | None:
     """Resolve an external_paths entry; None if invalid or missing.
 
     Entries must be tilde-prefixed (starts with `~`) or absolute (starts
     with `/`). Relative paths would resolve against the process CWD, which
     is unreliable for a long-running meeting bot — WARN and skip.
+
+    `quiet=True` suppresses the discovery-level warnings (used by the
+    wizard's MCPs step, which re-loads skills purely to compute mcp-required
+    locks; the user already saw any warnings during the Skills step).
     """
     if not isinstance(entry, str) or not entry.strip():
-        log.warning(f"SKILLS: external_paths entry is empty or non-string — skipping")
+        if not quiet:
+            log.warning(f"SKILLS: external_paths entry is empty or non-string — skipping")
         return None
     raw = entry.strip()
     # Tilde-prefixed is treated as absolute once expanded.
     if not (raw.startswith("~") or raw.startswith("/")):
-        log.warning(
-            f"SKILLS: external_paths entry {raw!r} is not tilde-prefixed or "
-            f"absolute — skipping. Use `~/...` or `/...` (relative paths are "
-            f"CWD-dependent and unreliable)."
-        )
+        if not quiet:
+            log.warning(
+                f"SKILLS: external_paths entry {raw!r} is not tilde-prefixed or "
+                f"absolute — skipping. Use `~/...` or `/...` (relative paths are "
+                f"CWD-dependent and unreliable)."
+            )
         return None
     p = Path(os.path.expanduser(raw)).resolve()
     if not p.exists() or not p.is_dir():
-        log.warning(f"SKILLS: external_paths entry {raw!r} not found — skipping")
+        if not quiet:
+            log.warning(f"SKILLS: external_paths entry {raw!r} not found — skipping")
         return None
     return p
 
@@ -201,6 +208,8 @@ def load_skills(
     external_paths: list[str] | None = None,
     shared_library_dir: Path | None = None,
     cwd: Path | None = None,
+    *,
+    quiet: bool = False,
 ) -> list[Skill]:
     """Load skills from shared library + external_paths + project scope,
     filtered by enabled_names.
@@ -236,7 +245,7 @@ def load_skills(
         source_dirs.append(shared)
 
     for entry in (external_paths or []):
-        p = _resolve_external_path(entry)
+        p = _resolve_external_path(entry, quiet=quiet)
         if p is not None:
             source_dirs.append(p)
 
@@ -261,11 +270,12 @@ def load_skills(
         selected = discovered
     else:
         missing = [n for n in enabled_names if n not in by_name]
-        for n in missing:
-            log.warning(
-                f"SKILLS: enabled skill {n!r} not found in library or "
-                f"external_paths — skipping"
-            )
+        if not quiet:
+            for n in missing:
+                log.warning(
+                    f"SKILLS: enabled skill {n!r} not found in library or "
+                    f"external_paths — skipping"
+                )
         selected = [by_name[n] for n in enabled_names if n in by_name]
 
     _log_banner(selected, discovered)
