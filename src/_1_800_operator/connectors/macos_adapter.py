@@ -638,6 +638,16 @@ class MacOSAdapter(MeetingConnector):
                             page.wait_for_url(_is_real_meet_room, timeout=30000)
                         except Exception as e:
                             log.error(f"MacOSAdapter: meet.new did not redirect to a meeting URL: {e}")
+                            # Snapshot the page so we can see what Meet was showing
+                            # at the timeout (blank page? sign-in interstitial?
+                            # workspace consent? anti-automation challenge?). Without
+                            # this, the user only sees the misleading "did not
+                            # redirect" message — the screenshot is the fastest path
+                            # to root cause for first-time-on-new-machine failures.
+                            try:
+                                save_debug(page, "meet_new_no_redirect")
+                            except Exception as _e:
+                                log.warning(f"MacOSAdapter: save_debug failed: {_e}")
                             js.signal_failure("meet_new_no_redirect")
                             return
                         meeting_url = page.url
