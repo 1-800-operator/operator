@@ -6,7 +6,7 @@ operator is not pip-installable.
 
 Install with:
 
-    curl -sSf https://1-800-operator.com/install | sh
+    curl -sSf https://1-800-operator.com/install | bash
 
 The pip-installable package is reserved as a placeholder so this name
 cannot be claimed by an unrelated project. operator itself includes a

@@ -7,7 +7,7 @@ manage cleanly.
 ## Install
 
 ```bash
-curl -sSf https://1-800-operator.com/install | sh
+curl -sSf https://1-800-operator.com/install | bash
 ```
 
 ## Why this placeholder exists

@@ -2,7 +2,7 @@
 # Operator installer — https://github.com/1-800-operator/operator
 #
 # Usage:
-#   curl -LsSf https://1-800-operator.com/install | sh
+#   curl -LsSf https://1-800-operator.com/install | bash
 #
 # What this script does (read before piping to sh):
 #   1. Verifies macOS or Linux.

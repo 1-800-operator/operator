@@ -21,7 +21,7 @@ macOS or Linux. Python 3.10+. Pick the path that matches how much you want to re
 ### Option A — one command (default)
 
 ```bash
-curl -fsSL https://1-800-operator.com/install | sh
+curl -fsSL https://1-800-operator.com/install | bash
 ```
 
 Bootstraps [`uv`](https://github.com/astral-sh/uv) if missing, installs the CLI, downloads Playwright's Chromium runtime (~170 MB), seeds `~/.operator/.env` with API-key placeholders, and on macOS nudges you to install Chrome if it isn't already. Idempotent — safe to re-run.
@@ -31,7 +31,7 @@ Bootstraps [`uv`](https://github.com/astral-sh/uv) if missing, installs the CLI,
 ```bash
 curl -fsSL https://1-800-operator.com/install -o install.sh
 less install.sh           # actually look at it
-sh install.sh
+bash install.sh
 ```
 
 Same outcome as Option A — you just read the script before running it. Recommended if you've never installed anything from us before.
