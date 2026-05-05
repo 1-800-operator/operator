@@ -31,6 +31,13 @@ def _is_real_meet_room(url: str) -> bool:
 
 from .base import MeetingConnector
 from .captions_js import CAPTION_OBSERVER_JS, enable_captions, filter_caption
+from .chat_dom_js import (
+    DRAIN_CHAT_QUEUE_JS,
+    GET_PARTICIPANT_NAMES_JS,
+    INSTALL_CHAT_OBSERVER_JS,
+    OBSERVER_ATTACHED_CHECK_JS,
+    SNAPSHOT_MESSAGE_IDS_JS,
+)
 from .session import JoinStatus, detect_page_state, validate_auth_state, inject_cookies, save_debug, _chrome_lock_is_live, _chrome_kill_and_clear, _write_operator_pid
 
 log = logging.getLogger(__name__)
@@ -223,20 +230,14 @@ class MacOSAdapter(MeetingConnector):
         """
         self._ensure_chat_open(page)
         try:
-            pre_ids = set(page.evaluate(
-                "() => Array.from(document.querySelectorAll('div[data-message-id]'))"
-                ".map(el => el.getAttribute('data-message-id'))"
-            ))
+            pre_ids = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
             input_box = page.locator('textarea[aria-label="Send a message"]')
             input_box.wait_for(timeout=5000)
             input_box.fill(message)
             input_box.press("Enter")
             log.info(f"MacOSAdapter: chat sent: {message!r}")
             for _ in range(20):
-                current = set(page.evaluate(
-                    "() => Array.from(document.querySelectorAll('div[data-message-id]'))"
-                    ".map(el => el.getAttribute('data-message-id'))"
-                ))
+                current = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
                 new_ids = current - pre_ids
                 if new_ids:
                     return next(iter(new_ids))
@@ -257,84 +258,12 @@ class MacOSAdapter(MeetingConnector):
         if self._observer_installed:
             return
         try:
-            page.evaluate("""() => {
-                if (window.__operatorChatObserver) return;
-                window.__operatorChatQueue = [];
-                window.__operatorSeenIds = new Set();
-
-                // Seed seen IDs with all existing messages so we don't re-process history
-                document.querySelectorAll('div[data-message-id]').forEach(el => {
-                    window.__operatorSeenIds.add(el.getAttribute('data-message-id'));
-                });
-
-                function extractMessage(el) {
-                    const msgId = el.getAttribute('data-message-id');
-                    if (!msgId || window.__operatorSeenIds.has(msgId)) return null;
-                    window.__operatorSeenIds.add(msgId);
-                    // Extract text — prefer first div[jsname] inside message (any jsname value),
-                    // fall back to first child's first text node, then raw innerText.
-                    const jsnameEl = el.querySelector('div[jsname]');
-                    let text = '';
-                    if (jsnameEl) {
-                        text = jsnameEl.innerText.trim();
-                    } else if (el.children[0]) {
-                        const fc = el.children[0].childNodes[0];
-                        text = (fc && fc.textContent) ? fc.textContent.trim() : el.innerText.trim();
-                    } else {
-                        text = el.innerText.trim();
-                    }
-                    // Extract sender — walk up to 4 parents, find a sibling div whose
-                    // text matches "Name + Timestamp". Avoids depending on obfuscated class names.
-                    const TIME_RE = new RegExp('\\\\d{1,2}:\\\\d{2}\\\\s*(AM|PM)', 'i');
-                    let sender = '';
-                    let foundSender = false;
-                    let node = el;
-                    for (let d = 0; d < 4 && !foundSender; d++) {
-                        node = node.parentElement;
-                        if (!node) break;
-                        for (const sib of node.children) {
-                            const t = sib.innerText?.trim();
-                            if (t && TIME_RE.test(t)) {
-                                const lines = t.split('\\n');
-                                sender = lines.length >= 2 ? lines[0] : '';
-                                foundSender = true;
-                                break;
-                            }
-                        }
-                    }
-                    return {id: msgId, sender: sender, text: text};
-                }
-
-                const textarea = document.querySelector('textarea[aria-label="Send a message"]');
-                const container = textarea ? textarea.closest('[data-panel-id]') : null;
-                if (!container) return;
-
-                window.__operatorChatObserver = new MutationObserver(mutations => {
-                    for (const mut of mutations) {
-                        for (const node of mut.addedNodes) {
-                            if (node.nodeType !== 1) continue;
-                            // Check if the added node itself is a message
-                            if (node.matches && node.matches('div[data-message-id]')) {
-                                const msg = extractMessage(node);
-                                if (msg) window.__operatorChatQueue.push(msg);
-                            }
-                            // Check descendants
-                            if (node.querySelectorAll) {
-                                node.querySelectorAll('div[data-message-id]').forEach(el => {
-                                    const msg = extractMessage(el);
-                                    if (msg) window.__operatorChatQueue.push(msg);
-                                });
-                            }
-                        }
-                    }
-                });
-                window.__operatorChatObserver.observe(container, {childList: true, subtree: true});
-            }""")
+            page.evaluate(INSTALL_CHAT_OBSERVER_JS)
             # Verify the observer actually attached. The JS function returns
             # early (no-op) if the textarea or its panel container isn't in
             # the DOM yet — page.evaluate() won't throw, so we check the
             # result explicitly and only mark installed on confirmed success.
-            attached = page.evaluate("() => !!window.__operatorChatObserver")
+            attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
             if attached:
                 self._observer_installed = True
                 log.info("MacOSAdapter: chat MutationObserver installed")
@@ -349,11 +278,7 @@ class MacOSAdapter(MeetingConnector):
         self._install_chat_observer(page)
 
         try:
-            messages = page.evaluate("""() => {
-                const q = window.__operatorChatQueue || [];
-                window.__operatorChatQueue = [];
-                return q;
-            }""")
+            messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             if messages:
                 log.debug(f"MacOSAdapter: observer drained {len(messages)} new messages")
             return messages
@@ -378,31 +303,7 @@ class MacOSAdapter(MeetingConnector):
         names. Returns [] on any failure — callers must degrade gracefully.
         """
         try:
-            return page.evaluate("""() => {
-                const tiles = document.querySelectorAll('[data-requested-participant-id]');
-                const names = [];
-                const seen = new Set();
-                tiles.forEach(t => {
-                    let name = '';
-                    const labelled = t.querySelector('[data-self-name]');
-                    if (labelled) name = (labelled.textContent || '').trim();
-                    if (!name) {
-                        const aria = t.getAttribute('aria-label') || '';
-                        if (aria && !aria.includes('More options') && !aria.includes('Menu')) {
-                            name = aria.trim();
-                        }
-                    }
-                    if (!name) {
-                        const txt = (t.textContent || '').trim();
-                        if (txt && txt.length < 60) name = txt;
-                    }
-                    if (name && !seen.has(name)) {
-                        seen.add(name);
-                        names.push(name);
-                    }
-                });
-                return names;
-            }""") or []
+            return page.evaluate(GET_PARTICIPANT_NAMES_JS) or []
         except Exception as e:
             log.warning(f"MacOSAdapter: get_participant_names failed: {e}")
             return []
