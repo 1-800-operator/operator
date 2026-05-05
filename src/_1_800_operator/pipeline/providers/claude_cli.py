@@ -278,6 +278,19 @@ class ClaudeCLIProvider(LLMProvider):
         # rendezvous + write a per-invocation settings.json that registers
         # our PreToolUse hook. Without a handler we skip this entirely so
         # inner-claude follows its default permission flow.
+        #
+        # Phase 14.19.2 known-limitation flag for the 14.19.8 implementer:
+        # under OPERATOR_YOLO=1 the cmd above already has
+        # `--dangerously-skip-permissions` appended, which overrides
+        # PreToolUse hooks at the claude-CLI level. Claude never calls into
+        # our bridge, so the tempdir / named pipes / settings.json / pump
+        # thread set up below are inert — a few KB of wasted setup per
+        # spawn plus an idle thread. Functionally harmless. 14.19.8
+        # rewrites this whole flow; the cleanest version of that rewrite
+        # gates this block on `OPERATOR_YOLO != "1"` (or the equivalent
+        # plumbed boolean) so the bridge skips entirely under yolo. Left
+        # un-patched in 14.19.2 to avoid churn that 14.19.8 immediately
+        # rewrites.
         if self._permission_handler is not None:
             self._setup_permission_bridge()
             cmd += ["--settings", str(self._perm_tempdir / "settings.json")]
