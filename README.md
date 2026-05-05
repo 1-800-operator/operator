@@ -195,3 +195,10 @@ rm -rf ~/.operator           # removes agents, history, and .env
 - `CLAUDE.md` — architecture, commands, configuration layout.
 - `docs/roadmap.md` — phase plan.
 - `docs/agent-context.md` — current development state.
+
+## Help & community
+
+- **Bug?** [File an issue](https://github.com/1-800-operator/operator/issues/new/choose) using the bug-report template.
+- **Question, idea, or built something cool?** [GitHub Discussions](https://github.com/1-800-operator/operator/discussions) — Q&A, Ideas, Show & tell.
+- **Security vulnerability?** Don't open a public issue — see [`SECURITY.md`](./SECURITY.md).
+- See [`SUPPORT.md`](./SUPPORT.md) for the full routing guide.

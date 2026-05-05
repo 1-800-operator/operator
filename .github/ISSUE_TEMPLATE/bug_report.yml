@@ -1,0 +1,110 @@
+name: Bug report
+description: Something broke or behaved unexpectedly while running operator.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in as much as you can — the more specific, the faster a fix.
+
+        **Heads up — log redaction.** Before pasting log snippets below, scrub anything sensitive: API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, …), OAuth tokens, meeting URLs you don't want public, the contents of chat messages, and anything from `~/.operator/.env`. Operator's logs at `/tmp/operator.log` can include tool arguments and tool results — assume nothing is auto-redacted.
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system + version
+      description: e.g. `macOS 14.6.1`, `Ubuntu 24.04`
+      placeholder: macOS 14.6.1
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python3 --version`
+      placeholder: Python 3.12.4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - "curl | sh (recommended)"
+        - "uv tool install git+https://..."
+        - "git clone + pip install -e ."
+        - "Other (describe below)"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: operator version
+      description: Output of `operator --version`
+      placeholder: operator 0.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: operator dial pm https://meet.google.com/xxx-yyyy-zzz
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include any error message printed to the terminal verbatim.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant section of /tmp/operator.log
+      description: Paste the lines around the failure. **Redact secrets and PII first.** Triple-backtick wrapping is appreciated.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: mcps_enabled
+    attributes:
+      label: MCP servers enabled in the bot's config
+      description: Tick whichever applied at the time of the bug. Helps narrow which integration is involved.
+      options:
+        - label: Linear
+        - label: GitHub
+        - label: Sentry
+        - label: Slack
+        - label: Salesforce
+        - label: Google Calendar
+        - label: Google Drive
+        - label: Gmail
+        - label: Figma
+        - label: Playwright
+        - label: claude-code
+        - label: transcript (bundled)
+        - label: Other (mention in "What actually happened")
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, related issues, recent config changes, anything that would help triage.
+    validations:
+      required: false

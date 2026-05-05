@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/1-800-operator/operator/discussions
+    about: Use GitHub Discussions for questions, ideas, and showing off what you built. The issue tracker is for bugs and concrete feature requests.
+  - name: Security vulnerability
+    url: https://github.com/1-800-operator/operator/security/policy
+    about: Please report vulnerabilities privately per SECURITY.md — do not file a public issue.
