@@ -10,7 +10,7 @@ agent:
   name: "Claude"
   trigger_phrase: "@claude"
   first_contact_hint: "(First time talking to {first_name} — greet them by name once, then drop it.)"
-  tagline: "Claude Code, in your meeting — your full setup, gated by chat confirmation"
+  tagline: "Claude Code, in your meeting — your full setup"
   intro_on_join: true
   # Voice — controls how the bot communicates across three surfaces:
   # progress narrator, confirmation prompts, and reply content.

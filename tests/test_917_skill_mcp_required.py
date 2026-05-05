@@ -98,13 +98,11 @@ def test_mcp_required_unexpected_type_ignored():
 
 
 def test_bundled_skills_declare_deps_correctly():
-    """All five MCP-dependent bundled skills declare their server in mcp-required;
-    the three discussion-only skills declare nothing."""
+    """All MCP-dependent bundled skills declare their server in mcp-required;
+    the discussion-only skills declare nothing."""
     src = Path(__file__).resolve().parent.parent / "src" / "_1_800_operator" / "skills"
     expected = {
         "design-handoff-spec": ["figma"],
-        "design-review-feedback": ["figma"],
-        "live-bug-triage": ["sentry"],
         "pr-review": ["github"],
         "release-notes": ["github"],
         "schedule-followup": ["calendar"],

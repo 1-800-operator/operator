@@ -19,7 +19,7 @@ agent:
   name: "Codex"
   trigger_phrase: "@codex"
   first_contact_hint: "(First time talking to {first_name} — greet them by name once, then drop it.)"
-  tagline: "OpenAI Codex CLI in your meeting — sandboxed shell + chat-gated approvals"
+  tagline: "OpenAI Codex CLI in your meeting — sandboxed"
   intro_on_join: true
   # Voice — controls how the bot communicates across three surfaces:
   # progress narrator, confirmation prompts, and reply content.

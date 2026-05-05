@@ -315,36 +315,34 @@ def _step1_fighter_select() -> WizardState:
         ),
     ]
 
-    picked = select_one("", choices, console=console)
-    console.print()
-    if picked.value == "__custom__":
-        return _from_scratch()
-    # Both presets hard-depend on their CLI being installed + logged in
-    # — the whole agent identity is "inherit the user's <CLI> setup."
-    # Gate selection at the picker so the user fixes the prereq first
-    # rather than discovering it mid-wizard.
-    if picked.value == "claude":
-        ok, reason = claude_code_installed_and_logged_in()
-        if not ok:
-            console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}")
-            console.print(
-                "  [dim]Install Claude Code (https://claude.ai/code) and run "
-                "`claude login`, then re-run `operator build`.[/dim]\n"
+    # Loop the picker (not the heading) so a gate failure re-prompts
+    # without reprinting "1. Choose your base agent" each time.
+    while True:
+        picked = select_one("", choices, console=console)
+        console.print()
+        if picked.value == "__custom__":
+            return _from_scratch()
+        # Both presets hard-depend on their CLI being installed + logged in
+        # — the whole agent identity is "inherit the user's <CLI> setup."
+        # Gate selection at the picker so the user fixes the prereq first
+        # rather than discovering it mid-wizard. The `reason` string from
+        # the readiness probe already includes the action to take (e.g.
+        # "run `claude auth login`"), so don't pad it with a redundant
+        # follow-up sentence.
+        if picked.value == "claude":
+            ok, reason = claude_code_installed_and_logged_in()
+            if not ok:
+                console.print(f"  [red]✗ claude preset requires Claude Code:[/red] {reason}, then rerun `operator setup`\n")
+                continue
+        elif picked.value == "codex":
+            from _1_800_operator.pipeline.codex_import import (
+                codex_installed_and_logged_in,
             )
-            return _step1_fighter_select()
-    elif picked.value == "codex":
-        from _1_800_operator.pipeline.codex_import import (
-            codex_installed_and_logged_in,
-        )
-        ok, reason = codex_installed_and_logged_in()
-        if not ok:
-            console.print(f"  [red]✗ codex preset requires Codex CLI:[/red] {reason}")
-            console.print(
-                "  [dim]Install Codex (`npm install -g @openai/codex`) and run "
-                "`codex login`, then re-run `operator build`.[/dim]\n"
-            )
-            return _step1_fighter_select()
-    return _edit_preset(picked.value)
+            ok, reason = codex_installed_and_logged_in()
+            if not ok:
+                console.print(f"  [red]✗ codex preset requires Codex CLI:[/red] {reason}, then rerun `operator setup`\n")
+                continue
+        return _edit_preset(picked.value)
 
 
 def _bundled_tagline(name: str) -> str:

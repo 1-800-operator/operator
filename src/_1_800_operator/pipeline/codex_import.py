@@ -87,10 +87,7 @@ def codex_installed_and_logged_in() -> tuple[bool, str]:
         return False, f"could not run `codex login status`: {e}"
 
     if r.returncode != 0:
-        return False, (
-            "`codex login status` exited non-zero — run `codex login` to "
-            "sign in with your ChatGPT account"
-        )
+        return False, "not logged in — run `codex login` to sign in with your ChatGPT account"
 
     # `codex login status` writes the auth banner to STDERR (verified phase 0).
     combined = (r.stdout or "") + (r.stderr or "")

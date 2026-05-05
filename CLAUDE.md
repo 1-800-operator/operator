@@ -11,24 +11,24 @@ Operator is a chat-based AI meeting participant. It joins Google Meet, opens the
 ### Run
 
 ```bash
-operator dial pm https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
-operator dial pm                                       # auto-open meet.new
-operator                                               # usage + agent list
+operator dial claude https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
+operator dial claude                                       # auto-open meet.new
+operator                                                   # usage + agent list
 ```
 
 `dial` is the canonical subcommand (1-800-Operator phone metaphor). `run` is
 kept as a hidden alias for muscle memory + external links — same dispatch,
 not advertised in `--help`; safe to drop on a future major bump.
 
-Replace `pm` with any bot under `agents/` (`engineer`, `designer`, `claude`, …). Every
-dial selects an agent explicitly — there is no ambient root `config.yaml`
-anymore. The `operator` wrapper (symlinked into `~/.local/bin/`) handles venv
-activation; you can also call `python __main__.py dial <name> [url]` directly
-if the venv is already active.
+Replace `claude` with any bot under `~/.operator/agents/`. v1 ships two
+presets — `claude` and `codex` (both inherit MCPs/skills from the
+respective CLI) — plus a `custom` from-scratch path. Every dial selects an
+agent explicitly; there is no ambient root `config.yaml`. The `operator`
+wrapper handles venv activation; with the venv active you can also call
+`python -m _1_800_operator dial <name> [url]` directly.
 
-The `claude` agent (session 151, Phase 15.9) is different from the other three
-in one respect: it hard-depends on the Claude Code CLI being installed and
-logged in. `operator dial claude` exits 2 with a clear stderr message if
+The `claude` and `codex` presets each hard-depend on their CLI being
+installed and logged in. `operator dial claude` exits 2 with a clear stderr message if
 `claude` isn't on PATH or `claude auth status --json` reports not logged in.
 On first run it auto-imports the user's Claude Code MCP servers (both from
 `~/.claude.json#mcpServers` and `claude mcp list` — the latter is how
@@ -101,7 +101,7 @@ Pipeline (platform-agnostic)
 
 ### Configuration
 
-Every dial names an agent explicitly (`operator dial <name> [url]`). Config loading is driven by the `OPERATOR_BOT` env var — the CLI sets this before importing `config`, which then reads `agents/<name>/config.yaml` into module-level constants. There is no root `config.yaml`; there is one config file per bot under `agents/`. User-facing blocks (top-to-bottom ordering mirrors the setup wizard's four-layer view of a bot):
+Every dial names an agent explicitly (`operator dial <name> [url]`). Config loading is driven by the `OPERATOR_BOT` env var — the CLI sets this before importing `config`, which then reads `~/.operator/agents/<name>/config.yaml` into module-level constants. There is no root `config.yaml`; there is one config file per bot under `~/.operator/agents/`. Bundled preset definitions live in the package at `src/_1_800_operator/agents/{claude,codex}/` and are copied into the user dir on first build. User-facing blocks (top-to-bottom ordering mirrors the setup wizard's four-layer view of a bot):
 - `agent` — `name`, `trigger_phrase`, `first_contact_hint`, `tagline`, `intro_on_join`
 - `llm` — `provider` (`openai` | `anthropic`), `model`, `history_messages` (tail size replayed from the meeting record)
 - `transcript` — `captions_enabled`
@@ -117,7 +117,7 @@ API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc.) live in a
 
 ### Tool Confirmation
 
-`chat_runner.py` defines `READ_TOOLS` — a set of known read-only MCP tools that auto-execute without confirmation. Any tool not in that set prompts the user in chat before running. Per-server overrides (`confirm_tools`) in the bot's `agents/<name>/config.yaml` can force confirmation on specific tools.
+`chat_runner.py` defines `READ_TOOLS` — a set of known read-only MCP tools that auto-execute without confirmation. Any tool not in that set prompts the user in chat before running. Per-server overrides (`confirm_tools`) in the bot's `~/.operator/agents/<name>/config.yaml` can force confirmation on specific tools.
 
 ### Imported MCP Servers — cwd & Secrets Contract
 

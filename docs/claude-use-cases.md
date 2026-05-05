@@ -1,4 +1,4 @@
-# Top 10 Claude-in-a-Meeting Use Cases
+# Top 7 Claude-in-a-Meeting Use Cases
 
 *Phase 15.10.3 deliverable, session 159. Doubles as the test script for Phase 14.8(e) — a brand-new user runs `operator dial claude <fresh-meet-url>` against this list — and as raw material for the second hero-framing post of Phase 16.4 (launch).*
 
@@ -34,33 +34,7 @@ Anthropic's own internal Claude Code Review feature is the highest-leverage use 
 
 ---
 
-## 2. Live bug triage from a Sentry alert (or stack trace pasted in chat)
-
-Bug standup. Someone shares a Sentry link or pastes a stack trace into chat. The team wants probable cause + a proposed fix in the next 60 seconds.
-
-**Trigger phrase:** `@claude what's blowing up here? <sentry-url-or-paste>`
-
-**MCPs exercised:** `sentry` (`get_issue`, `get_event`) → `claude-code` (delegate to inspect the named files in the user's repo).
-
-**Pass/fail signal:** the bot names (a) the probable failing frame at `path:line`, (b) one hypothesis for the cause, (c) a proposed fix or "needs more data — try X". No "I couldn't find anything" without a specific reason.
-
-This is the meeting-shaped version of the "fix bugs efficiently" workflow from the official docs, plus the `live-bug-triage` bundled skill. Five-phase delivery (symptom → frame → cause → fix → optional delegate) is already encoded in the skill — the bot will post each phase as its own message so the team can redirect between any of them.
-
----
-
-## 3. Codebase walkthrough for an onboarding or architecture meeting
-
-A new hire is on the call. Or it's an architecture review. Someone asks the bot to explain how a subsystem fits together.
-
-**Trigger phrase:** `@claude walk us through how authentication works in this codebase` or `@claude what touches our payment flow?`
-
-**MCPs exercised:** `claude-code` (delegate runs `claude -p` against the user's local working directory with `Read`/`Grep`/`Glob` — works whether or not the repo is GitHub-hosted; no worktree edits, read-only).
-
-**Pass/fail signal:** reply names the entry point at `path:line`, traces 2–4 hops through the call graph with file citations, and ends with the primary data structures involved. The Anthropic Product Engineering team's #1 reported use was reducing onboarding load on senior engineers — so "this matches what a senior engineer would have walked the new hire through" is the bar.
-
----
-
-## 4. Live coding delegation — implement a small feature, return a branch
+## 2. Live coding delegation — implement a small feature, return a branch
 
 The team has just sketched a small feature in conversation ("we should add a `--dry-run` flag to the export script"). Hand it off so the work happens in parallel while the meeting continues.
 
@@ -74,7 +48,7 @@ This is the workflow Anthropic's RL Engineering team relies on for small-to-medi
 
 ---
 
-## 5. Sprint triage / T-shirt scope estimation from a Linear ticket
+## 3. Sprint triage / T-shirt scope estimation from a Linear ticket
 
 Sprint planning. Walking the backlog ticket-by-ticket. The bot prices each one before it lands in the sprint.
 
@@ -86,21 +60,7 @@ Sprint planning. Walking the backlog ticket-by-ticket. The bot prices each one b
 
 ---
 
-## 6. Refactor / migration plan from a tech-debt discussion
-
-Architecture meeting on a tech-debt item. "What would it take to migrate from REST to GraphQL?" The team wants a phased plan, not a six-hour live refactor.
-
-**Trigger phrase:** `@claude give us a migration plan for moving auth from sessions to JWT`
-
-**MCPs exercised:** `claude-code` (delegate with `--permission-mode plan` — read-only analysis, no edits).
-
-**Pass/fail signal:** the bot returns a numbered plan (3–7 phases), each phase with the files it would touch and the breaking-change blast radius. No code generated — this is Plan Mode output, meant to drive the conversation.
-
-The official docs flag Plan Mode as "perfect for exploring codebases, planning complex changes, or reviewing code safely" — this is the meeting-shaped version of that workflow.
-
----
-
-## 7. Test generation for a function the team just wrote
+## 4. Test generation for a function the team just wrote
 
 Pair-programming call. The team finishes a function and someone says "we need tests for this." Hand it off rather than break flow.
 
@@ -112,9 +72,9 @@ Pair-programming call. The team finishes a function and someone says "we need te
 
 ---
 
-## 8. Design handoff spec from a Figma frame during a design review
+## 5. Design handoff spec from a Figma frame during a design review
 
-*Conditional — fires only for users with Figma + the Figma MCP wired into their Claude Code setup. Within the design-review-with-engineers subset of meetings, this is *the* primary use; across the full claude-agent user base it's narrower than #1–#5.*
+*Conditional — fires only for users with Figma + the Figma MCP wired into their Claude Code setup. Within the design-review-with-engineers subset of meetings, this is *the* primary use; across the full claude-agent user base it's narrower than the top use cases above.*
 
 Designer + dev meeting. The designer drops a Figma URL. The bot generates the engineer-facing spec — layout, spacing, typography, colors, states, assets, open questions.
 
@@ -126,7 +86,7 @@ Designer + dev meeting. The designer drops a Figma URL. The bot generates the en
 
 ---
 
-## 9. PRD draft from the meeting discussion itself
+## 6. PRD draft from the meeting discussion itself
 
 Stakeholder discussion. PM + eng + design talking through a feature. At the end, "draft a PRD from what we just talked about."
 
@@ -140,7 +100,7 @@ This one stretches Claude Code's typical surface (it leans on captions, which is
 
 ---
 
-## 10. Release notes / changelog from a commit range
+## 7. Release notes / changelog from a commit range
 
 Release review meeting or end-of-sprint demo. "What shipped this week?"
 
@@ -159,16 +119,16 @@ Release review meeting or end-of-sprint demo. "What shipped this week?"
 - **Run on a schedule (Routines / GitHub Actions).** Cron-shaped, not meeting-shaped. The Operator equivalent is the scheduled-agent layer, separate from the in-meeting bot.
 - **Pipe in / pipe out (Unix utility mode).** Solo-at-terminal use case; useless when the trigger is voice-or-chat in a meeting.
 - **Image analysis / "what does this screenshot show?"** Plausible meeting use case (someone screen-shares an error), but Operator's chat panel doesn't currently surface images to the LLM, so this is gated on Phase 17+ work. Park.
-- **Custom subagent invocation (`/agents`).** Power-user feature; abstract too much for a meeting trigger. The functionality folds into use cases #1, #4, #6 implicitly when the user has those subagents configured.
-- **Worktree management (`--worktree`).** Use case #4 already covers the meeting-relevant slice (delegate-and-land); manual worktree juggling is solo-CLI work.
+- **Custom subagent invocation (`/agents`).** Power-user feature; abstract too much for a meeting trigger. The functionality folds into use cases #1, #2, and #4 implicitly when the user has those subagents configured.
+- **Worktree management (`--worktree`).** Use case #2 already covers the meeting-relevant slice (delegate-and-land); manual worktree juggling is solo-CLI work.
 
 ---
 
 ## How to use this list
 
-**As the Phase 14.8(e) test script.** Run `operator dial claude <fresh-meet-url>` on a clean second mac. For each of the ten cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #8 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
+**As the Phase 14.8(e) test script.** Run `operator dial claude <fresh-meet-url>` on a clean second mac. For each of the seven cases above, post the trigger phrase verbatim (or a faithful rephrase) into chat. Mark pass / fail per the signal column. Cases that depend on user-specific MCPs (e.g. #5 Figma) skip if the user doesn't have that MCP wired in — note as N/A, not fail.
 
-**As launch-campaign material (Phase 16.4 second hero post).** The header framing — "Claude Code in your Google Meet" — is already locked. This list is the proof points: ten concrete, named meeting moments where the bot earns its seat. Pick the three highest-fit to your demo audience and lead with them.
+**As launch-campaign material (Phase 16.4 second hero post).** The header framing — "Claude Code in your Google Meet" — is already locked. This list is the proof points: seven concrete, named meeting moments where the bot earns its seat. Pick the three highest-fit to your demo audience and lead with them.
 
 ---
 

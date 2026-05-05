@@ -111,11 +111,11 @@ def _probe_claude_code(*, check_auth: bool = True) -> tuple[str, str]:
     except OSError as e:
         return "prereq_missing", f"could not run `claude auth status`: {e}"
     if r.returncode != 0:
-        return "prereq_missing", "`claude auth status` exited non-zero — run `claude auth login`"
+        return "prereq_missing", "not logged in — run `claude auth login`"
     try:
         payload = json.loads(r.stdout)
     except json.JSONDecodeError:
-        return "prereq_missing", "`claude auth status` returned unparseable output — run `claude auth login`"
+        return "prereq_missing", "not logged in — run `claude auth login`"
     if not payload.get("loggedIn"):
         return "prereq_missing", "not logged in — run `claude auth login`"
     return "ok", ""
