@@ -372,16 +372,19 @@ class AttachAdapter(MeetingConnector):
         log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
 
         # The user's Chrome opened the meeting URL but they may still be in
-        # the green room (pre-join screen). Block until they've clicked
-        # 'Join now' — otherwise ChatRunner's first read_chat poll fires
-        # against an empty green-room DOM, _ensure_chat_open silently
-        # no-ops, and slip appears hung.
+        # the green room (pre-join screen) or stuck in the host-admission
+        # lobby. Block until they've actually entered the meeting —
+        # otherwise ChatRunner's first read_chat poll fires against an
+        # empty DOM and slip appears hung. The wait is indefinite; lobby
+        # admission can take many minutes, the user can Ctrl+C anytime,
+        # and the only fatal signal is Chrome being closed (which the
+        # wait loop detects via is_connected).
         if not self._wait_for_meeting_entry(self._page):
             self._teardown_playwright()
-            js.signal_failure("meeting_entry_timeout")
+            js.signal_failure("chrome_closed_before_entry")
             raise SlipAttachError(
-                "Timed out waiting for you to join the meeting. Click 'Join "
-                "now' in your Chrome, then re-run `operator slip claude <url>`."
+                "Chrome was closed before you joined the meeting. Re-run "
+                "`operator slip claude <url>` when you're ready."
             )
 
         js.signal_success()
@@ -482,25 +485,29 @@ class AttachAdapter(MeetingConnector):
     # Internals
     # ------------------------------------------------------------------
 
-    def _wait_for_meeting_entry(self, page, timeout_seconds=300):
-        """Poll until the user has clicked 'Join now' and entered the meeting.
+    def _wait_for_meeting_entry(self, page):
+        """Block until the user has entered the meeting.
 
         Detects entry via the 'Leave call' button — only present in-meeting,
         never in the green room. Same selector macos_adapter uses for its
         `already_in_meeting` short-circuit (~line 743). Polls every 1s,
         matching the cadence in macos_adapter._wait_for_admission.
 
-        Bails early if Chrome was closed during the wait. Logs progress
-        every 30s to /tmp/operator.log; one-time stderr message at the
-        start tells the user we're waiting on them.
+        No timeout — lobby admission can take many minutes (host on another
+        call, large meetings with multiple admits, etc.). User-paced waits
+        shouldn't have a clock; the user can Ctrl+C anytime if they want
+        to abort. The only fatal signal is Chrome being closed, which we
+        detect via is_connected.
+
+        Returns True on entry, False if Chrome was closed mid-wait.
+        Progress logged to /tmp/operator.log every 30s.
         """
         print(
             "\nWaiting for you to join the meeting in Chrome — click 'Join now'…",
             file=sys.stderr, flush=True,
         )
-        deadline = time.monotonic() + timeout_seconds
         last_log = time.monotonic()
-        while time.monotonic() < deadline:
+        while True:
             try:
                 leave_btn = page.get_by_role("button", name="Leave call")
                 if leave_btn.count() > 0 and leave_btn.first.is_visible():
@@ -517,8 +524,6 @@ class AttachAdapter(MeetingConnector):
                 log.info("AttachAdapter: still waiting for meeting entry…")
                 last_log = now
             time.sleep(1.0)
-        log.warning(f"AttachAdapter: meeting entry timed out after {timeout_seconds}s")
-        return False
 
     def _ensure_chat_open(self, page):
         """Open the chat panel if it isn't already.
