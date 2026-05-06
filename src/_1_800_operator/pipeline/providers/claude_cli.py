@@ -51,6 +51,125 @@ SPAWN_INIT_TIMEOUT_SECONDS = 30
 TURN_TIMEOUT_SECONDS = 600
 
 
+# Framework-level UX guarantee for chat-mediated tool confirmation.
+#
+# The PreToolUse bridge (chat_runner + permission_chat_handler) blocks
+# every non-auto-approved tool until the user replies in chat. Pre-14.19.8
+# the bridge posted a sterile templated card ("Run? linear__list_issues
+# …  OK?") to elicit the yes/no. 14.19.8 drops the card entirely and
+# uses the model's pre-tool narration AS the question — the inner-claude
+# model authors a one-sentence question in its own voice, the bridge
+# silently waits for the user's next chat message as the answer.
+#
+# Two reliability-shaping requirements drove this rule's wording:
+#
+#   1. INTERROGATIVE FORM. A declarative narration ("I'll pull the open
+#      Linear issues now.") leaves the user unsure whether action is
+#      required from them. The rule below requires the model to phrase
+#      every pre-tool message as a question ending in "?", so the user
+#      knows a yes/no is expected.
+#
+#   2. PER-TOOL NARRATION. In multi-tool turns (e.g. ToolSearch to
+#      discover a Linear MCP tool, then the actual list_issues call) the
+#      model's default behavior is to narrate the conceptual intent ONCE
+#      and run subsequent tools silently. Without an explicit per-tool
+#      requirement, the second tool's permission gate would block with
+#      no question on screen. The rule explicitly calls out "each
+#      subsequent tool in a multi-step turn" to head that off.
+#
+# Inner-claude flushes text-delta events to stdout before invoking the
+# PreToolUse hook (probe 10, session 196), so ordering is reliable: the
+# question lands in chat first, then the bridge unblocks on the user's
+# reply.
+#
+# Lives in code per feedback_capability_in_code_over_prompt — load-bearing
+# UX guarantees don't belong in user-editable system_prompt where a
+# hand-edit can silently drop them. The disposition (must ask, must be
+# a question, must precede the tool) is encoded here; the exact wording
+# stays the model's per feedback_llm_steering_via_tool_results.
+_PRE_TOOL_VOICE_RULE = (
+    "MEETING-CHAT TOOL UX RULE — load-bearing, do not skip.\n"
+    "\n"
+    "Every assistant turn that calls a tool must put a text content "
+    "block first and the tool_use content block right after, in the "
+    "SAME turn. Tools fall into two tiers:\n"
+    "\n"
+    "READ tools — pure information lookups with no side effects. "
+    "Includes any MCP tool whose verb is get_/list_/search_/find_/"
+    "read_; plus the built-ins Read, Grep, Glob, LS, WebSearch, and "
+    "ToolSearch. For these, the text block is a one-sentence "
+    "DECLARATIVE narration of what you're checking. Do NOT end this "
+    "line with '?'. The framework auto-approves reads silently; your "
+    "narration is the only signal the user sees. Exception: do not "
+    "narrate ToolSearch — it's internal tool-schema loading the user "
+    "doesn't need to see; just invoke it without preceding text on "
+    "that one tool.\n"
+    "\n"
+    "WRITE / ACTION tools — anything that changes state, sends, "
+    "creates, updates, deletes, runs commands, posts, or has external "
+    "side effects. Includes Write, Edit, Bash, Task, WebFetch, and any "
+    "MCP tool whose verb is create_/update_/delete_/save_/send_/post_/"
+    "run_. For these, the text block is a one-sentence QUESTION ending "
+    "in '?'. ALWAYS a question — even when the user's prior message "
+    "was an explicit command ('create that issue', 'write the file'). "
+    "Why: the framework's permission gate blocks the write until the "
+    "user replies in meeting chat, and a declarative narration leaves "
+    "the user with nothing visible to reply to (the operation hangs "
+    "until they realize). Phrase as a question regardless of how "
+    "explicit the user's instruction was. The framework gates the call "
+    "at a permission checkpoint AFTER your invocation: invoke the "
+    "tool_use normally — do NOT withhold it waiting for a reply; the "
+    "framework handles the pause.\n"
+    "\n"
+    "For high-blast-radius operations include the literal critical "
+    "detail verbatim in the question — exact command, path, recipient, "
+    "or summary — so the user can audit before approving.\n"
+    "\n"
+    "VOICE: phrase narrations and questions in whatever voice your "
+    "system_prompt established. Match the persona the user set up — "
+    "do NOT default to specific wording like 'Want me to...' or "
+    "'Pulling...'. Those are shape examples, not required phrasings. "
+    "If your system_prompt says speak like a pirate, narrate and ask "
+    "like a pirate.\n"
+    "\n"
+    "If a write is denied, you'll get a tool_result describing the "
+    "user's response — react conversationally and do not retry without "
+    "explicit approval. In multi-tool turns ask one question per write "
+    "tool (one question, one approval, one tool); reads chain freely "
+    "with one narration each."
+)
+
+
+# YOLO-mode override appended after _PRE_TOOL_VOICE_RULE when the user
+# passed `--yolo` (sets OPERATOR_YOLO=1, which adds
+# `--dangerously-skip-permissions` to the inner-claude spawn). With the
+# permission gate bypassed at the CLI level, asking a question for
+# writes leaves the user thinking they're being prompted when they're
+# not — the bot proceeds either way. This override flattens the WRITE
+# tier into the READ tier: narrate everything declaratively, no
+# question form, since there's no chat-side approval contract to honor.
+# The audit-detail rule still applies (include the literal critical
+# detail in narrations of high-blast-radius operations), so the user
+# can still see and react if they spot something wrong before the
+# operation completes.
+_PRE_TOOL_VOICE_RULE_YOLO_OVERRIDE = (
+    "YOLO MODE OVERRIDE — applies on top of the rule above:\n"
+    "\n"
+    "The framework's permission gate is BYPASSED for this session. All "
+    "tool calls run immediately without chat-side approval. As a result, "
+    "the WRITE tier's question requirement does NOT apply: narrate writes "
+    "in declarative voice too, just like reads. There is no permission "
+    "gate for the user's reply to release, so a question form would "
+    "mislead them into thinking action is required from them when it "
+    "isn't.\n"
+    "\n"
+    "Continue to include the literal critical detail (exact command, "
+    "path, recipient, summary) in narrations of high-blast-radius "
+    "operations, so the user can spot a problem before the operation "
+    "completes — even though they no longer have a gate to reject at."
+)
+
+
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` CLI is missing from PATH."""
 
@@ -243,26 +362,42 @@ class ClaudeCLIProvider(LLMProvider):
             # and tool results) rather than rebuilding from text-only
             # turn pairs. The new init event will echo the same session_id.
             cmd += ["--resume", self._session_id]
-        if self._append_system_prompt:
-            cmd += ["--append-system-prompt", self._append_system_prompt]
+        # Compose the agent's voice (self._append_system_prompt) with the
+        # framework's pre-tool voice rule. Single injection point so the
+        # rule composes cleanly with: (a) the lazy `system` path in
+        # complete()/complete_streaming() that sets _append_system_prompt
+        # on first call when no construction-time prompt was passed, and
+        # (b) the transcript-tool backstop appended by
+        # set_meeting_record_path. By the time _spawn() runs, both have
+        # already landed in self._append_system_prompt.
+        #
+        # When OPERATOR_YOLO=1 the permission gate is bypassed at the
+        # CLI level (--dangerously-skip-permissions, appended above);
+        # the YOLO override tacks on after the main rule to flatten the
+        # WRITE tier into the READ tier so the model doesn't ask
+        # questions the user has nothing to reply to.
+        rule_parts = [_PRE_TOOL_VOICE_RULE]
+        if os.environ.get("OPERATOR_YOLO") == "1":
+            rule_parts.append(_PRE_TOOL_VOICE_RULE_YOLO_OVERRIDE)
+        composed = "\n\n".join(
+            p for p in [self._append_system_prompt, *rule_parts] if p
+        )
+        if composed:
+            cmd += ["--append-system-prompt", composed]
 
         # If a permission_handler was provided, set up the named-pipe IPC
         # rendezvous + write a per-invocation settings.json that registers
         # our PreToolUse hook. Without a handler we skip this entirely so
         # inner-claude follows its default permission flow.
         #
-        # Phase 14.19.2 known-limitation flag for the 14.19.8 implementer:
-        # under OPERATOR_YOLO=1 the cmd above already has
-        # `--dangerously-skip-permissions` appended, which overrides
-        # PreToolUse hooks at the claude-CLI level. Claude never calls into
-        # our bridge, so the tempdir / named pipes / settings.json / pump
-        # thread set up below are inert — a few KB of wasted setup per
-        # spawn plus an idle thread. Functionally harmless. 14.19.8
-        # rewrites this whole flow; the cleanest version of that rewrite
-        # gates this block on `OPERATOR_YOLO != "1"` (or the equivalent
-        # plumbed boolean) so the bridge skips entirely under yolo. Left
-        # un-patched in 14.19.2 to avoid churn that 14.19.8 immediately
-        # rewrites.
+        # YOLO note: contrary to a stale comment from 14.19.2, live
+        # testing in session 196 confirmed `--dangerously-skip-permissions`
+        # does NOT skip PreToolUse hooks — they still fire and the
+        # handler is invoked. The flag appears to override deny decisions
+        # but doesn't suppress the hook itself. We rely on this behavior:
+        # under YOLO, chat_runner._wire_permissions wires an auto_approve
+        # list that matches '*' so the handler always returns allow,
+        # belt-and-suspenders alongside the CLI flag.
         if self._permission_handler is not None:
             self._setup_permission_bridge()
             cmd += ["--settings", str(self._perm_tempdir / "settings.json")]

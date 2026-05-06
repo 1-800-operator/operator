@@ -82,34 +82,83 @@ class ChatRunner:
         # which prevents a partial-state observer from the read loop
         # seeing one without the other.
         self._send_lock = threading.Lock()
+        # Most-recent-user-message bookkeeping for the recent-yes
+        # auto-approval path in PermissionChatHandler. When the user has
+        # JUST said "yes" (the message that triggered the current turn)
+        # and the model immediately invokes a tool, the bridge would
+        # otherwise sit waiting for a redundant second "yes". The handler
+        # consults `latest_user_message()` and, if the most recent user
+        # turn is unambiguously affirmative AND was not already consumed
+        # by a prior gate (tracked in `_approval_msg_ids_used`), auto-
+        # allows. Updated in the polling loop on every observed user
+        # message; never cleared mid-meeting (stale entries fall out of
+        # the recency window the handler enforces).
+        self._latest_user_msg: tuple[str, str, float] | None = None
+        self._approval_msg_ids_used: set[str] = set()
 
     def _wire_permissions(self):
         """Plug a chat-routed PreToolUse handler into the claude_cli provider.
 
         Every tool call inside the inner CLI subprocess fires a PreToolUse
-        hook that round-trips through meeting chat: operator posts a
-        confirmation prompt, the user replies "ok"/"no", the handler
-        returns allow/deny to the CLI. Without this, the CLI's default
-        prompt would block on a tty that doesn't exist (we spawn under
-        PIPE) and every tool call would silently deny.
+        hook that round-trips through meeting chat. Reads auto-approve
+        silently (the model narrates what it's looking up; the framework
+        runs the tool); writes gate at a chat round-trip (the model asks
+        a question, the user replies yes/no). Bypass the whole flow by
+        passing `--yolo` (sets `--dangerously-skip-permissions` at spawn).
 
-        v1 ships no per-bot allow/ask lists — every tool prompts.
-        Bypass the whole flow by passing `--yolo` (sets
-        `--dangerously-skip-permissions` at spawn).
+        Auto-approved patterns are deliberately conservative — anything
+        not on this list falls through to a chat round-trip, which is the
+        safe default. The patterns target the standard MCP naming
+        convention `mcp__<server>__<verb>_<object>` plus the canonical
+        claude-code built-in reads. If an MCP author names a destructive
+        tool with a read-shaped verb (`mcp__x__list_and_burn`) we'd
+        false-positive auto-approve it — accept that risk in exchange
+        for friction-free read flows. The prompt rule
+        (claude_cli._PRE_TOOL_VOICE_RULE) keeps the model's tier
+        classification aligned with these patterns.
         """
+        import os
         from _1_800_operator.pipeline.providers.claude_cli import ClaudeCLIProvider
         from _1_800_operator.pipeline.permission_chat_handler import PermissionChatHandler
         provider = getattr(self._llm, "_provider", None)
         if not isinstance(provider, ClaudeCLIProvider):
             return
+        if os.environ.get("OPERATOR_YOLO") == "1":
+            # Belt and suspenders alongside --dangerously-skip-permissions:
+            # auto-approve every tool at the bridge so the handler never
+            # gates anything. Without this, the bridge still calls the
+            # handler under YOLO (the CLI flag overrides deny decisions
+            # but doesn't suppress the hook itself), and the handler's
+            # default behavior on unknown tools is to round-trip via chat.
+            auto_approve = ["*"]
+            log.info("ChatRunner: permission handler wired (YOLO — all tools auto-approve)")
+        else:
+            auto_approve = [
+                # Claude's internal tool-schema discovery — meta, not
+                # user-visible action.
+                "ToolSearch",
+                # Built-in claude-code reads.
+                "Read", "Grep", "Glob", "LS", "WebSearch",
+                # MCP read patterns (mcp__<server>__<verb>_<object>).
+                "*__get_*",
+                "*__list_*",
+                "*__search_*",
+                "*__find_*",
+                "*__read_*",
+                # MCP servers commonly expose bare-verb tools too —
+                # `mcp__github__get_me`, `mcp__sentry__whoami`. The
+                # bare-verb ones we want to auto-approve are typed out
+                # explicitly to avoid over-broad globs.
+                "*__whoami",
+            ]
+            log.info("ChatRunner: permission handler wired (reads auto-approve, writes gate)")
         handler = PermissionChatHandler(
             connector=self._connector,
             runner=self,
-            auto_approve=[],
+            auto_approve=auto_approve,
             always_ask=[],
         )
         provider.set_permission_handler(handler)
-        log.info("ChatRunner: permission handler wired (ask-on-every-tool)")
 
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
@@ -373,6 +422,10 @@ class ChatRunner:
                     continue
 
                 log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r} one_on_one={one_on_one}")
+                # Stash for the recent-yes auto-approval path. The handler
+                # reads this when its bridge fires; the time.monotonic()
+                # stamp is what enforces the recency window.
+                self._latest_user_msg = (msg_id or text, text, time.monotonic())
 
                 # Pre-intro user messages: buffer in memory and persist at
                 # drain time, AFTER the intro has been written to the record.

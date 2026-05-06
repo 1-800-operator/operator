@@ -93,6 +93,14 @@ def _matches_any(tool_name, patterns):
 REPLY_TIMEOUT_SECONDS = 600
 POLL_INTERVAL = 0.5
 
+# How recently the user must have said "yes" (as the turn's input) for
+# the bridge to treat that affirmation as the approval for an
+# immediately-following tool gate. Tight enough that an unrelated "yes"
+# from earlier in the meeting can't drift into auto-approving a tool
+# the user never intended; loose enough to span the model's typical
+# 1–10s reply-to-tool latency on chained MCP calls.
+RECENT_YES_WINDOW_SECONDS = 30
+
 # Maximum length of a single tool argument value rendered into the chat
 # confirmation prompt. Long values are head…tail-truncated so a 50KB Write
 # `content` argument doesn't blow up the chat panel.
@@ -316,17 +324,49 @@ class PermissionChatHandler:
             return self._round_trip(tool_name, tool_input)
 
     def _round_trip(self, tool_name, tool_input):
-        prompt = _format_confirmation(tool_name, tool_input)
-        log.info(f"PermissionChatHandler: asking user about {tool_name!r}")
-        try:
-            self._runner._send(prompt, kind="confirmation")
-        except Exception as e:
-            log.error(f"PermissionChatHandler: failed to post confirmation: {e}")
-            return {
-                "permissionDecision": "deny",
-                "permissionDecisionReason": f"could not post confirmation to chat: {e}",
-            }
+        # Phase 14.19.8 — the natural-language question is authored by the
+        # inner-claude model in its pre-tool narration (steered by
+        # claude_cli._PRE_TOOL_VOICE_RULE) and lands in chat via the
+        # provider's streaming on_paragraph path BEFORE this handler is
+        # invoked. We do not post a templated card; we just block here
+        # waiting for the user's next chat message and treat that as the
+        # approval/deny.
+        #
+        # Recent-yes auto-approval. When the user said "yes" (or
+        # equivalent) seconds ago AS THE TURN'S INPUT — i.e. their
+        # approval was already consumed as the user_text the LLM is
+        # currently responding to — there's no fresh chat message coming
+        # for this gate; the user already approved and has moved on. We'd
+        # otherwise sit forever waiting for a redundant second "yes". So
+        # before await_reply, peek at the most recent user message: if
+        # it's unambiguously affirmative, within the recency window, and
+        # not yet consumed by a prior gate, we auto-allow and mark the
+        # message id consumed so chained tool calls within the same turn
+        # fall through to the normal await path (the user has to
+        # re-approve each subsequent tool — one yes, one tool).
+        latest = getattr(self._runner, "_latest_user_msg", None)
+        if latest is not None:
+            msg_id, text, observed_at = latest
+            consumed = getattr(self._runner, "_approval_msg_ids_used", set())
+            age_s = time.monotonic() - observed_at
+            if (
+                msg_id not in consumed
+                and age_s <= RECENT_YES_WINDOW_SECONDS
+                and _is_yes(text)
+            ):
+                consumed.add(msg_id)
+                log.info(
+                    f"PermissionChatHandler: auto-allow {tool_name!r} "
+                    f"from recent user yes (age={age_s:.1f}s, text={text!r})"
+                )
+                return {
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": (
+                        f"user said yes {age_s:.0f}s ago: {text!r}"
+                    ),
+                }
 
+        log.info(f"PermissionChatHandler: awaiting user reply for {tool_name!r}")
         reply = self._await_reply(REPLY_TIMEOUT_SECONDS)
         if reply is None:
             log.warning(

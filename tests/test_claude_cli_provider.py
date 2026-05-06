@@ -213,6 +213,72 @@ def test_permission_handler_deny():
             pass
 
 
+def test_yolo_mode_writes_narrate_declaratively():
+    """OPERATOR_YOLO=1 should suppress the WRITE-tier question requirement.
+
+    Under YOLO the inner CLI gets --dangerously-skip-permissions. The
+    pre-14.19.8 comment claimed this also bypassed PreToolUse hooks
+    entirely; live tests in session 196 showed it does NOT — hooks still
+    fire under YOLO (handler is called) but the bot would otherwise still
+    ask questions per the WRITE rule, leaving the user thinking they need
+    to approve when they don't.
+    The YOLO override appended after _PRE_TOOL_VOICE_RULE flattens writes
+    into the read tier — declarative narration only.
+
+    Verifies: (a) Write task fires the tool, (b) the file actually
+    lands, (c) the bot's pre-tool sentence is declarative (no '?').
+    """
+    import os
+    import tempfile
+
+    target = os.path.join(tempfile.mkdtemp(prefix="claude-yolo-"), "marker.txt")
+    saved = os.environ.get("OPERATOR_YOLO")
+    os.environ["OPERATOR_YOLO"] = "1"
+    handler_calls = []
+
+    def handler(tool_name, tool_input):
+        handler_calls.append(tool_name)
+        return {"permissionDecision": "allow", "permissionDecisionReason": "yolo allow"}
+
+    provider = ClaudeCLIProvider(permission_handler=handler)
+    try:
+        prompt = (
+            f"Use the Write tool to create the file at {target} with the "
+            f"contents 'yolo_marker'. Then in one short sentence, confirm "
+            f"what you wrote. Do not retry."
+        )
+        history = [{"role": "user", "content": prompt}]
+        response = provider.complete(
+            system=None, messages=history, model=None, max_tokens=None,
+        )
+        text = (response.text or "").strip()
+        print(f"  reply: {text[:150]!r}")
+        print(f"  handler calls: {handler_calls}")
+        assert os.path.exists(target), (
+            f"YOLO mode should auto-run the Write — file missing at {target}"
+        )
+        # The bot's reply may contain question marks for non-tool reasons,
+        # but the pre-tool sentence (before the first period) must be
+        # declarative — that's what the YOLO override is enforcing.
+        first_sentence = text.split(".")[0]
+        assert "?" not in first_sentence, (
+            f"YOLO override failed: pre-tool sentence is interrogative — {first_sentence!r}"
+        )
+        print("  YOLO writes narrate declaratively OK")
+    finally:
+        provider.stop()
+        if saved is None:
+            os.environ.pop("OPERATOR_YOLO", None)
+        else:
+            os.environ["OPERATOR_YOLO"] = saved
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+            os.rmdir(os.path.dirname(target))
+        except OSError:
+            pass
+
+
 def test_build_provider_returns_claude_cli():
     """build_provider() returns a ClaudeCLIProvider in v1 (claude is the only brain)."""
     from _1_800_operator.pipeline.providers import build_provider
@@ -451,6 +517,8 @@ def main():
     test_permission_handler_deny()
     print("test_subprocess_restart_with_resume")
     test_subprocess_restart_with_resume()
+    print("test_yolo_mode_writes_narrate_declaratively")
+    test_yolo_mode_writes_narrate_declaratively()
     print("test_build_provider_returns_claude_cli")
     test_build_provider_returns_claude_cli()
     print("\nAll claude_cli provider tests passed.")
