@@ -51,3 +51,6 @@ debug/model-log.md
 # Runtime debug artifacts from MacOSAdapter session logging
 debug/pre_camera_toggle.html
 debug/pre_camera_toggle.png
+
+# Compiled Swift helper — built by install.sh (or local swiftc) per machine
+src/_1_800_operator/swift/operator-audio-capture

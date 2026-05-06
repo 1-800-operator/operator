@@ -13,8 +13,10 @@ System Audio Recording check when slip caption capture ships.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,18 @@ from _1_800_operator.pipeline.install_preflight import chromium_installed
 from _1_800_operator.pipeline.readiness import _probe_claude_code
 
 _AUTH_STATE_FILE = Path.home() / ".operator" / "auth_state.json"
+
+# Slip's audio helper. install.sh compiles to ~/.operator/bin/; dev runs
+# the swiftc-built binary in-tree. Production location wins when both exist.
+_AUDIO_HELPER_INSTALLED = Path.home() / ".operator" / "bin" / "operator-audio-capture"
+_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
+
+
+def _audio_helper() -> Path | None:
+    for p in (_AUDIO_HELPER_INSTALLED, _AUDIO_HELPER_DEV):
+        if p.exists() and p.is_file():
+            return p
+    return None
 
 
 @dataclass(frozen=True)
@@ -134,6 +148,96 @@ def _check_auth_state() -> CheckResult:
     )
 
 
+_TCC_STATUS_DETAIL = {
+    "ok": "granted",
+    "denied": "denied",
+    "restricted": "restricted by policy",
+    "not_determined": "not yet prompted",
+    "unknown": "unknown",
+}
+
+
+def _probe_audio_helper() -> dict[str, str] | None:
+    """Run the helper with --probe; return parsed status dict or None on failure."""
+    helper = _audio_helper()
+    if helper is None:
+        return None
+    try:
+        r = subprocess.run(
+            [str(helper), "--probe"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
+    """TCC Screen Recording — slip system-audio capture (ScreenCaptureKit).
+
+    Apple gates SCK audio behind the same TCC service as video, even when
+    capturing audio only. Without it the helper exits with the silent-
+    failure mode (preflight true, callbacks never fire).
+    """
+    if _audio_helper() is None:
+        return CheckResult(
+            name="Screen Recording (slip)",
+            ok=False,
+            detail="audio helper not built",
+            fix="re-run install.sh to build operator-audio-capture",
+        )
+    if probe is None:
+        return CheckResult(
+            name="Screen Recording (slip)",
+            ok=False,
+            detail="audio helper probe failed",
+            fix="re-run install.sh to rebuild operator-audio-capture",
+        )
+    status = probe.get("screen_recording", "unknown")
+    if status == "ok":
+        return CheckResult("Screen Recording (slip)", True, "granted", "")
+    return CheckResult(
+        name="Screen Recording (slip)",
+        ok=False,
+        detail=_TCC_STATUS_DETAIL.get(status, status),
+        fix=(
+            "System Settings → Privacy & Security → Screen Recording → "
+            "enable for your terminal app, then quit and relaunch it"
+        ),
+    )
+
+
+def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
+    """TCC Microphone — slip mic capture (AVAudioEngine.inputNode)."""
+    if _audio_helper() is None or probe is None:
+        # Same upstream cause as Screen Recording — only report once.
+        return CheckResult(
+            name="Microphone (slip)",
+            ok=False,
+            detail="audio helper unavailable (see Screen Recording check)",
+            fix="",
+        )
+    status = probe.get("microphone", "unknown")
+    if status == "ok":
+        return CheckResult("Microphone (slip)", True, "granted", "")
+    return CheckResult(
+        name="Microphone (slip)",
+        ok=False,
+        detail=_TCC_STATUS_DETAIL.get(status, status),
+        fix=(
+            "System Settings → Privacy & Security → Microphone → "
+            "enable for your terminal app, then quit and relaunch it"
+        ),
+    )
+
+
 def run_doctor() -> int:
     """Run every check, print a checklist, return shell exit code.
 
@@ -151,6 +255,11 @@ def run_doctor() -> int:
         _check_git(),
         _check_auth_state(),
     ]
+    # Slip is macOS-only — TCC checks are meaningless elsewhere.
+    if sys.platform == "darwin":
+        probe = _probe_audio_helper()
+        checks.append(_check_screen_recording(probe))
+        checks.append(_check_microphone(probe))
 
     print()
     print("operator doctor")
@@ -161,7 +270,8 @@ def run_doctor() -> int:
         print(f"  {glyph} {c.name}: {c.detail}")
         if not c.ok:
             failures += 1
-            print(f"      fix: {c.fix}")
+            if c.fix:
+                print(f"      fix: {c.fix}")
     print()
 
     if failures == 0:

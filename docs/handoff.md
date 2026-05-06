@@ -1,40 +1,45 @@
-# Session 193 handoff (2026-05-05) — three small launch-blockers shipped, audio spike landed, mass deletion at 3/8
+# Session 197 handoff (2026-05-05) — Phase 14.20.2 + 14.20.3 SHIPPED
 
-Started by pushing S192's 21 backlogged commits (bridge architecture cutover + slip pivot to dedicated-Chrome-window) and tagging `slip-cdp-v1-foundation` after a green live-test of slip in a real meeting. Then knocked through Phase 14.19.4 (`operator login claude` — single-purpose Playwright Google sign-in lifted from the wizard's step-2), 14.19.5 (`operator doctor` — five-check world-readiness gate built from existing primitives), and 14.19.6 (slip reply-prefix locked to `[🤖 Claude] ` after a real-Meet eyeball test). All three live-validated. Spawned a background subagent for Phase 14.20.1 (audio capture spike) which delivered three artifacts at `debug/14_20_audio_spike/`: a compileable Swift script, an STT comparison locking mlx-whisper-base, and a decision doc — and empirically confirmed two risks for 14.20.2 (ScreenCaptureKit's silent-failure mode + Developer-ID code-signing as a day-one requirement, not polish). Phase 14.20 promoted from Post-MVP to launch-blocker, slotted between 14.19 and Phase 16. Then started 14.19.7 (mass deletion of wizard-era code) and chunked it into 8 surgical sub-steps — A, B, C all shipped this session (~4,200 net lines deleted across three commits), each smoke-tested green between commits.
+Skipped 14.19.9-11 (small polish, not launch-blocking) and went straight to the meaty 14.20.x audio work since the spike from S193 was still fresh. **14.20.2** lands the Swift dual-stream audio helper at `src/_1_800_operator/swift/operator-audio-capture.swift` (288 LOC) — single binary captures system audio via ScreenCaptureKit + mic via AVAudioEngine, writes framed `[1B tag 'S'|'M'][4B BE u32 length][N bytes Float32 16kHz mono PCM]` chunks to stdout, with per-stream 10s no-callback watchdog and TCC preflight for both perms. Single-binary chosen over two-procs (one cdhash → cleaner TCC UX). **14.20.3** adds a `--probe` flag to the same binary (read-only TCC report, prints JSON, never prompts; necessary because TCC.db is SIP-protected) and two new `operator doctor` checks for Screen Recording + Microphone, gated on darwin-only, with fix copy pointing at exact System Settings panes. Smoke-tests passed: clean compile, mic stream flowed (105 frames over 12s with real RMS signal during `say`), framing decoded zero-error, watchdog fired at exactly 10s for the system stream — the empirical replay of the silent-failure mode DECISION.md predicted, fixed by Developer-ID code-signing at release time.
 
-## What landed (all pushed to `origin/main`)
+## What landed (origin/main + 1 unpushed S196 commit + 1 new S197 commit pending)
 
-- `ac93e89` Phase 14.19.4 — `operator login claude`
-- `7bd9b08` roadmap — Phase 14.20 (Swift+ScreenCaptureKit+Whisper) promoted to launch-blocker
-- `3c1dc52` Phase 14.19.5 — `operator doctor`
-- `82694ff` Phase 14.19.6 — slip reply prefix locked to `[🤖 Claude] `
-- `0b7ad5a` 14.19.7-A — strip wizard CLI surface from `__main__` (-238)
-- `ae04a8e` 14.19.7-B — delete the wizard files (-2908: setup.py, build_card.py, picker.py, face.py, terminal.py, custom_template.yaml, `_sync_claude_imports`)
-- `e7ccadf` 14.19.7-C — delete bundled `agents/{claude,codex}/` and `skills/` directories (-1090)
+- `a30537a` 14.19.8 — chat-surfaced permission flow (carried from S196, not yet pushed)
+- **(this commit)** 14.20.2 + 14.20.3 — Swift dual-stream helper + doctor TCC checks
 
-Plus the foundation tag (`slip-cdp-v1-foundation`) and S192's 21 commits pushed at session start.
+Files in this commit:
+- `src/_1_800_operator/swift/operator-audio-capture.swift` (new, 288 LOC)
+- `src/_1_800_operator/pipeline/doctor.py` (+112 / -1)
+- `.gitignore` (+3, ignore the compiled binary)
 
-## Exact next step (session 194)
+Untracked spike utility kept for posterity: `debug/14_20_audio_spike/decode_frames.py` (50-line Python frame decoder used in smoke testing).
 
-**Resume Phase 14.19.7 at step D+E** — one atomic config.py-rewrite-plus-callers chunk. D (OPERATOR_BOT env routing) and E (config.py schema parsing) are deeply intertwined: config.py's module load is gated on `OPERATOR_BOT`, so stripping the env var without the YAML loader leaves config.py crashing at import. Approach:
+## Exact next step (session 198)
 
-1. Catalog every `config.*` reference in surviving files (`pipeline/chat_runner.py`, `pipeline/llm.py`, `pipeline/providers/*`, `pipeline/mcp_client.py`, `connectors/*`, `pipeline/meeting_record.py`, `__main__.py`).
-2. Triage each reference: hardcode (constants like `MAX_TOKENS`, `TOOL_TIMEOUT_SECONDS`), pull from `bridges/claude.py` (per-bridge values like trigger phrase, reply prefix), or remove (wizard-era — `AGENT_NAME`, `MCP_SERVERS`, `SKILLS_*`, `SYSTEM_PROMPT`, `INTRO_ON_JOIN`, `FIRST_CONTACT_HINT`, `AGENT_TAGLINE`, `PERMISSIONS_AUTO_APPROVE`, `PROGRESS_NARRATION_*`).
-3. Write the new minimal `config.py` (~50 LOC: paths + meeting-mechanic constants + runtime tunables; no YAML, no OPERATOR_BOT, no `load_dotenv`).
-4. Update each caller; commit per-file or as one cohesive commit (your call — single commit is cleaner if test green, per-file is safer if something snags).
-5. Drop `OPERATOR_BOT` from `__main__.py` (lines ~226, 534, 571, 745, 1001, 1029, 1114), `readiness.py` (line 43, 225 — comments only), `oauth_cache.py` (line 5 — comment only), `google_signin.py` (lines 36, 58 — comments + the inlined "avoid importing operator.config" workaround can collapse).
-6. Smoke: `python -c "import _1_800_operator.__main__"`, `operator doctor`, `python -m _1_800_operator slip --help`, `python -m _1_800_operator login claude` (don't actually re-auth).
-7. Then step F (chat_runner cleanup — drops `_narration_auto_approve`, `permission_chat_handler`, `codex_elicitation_handler`, `_tail_claude_stream`, then deletes `mcp_servers/claude_code.py` + `pipeline/auth.py`), step G (test triage — expect ~30 test files affected, mostly delete-the-file), step H (final smoke).
+**Phase 14.20.4 — wire the helper into AttachAdapter + MeetingRecord.** Real session-sized work (~3h):
+
+1. Add `mlx-whisper`, `numpy`, `soundfile` back to `pyproject.toml` (all dropped post-14.19.7 since voice-preserved-only).
+2. Port a simplified `AudioProcessor` from `voice-preserved:pipeline/audio.py` — keep VAD constants (`UTTERANCE_SILENCE_RMS=0.02`, `UTTERANCE_SILENCE_THRESHOLD=2`, `UTTERANCE_MAX_DURATION=10`), keep the 0.5s silence pre-pad in `transcribe()` (whisper drops the first word without it), keep mlx-whisper-base. Drop the TTS echo-guard (`is_speaking`) — slip is chat-only.
+3. Two `AudioProcessor` instances in `AttachAdapter` — one fed by `[S]` frames (speaker="other"), one by `[M]` frames (speaker="user"). Each runs its own utterance loop on its own thread.
+4. Spawn helper as `subprocess.Popen([helper_path], stdin=PIPE, stdout=PIPE, stderr=...)` in `AttachAdapter.join()` after CDP connection. Reader thread parses framed stdout and dispatches PCM to the right processor. Keep stdin held open for meeting lifetime; closing triggers helper's clean shutdown.
+5. When a processor finalizes an utterance, call `MeetingRecord.append_caption(speaker, text, timestamp)` — same JSONL shape `captions_js.py` produces, so `mcp_servers/transcript_server.py` reads slip captions identically to dial.
+6. Smoke-test mic-only end-to-end (system-stream confirmation belongs in 14.20.5 post code-signing).
+
+`install.sh` build wiring rolls into 14.20.4 since both touch helper-path resolution. After `uv tool install`, install.sh resolves the package's swift/ via `python -c "import _1_800_operator; print(_1_800_operator.__file__)"`, runs `swiftc <pkg>/swift/operator-audio-capture.swift -O -o ~/.operator/bin/operator-audio-capture`, marks executable. Mac-only branch; Linux skips.
+
+Then **14.20.5** (live-test) — gated on Developer-ID code-signing → release time per `project_apple_dev_account_deferred.md`.
 
 ## Open questions / blockers
 
-- **Apple Developer account for 14.20.2** — Developer-ID code-signing is now a day-one requirement (Risk #2 from the audio spike was empirically confirmed). Does Anthropic / operator org have an Apple Developer account ($99/year + DUNS prep)? If not, getting one is on the critical path before 14.20.2 ships its first release. Without it, every operator update will TCC re-prompt every user, and dev-loop iteration on the helper requires re-granting permissions on every `swiftc` recompile.
-- **Doctor's TCC checks** — `operator doctor` doesn't yet check macOS Screen & System Audio Recording or Microphone grants. Phase 14.20.3 is the natural place to extend it via in-process `CGPreflightScreenCaptureAccess()` + `AVCaptureDevice.authorizationStatus(for: .audio)` probes (simpler than the SIP-protected `TCC.db` query path which requires Full Disk Access).
-- **Spike's runtime audio test still failing** — terminal-from-Cursor and terminal-from-Terminal.app both produce 0 bytes from spike_capture. Not blocking 14.20.2 (the architecture is independently validated by `voice-preserved`'s shipped ScreenCaptureKit code + Granola's same approach), but live runtime confirmation needs the Developer-ID-signed helper before it'll work cleanly. Treat current spike result as "API path validated, runtime grant attribution deferred to 14.20.2."
+- **14.19.9 / 14.19.10 / 14.19.11 skipped this lineage.** Not launch-blocking. Carry forward as post-launch polish: 14.19.9 (install.sh sendoff/welcome refresh — surface `--yolo` + `~/.claude/settings.json` overlay), 14.19.10 (fresh-Mac ladder live-test), 14.19.11 (docs refresh + ~700 LOC `mcp_client.py` deletion per S195 handoff).
+- **Apple Developer account** for production code-signing — explicitly deferred to release-time per memory. 14.20.4 doesn't need it (mic-side validation works under ad-hoc signature; system-side waits for 14.20.5).
+- **Commit `a30537a` (14.19.8) still local on `main`, not yet pushed** — carried from S196.
 
 ## Don't forget
 
-- All session-193 commits are on `origin/main`; nothing on `public/main` yet (the public-snapshot dance is per-release, not per-commit).
-- `debug/14_20_audio_spike/` is untracked. Spike artifacts can be committed for archival or kept untracked — they're historical reference for 14.20.2, not load-bearing.
-- The "macOS will lie about granted permissions" framing of Risk #1 was overstated. Actual observed behavior: preflight returns true when the responsible-process attribution chain has *some* ancestor with a grant, but frame delivery enforces against the immediate responsible process. Real edge cases are narrower (Sequoia weekly re-prompt, TCC cache staleness, helper-bundle drift). Watchdog is still cheap insurance, just don't oversell it as the primary failure mode.
-- 14.19.7 step D+E rewrite of config.py is the largest single piece of remaining surgery in 14.19.7. Plan ~1.5h for it. Step F (chat_runner) is the second-largest — also touches a long-running threading-heavy file. G + H are smaller. Total remaining 14.19.7 work: ~2-2.5h.
+- The compiled binary `src/_1_800_operator/swift/operator-audio-capture` is now gitignored. Source ships in the wheel via hatchling default (per `pyproject.toml:60`). install.sh compiles per-machine.
+- The 10s no-callback watchdog is load-bearing diagnostic. Don't remove it in 14.20.4 even if the system stream starts working — it's the only signal that distinguishes "TCC silent-failure" from "system is just quiet."
+- The `excludesCurrentProcessAudio = true` flag on the SCStream config means the helper won't echo its own stderr / log noise. Don't flip it.
+- The mic side uses `AVAudioConverter` to downsample from hardware format (48kHz 1ch on this Mac) to 16kHz Float32 mono target. The converter callback supplies the input buffer once via the `supplied` flag — don't loop or you'll re-feed the same buffer.
+- Doctor's `_check_microphone` deliberately defers to `_check_screen_recording` when the upstream cause (helper missing) is shared. This avoids printing two near-identical "rebuild the binary" fix lines. If you split the helper into separate binaries later (don't — see TCC reasoning), reconsider this.
+- TCC has a permission-restart-pending mode where a granted permission isn't yet live to a running parent app. If smoke tests show "permissions granted in Settings, but binary still gets the silent-failure callback drought," quit + relaunch the parent terminal app. This is the user-NOTE.md gotcha from S193.
