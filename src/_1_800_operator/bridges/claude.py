@@ -17,10 +17,13 @@ import sys
 
 TRIGGER_PHRASE = "@claude"
 
-# slip-mode reply attribution. Locked in 14.19.6 after side-by-side mockup
-# in a real Meet — this is the leading default; brackets and italics are
-# still candidates until then.
-REPLY_PREFIX_SLIP = "🤖 "
+# slip-mode reply attribution. Locked S193 (Phase 14.19.6) after side-by-side
+# eyeball test in a real Meet against three candidates: brackets-only
+# (`[Claude] `), emoji-only (`🤖 `), and italics (`_…_`). Hybrid won — brackets
+# give at-a-glance scannability, the emoji gives instant visual ID without
+# reading, and the literal "Claude" disambiguates which bot when codex/gemini
+# bridges land. No user-facing knob; one prefix, hardcoded.
+REPLY_PREFIX_SLIP = "[🤖 Claude] "
 
 # dial/deploy modes: claude is a separate participant under its own Google
 # account, so attribution is intrinsic — no prefix needed.

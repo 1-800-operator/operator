@@ -424,8 +424,9 @@ class AttachAdapter(MeetingConnector):
         (caller falls back to text-match dedup).
 
         slip-mode quirk: the message is prefixed with self._reply_prefix
-        (e.g. '🤖 ') so the room can distinguish claude's words from the
-        user's own typing. Empty prefix (dial/deploy) means no marker.
+        (e.g. '[🤖 Claude] ') so the room can distinguish claude's words
+        from the user's own typing. Empty prefix (dial/deploy) means no
+        marker. Prefix value lives in `bridges/claude.py:REPLY_PREFIX_SLIP`.
 
         Direct call — no queue/thread bridging needed because slip runs
         playwright on the same thread that drives ChatRunner. The
@@ -459,7 +460,8 @@ class AttachAdapter(MeetingConnector):
     def read_chat(self):
         """Drain the JS-side chat queue. Mirrors MacOSAdapter._do_read_chat.
 
-        Slip-mode quirk: send_chat prepends self._reply_prefix (🤖 ) to
+        Slip-mode quirk: send_chat prepends self._reply_prefix
+        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) to
         outgoing messages so the room can distinguish claude's words from
         the user's typing. The DOM observer reads back the prefixed
         text. ChatRunner's _own_messages dedup set stores the
