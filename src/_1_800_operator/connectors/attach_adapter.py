@@ -44,9 +44,12 @@ from __future__ import annotations
 
 import logging
 import os
+import struct
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
@@ -84,6 +87,26 @@ SLIP_PROFILE_DIR = os.path.expanduser("~/.operator/slip_profile")
 # points at a real problem (port collision, Chrome crash, OS issue).
 CDP_READY_TIMEOUT_SECONDS = 30
 
+# operator-audio-capture (14.20.2) lives at one of two paths. Production
+# wins when both exist; mirrors doctor.py:_AUDIO_HELPER_INSTALLED. Dev path
+# is the swiftc-built artifact in-tree (debug spike + manual rebuilds).
+_AUDIO_HELPER_INSTALLED = Path.home() / ".operator" / "bin" / "operator-audio-capture"
+_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
+
+# Frame format from the helper: [1B tag 'S'|'M'][4B BE u32 length][N bytes Float32 16kHz mono PCM].
+# 'S' = system audio (other participants), 'M' = mic (local user).
+# Source of truth: src/_1_800_operator/swift/operator-audio-capture.swift.
+_FRAME_TAG_SYSTEM = b"S"
+_FRAME_TAG_MIC = b"M"
+_FRAME_HEADER_LEN = 5  # 1 byte tag + 4 byte BE u32 length
+
+# Speaker labels written into the meeting record. "user" matches what
+# transcript_server.py / llm.py expect for the local-side speaker; the
+# remote side gets "other" (we don't have per-participant attribution
+# from system audio — Whisper alone can't diarize Meet's mixed stream).
+_SPEAKER_USER = "user"
+_SPEAKER_OTHER = "other"
+
 
 class SlipAttachError(RuntimeError):
     """Raised when the slip-mode attach lifecycle fails fatally.
@@ -91,6 +114,21 @@ class SlipAttachError(RuntimeError):
     Caught by _run_slip and presented to the user as a clean stderr
     message with a fix hint, not a stack trace.
     """
+
+
+def _resolve_audio_helper() -> Path | None:
+    """Return the path to operator-audio-capture, or None if missing.
+
+    Production install (~/.operator/bin/) wins over in-tree dev build
+    when both exist. None means audio capture is unavailable; AttachAdapter
+    skips spawning and runs in chat-only mode (warning logged, no crash —
+    audio is an enhancement, not a hard requirement for slip).
+    """
+    if _AUDIO_HELPER_INSTALLED.exists() and os.access(_AUDIO_HELPER_INSTALLED, os.X_OK):
+        return _AUDIO_HELPER_INSTALLED
+    if _AUDIO_HELPER_DEV.exists() and os.access(_AUDIO_HELPER_DEV, os.X_OK):
+        return _AUDIO_HELPER_DEV
+    return None
 
 
 def _evict_other_chrome_on_cdp_port() -> bool:
@@ -318,6 +356,16 @@ class AttachAdapter(MeetingConnector):
         self._page = None
         self._chrome_proc = None
         self._observer_installed = False
+        # Audio pipeline (14.20.4) — populated by _start_audio_pipeline()
+        # after meeting entry. Stays None on Linux (mac-only helper) or
+        # when the helper binary hasn't been built. set_caption_callback
+        # may be invoked before or after join(); the late-bound callback
+        # path matches macos_adapter's contract.
+        self._caption_callback = None
+        self._audio_helper_proc: subprocess.Popen | None = None
+        self._audio_processors: dict[bytes, "object"] = {}
+        self._audio_threads: list[threading.Thread] = []
+        self._audio_stop = threading.Event()
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -413,7 +461,31 @@ class AttachAdapter(MeetingConnector):
                 "`operator slip claude <url>` when you're ready."
             )
 
+        # Audio is best-effort — meeting entry already succeeded, so failure
+        # to spawn the helper must NOT fail the join. _start_audio_pipeline
+        # logs and returns silently on any error; chat-only mode is the
+        # safe fallback.
+        self._start_audio_pipeline()
+
         js.signal_success()
+
+    def set_caption_callback(self, fn):
+        """Register fn(speaker, text, timestamp) for finalized utterances.
+
+        Mirrors macos_adapter contract — may be called before OR after
+        join(). The audio pipeline buffers utterances internally and
+        delivers them through whichever callback is registered at the
+        moment the utterance finalizes; late-bind is fine. Pass None to
+        unregister.
+
+        AttachAdapter's "captions" are local Whisper transcriptions of
+        the helper's two PCM streams (system + mic), not Meet's caption
+        DOM. Each call delivers one finalized utterance — no streaming
+        partials, so callers don't need TranscriptFinalizer's silence /
+        prefix-strip logic. dial wires this through TranscriptFinalizer;
+        slip wires a direct write into MeetingRecord.
+        """
+        self._caption_callback = fn
 
     def send_chat(self, message):
         """Post a message to chat with the slip-mode reply prefix.
@@ -522,6 +594,7 @@ class AttachAdapter(MeetingConnector):
         keeps running with all its tabs (including the Meet tab claude
         was attached to). Idempotent.
         """
+        self._stop_audio_pipeline()
         self._teardown_playwright()
         log.info("AttachAdapter: detached from Chrome (Chrome left running)")
 
@@ -676,3 +749,203 @@ class AttachAdapter(MeetingConnector):
                 log.debug(f"AttachAdapter: playwright.stop raised: {e}")
             self._playwright = None
         self._page = None
+
+    # ------------------------------------------------------------------
+    # Audio pipeline (14.20.4)
+    # ------------------------------------------------------------------
+
+    def _start_audio_pipeline(self) -> None:
+        """Spawn operator-audio-capture and wire it through two AudioProcessors.
+
+        Best-effort — any failure here logs a warning and leaves the
+        connector in chat-only mode. The reasons audio might not come up:
+          - Linux (helper is Mac-only)
+          - Helper binary not built (install.sh hasn't run, or dev tree
+            without a manual swiftc)
+          - Helper exits early on TCC denial (Screen Recording / Mic) —
+            the ten-second watchdog and exit codes 4/5 surface this; the
+            user is told to run `operator doctor` for the fix copy
+
+        Layout of the spawned pipeline:
+          helper stdout --> _audio_reader_loop --> processors[tag].feed_audio
+          processors['S']     --> _audio_utterance_loop("other") --> caption_callback
+          processors['M']     --> _audio_utterance_loop("user")  --> caption_callback
+        """
+        if sys.platform != "darwin":
+            return
+        helper = _resolve_audio_helper()
+        if helper is None:
+            log.warning(
+                "AttachAdapter: operator-audio-capture not found — slip will run "
+                "chat-only (no transcript). Run install.sh to build the helper."
+            )
+            return
+
+        try:
+            from _1_800_operator.pipeline.audio import AudioProcessor
+        except ImportError as e:
+            log.warning(f"AttachAdapter: AudioProcessor import failed ({e}) — chat-only mode")
+            return
+
+        try:
+            log.info("AudioProcessor: warming mlx-whisper-base (one-time per process)…")
+            self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
+            self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
+        except Exception as e:
+            log.warning(f"AttachAdapter: AudioProcessor warmup failed ({e}) — chat-only mode")
+            self._audio_processors.clear()
+            return
+
+        # Helper stderr → /tmp/operator.log (append). Same destination as
+        # operator's own logs so users have one place to look. Health line
+        # ("10s health: [S]=… cb / [M]=… cb"), TCC fatals, and shutdown
+        # totals all land here.
+        try:
+            stderr_sink = open("/tmp/operator.log", "ab")
+            self._audio_helper_proc = subprocess.Popen(
+                [str(helper)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_sink,
+                bufsize=0,
+            )
+        except OSError as e:
+            log.warning(f"AttachAdapter: spawning {helper} failed ({e}) — chat-only mode")
+            self._audio_processors.clear()
+            return
+
+        # Mark processors capturing BEFORE the utterance threads start so
+        # the loop conditions don't immediately exit.
+        for proc in self._audio_processors.values():
+            proc.capturing = True
+
+        reader = threading.Thread(
+            target=self._audio_reader_loop,
+            name="AttachAdapter-audio-reader",
+            daemon=True,
+        )
+        reader.start()
+        self._audio_threads.append(reader)
+
+        for tag, label in (
+            (_FRAME_TAG_SYSTEM, _SPEAKER_OTHER),
+            (_FRAME_TAG_MIC, _SPEAKER_USER),
+        ):
+            t = threading.Thread(
+                target=self._audio_utterance_loop,
+                args=(tag, label),
+                name=f"AttachAdapter-utterance-{label}",
+                daemon=True,
+            )
+            t.start()
+            self._audio_threads.append(t)
+
+        log.info(f"AttachAdapter: audio pipeline up (helper={helper}, pid={self._audio_helper_proc.pid})")
+
+    def _audio_reader_loop(self) -> None:
+        """Parse framed PCM from helper stdout, dispatch to the right processor.
+
+        Exits cleanly on EOF (helper closed stdout, typically after stdin
+        close or fatal TCC error). Exits cleanly on _audio_stop set.
+        Malformed frames (unknown tag, oversized length) are logged and
+        the stream is abandoned — recovering from a desync would require
+        re-syncing on a known sentinel, which the protocol doesn't have.
+        Helper restarting is the recovery path; we don't do that here.
+        """
+        proc = self._audio_helper_proc
+        if proc is None or proc.stdout is None:
+            return
+        # Cap frame size to a sane upper bound. The helper emits ~40ms
+        # chunks (~5KB at 16kHz Float32). Anything > 1MB means the stream
+        # is corrupted; bail.
+        MAX_FRAME_BYTES = 1 << 20
+        try:
+            while not self._audio_stop.is_set():
+                header = proc.stdout.read(_FRAME_HEADER_LEN)
+                if len(header) < _FRAME_HEADER_LEN:
+                    log.info("AttachAdapter: audio reader EOF — helper exited")
+                    break
+                tag = header[0:1]
+                (length,) = struct.unpack(">I", header[1:5])
+                if length == 0 or length > MAX_FRAME_BYTES:
+                    log.warning(f"AttachAdapter: bogus frame length {length} — abandoning audio stream")
+                    break
+                pcm = proc.stdout.read(length)
+                if len(pcm) < length:
+                    log.info("AttachAdapter: audio reader truncated read — helper exited mid-frame")
+                    break
+                target = self._audio_processors.get(tag)
+                if target is None:
+                    log.warning(f"AttachAdapter: unknown frame tag {tag!r} — dropping {length}B")
+                    continue
+                target.feed_audio(pcm)
+        except Exception as e:
+            log.warning(f"AttachAdapter: audio reader loop crashed: {e}")
+
+    def _audio_utterance_loop(self, tag: bytes, speaker_label: str) -> None:
+        """Drain finalized utterances from one processor, fire caption callback.
+
+        Loop exits when the processor flips capturing=False (set by
+        _stop_audio_pipeline). Each utterance is delivered exactly once;
+        the callback is captured by reference at call time so a late
+        set_caption_callback also works.
+        """
+        proc = self._audio_processors.get(tag)
+        if proc is None:
+            return
+        while proc.capturing and not self._audio_stop.is_set():
+            try:
+                text = proc.capture_next_utterance()
+            except Exception as e:
+                log.warning(f"AttachAdapter: utterance loop ({speaker_label}) raised: {e}")
+                continue
+            if not text:
+                continue
+            cb = self._caption_callback
+            if cb is None:
+                log.debug(f"AttachAdapter: utterance dropped (no callback) [{speaker_label}] {text!r}")
+                continue
+            try:
+                cb(speaker_label, text, time.time())
+            except Exception as e:
+                log.warning(f"AttachAdapter: caption callback raised: {e}")
+
+    def _stop_audio_pipeline(self) -> None:
+        """Tear down the audio pipeline. Idempotent.
+
+        Order matters: flip capturing=False so the utterance loops exit
+        their next tick, set the stop event so the reader breaks out,
+        then close helper stdin (which the helper watches for EOF and
+        exits on). SIGTERM + a short wait is the fallback.
+        """
+        if self._audio_helper_proc is None and not self._audio_processors:
+            return
+        for proc in self._audio_processors.values():
+            proc.capturing = False
+        self._audio_stop.set()
+        proc_handle = self._audio_helper_proc
+        if proc_handle is not None:
+            try:
+                if proc_handle.stdin is not None:
+                    proc_handle.stdin.close()
+            except Exception as e:
+                log.debug(f"AttachAdapter: closing helper stdin raised: {e}")
+            try:
+                proc_handle.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                log.warning("AttachAdapter: helper didn't exit on stdin close — terminating")
+                try:
+                    proc_handle.terminate()
+                    proc_handle.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc_handle.kill()
+                except Exception:
+                    pass
+            except Exception as e:
+                log.debug(f"AttachAdapter: helper wait raised: {e}")
+            self._audio_helper_proc = None
+        for t in self._audio_threads:
+            t.join(timeout=1.5)
+        self._audio_threads.clear()
+        self._audio_processors.clear()
+        log.info("AttachAdapter: audio pipeline torn down")

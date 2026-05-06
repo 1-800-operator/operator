@@ -12,7 +12,8 @@
 #   5. Downloads Playwright's Chromium runtime (~170 MB).
 #   6. Seeds ~/.operator/.env with commented API-key placeholders.
 #   7. On macOS, checks for Google Chrome and prints an install nudge if missing.
-#   8. Prints sendoff with the next-step command (auto-prefixed with
+#   8. On macOS, compiles operator-audio-capture (slip-mode audio helper).
+#   9. Prints sendoff with the next-step command (auto-prefixed with
 #      `source ~/.local/bin/env` if uv's tool dir wasn't already on PATH).
 #
 # Idempotent — safe to re-run. Does not modify shell rc files.
@@ -135,7 +136,45 @@ if [ "${OS}" = "macos" ]; then
   fi
 fi
 
-# -- 8. Sendoff --------------------------------------------------------------
+# -- 8. macOS audio helper (operator-audio-capture) -------------------------
+
+# Compiles the slip-mode dual-stream audio capture helper. The Swift source
+# ships in the wheel under _1_800_operator/swift/; this step turns it into
+# a per-machine binary at ~/.operator/bin/operator-audio-capture so TCC has
+# a stable cdhash to authorize. Mac-only — Linux skips silently.
+#
+# Soft-fail: if swiftc is missing, slip mode falls back to chat-only (no
+# transcript). The helper is also rebuilt by re-running this script.
+
+if [ "${OS}" = "macos" ]; then
+  bold "Building operator-audio-capture (slip-mode audio helper)..."
+  if ! command -v swiftc >/dev/null 2>&1; then
+    warn "swiftc not found — skipping audio helper build."
+    warn "Slip mode will run chat-only without it."
+    warn "Install Xcode Command Line Tools with: xcode-select --install"
+    warn "Then re-run this installer."
+  else
+    TOOL_DIR="$(uv tool dir)/1-800-operator"
+    PY_IN_TOOL="${TOOL_DIR}/bin/python"
+    if [ ! -x "${PY_IN_TOOL}" ]; then
+      err "Could not find tool venv python at ${PY_IN_TOOL} — skipping audio helper."
+    else
+      SWIFT_SRC="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "swift" / "operator-audio-capture.swift")')"
+      BIN_DIR="${HOME}/.operator/bin"
+      BIN_OUT="${BIN_DIR}/operator-audio-capture"
+      mkdir -p "${BIN_DIR}"
+      if swiftc "${SWIFT_SRC}" -O -o "${BIN_OUT}"; then
+        chmod +x "${BIN_OUT}"
+        info "Built ${BIN_OUT}"
+      else
+        err "swiftc failed — slip will run chat-only."
+      fi
+    fi
+  fi
+  echo
+fi
+
+# -- 9. Sendoff --------------------------------------------------------------
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so
 # `operator` will be found in this terminal *and* future ones). If not, the

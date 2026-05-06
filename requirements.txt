@@ -9,6 +9,12 @@ pyyaml==6.0.3          # plain YAML reads/writes; ruamel.yaml is for round-trip 
 rich==14.3.3           # TUI used by `operator setup` wizard
 readchar==4.2.2        # cross-platform key reads for the wizard's arrow-key pickers
 
+# ── Audio pipeline (Phase 14.20.4) ────────────────────────────────────────────
+# Local Whisper STT for slip mode. Mac-only at runtime; Linux dial doesn't import.
+mlx-whisper==0.4.3
+numpy==2.4.3
+soundfile==0.13.1
+
 # ── Security floors for transitive deps (pip-audit, session 138) ──────────────
 # Left as `>=` (not `==`) so future CVE patches land on `pip install -U` without
 # a requirements edit. Bump the floor when a newer CVE ships.

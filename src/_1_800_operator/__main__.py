@@ -382,6 +382,20 @@ def _run_slip(name, rest):
 
     connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
 
+    # Wire whisper utterances → meeting record. Direct-write (no
+    # TranscriptFinalizer): each callback delivers ONE finalized
+    # utterance, not a streaming partial. Routing through TF would
+    # double-buffer (whisper finalize + TF silence wait) and risk
+    # coalescing two same-speaker utterances inside TF's 0.7s window —
+    # whisper's segmentation must be authoritative here.
+    def _on_utterance(speaker: str, text: str, timestamp: float) -> None:
+        try:
+            meeting_record.append(speaker, text, kind="caption", timestamp=timestamp)
+        except Exception as exc:
+            log.warning(f"slip: append caption failed: {exc}")
+
+    connector.set_caption_callback(_on_utterance)
+
     ui.say("Launching slip Chrome…")
     try:
         connector.join(url)
