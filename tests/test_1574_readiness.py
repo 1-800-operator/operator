@@ -291,7 +291,7 @@ def test_claude_code_prereq_missing_on_malformed_json():
         report = report_mcp_readiness(servers)
     rec = report["claude-code"]
     assert rec["status"] == "prereq_missing", rec
-    assert "unparseable" in rec["fix"], rec
+    assert "claude auth login" in rec["fix"], rec
     print("PASS  test_claude_code_prereq_missing_on_malformed_json")
 
 

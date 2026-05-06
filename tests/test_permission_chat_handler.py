@@ -114,7 +114,7 @@ def test_format_confirmation_truncates_long_args():
     parameter dump used here.
     """
     from _1_800_operator import config
-    saved_voice = config.VOICE
+    saved_voice = getattr(config, "VOICE", "plain")
     config.VOICE = "technical"
     try:
         out = _format_confirmation("Write", {
@@ -134,7 +134,7 @@ def test_format_confirmation_truncates_long_args():
 def test_format_confirmation_no_args():
     """Technical-voice path emits "(no arguments)" for empty arg dicts."""
     from _1_800_operator import config
-    saved_voice = config.VOICE
+    saved_voice = getattr(config, "VOICE", "plain")
     config.VOICE = "technical"
     try:
         out = _format_confirmation("Read", {})

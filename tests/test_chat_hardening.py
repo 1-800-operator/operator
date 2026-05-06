@@ -80,40 +80,6 @@ def test_meeting_record_tail_roundtrip(tmp_dir=None):
     print("  meeting record roundtrip: PASS")
 
 
-def test_first_contact_hint():
-    """FIRST_CONTACT_HINT is appended to a participant's first in-session message only."""
-    from unittest.mock import MagicMock
-    from _1_800_operator.pipeline.llm import LLMClient
-    from _1_800_operator.pipeline.meeting_record import MeetingRecord
-
-    record = MeetingRecord(slug=None)
-    llm = LLMClient(MagicMock(), record=record)
-    llm._max_messages = 20
-    # Force a known template regardless of config.yaml
-    original = config.FIRST_CONTACT_HINT
-    config.FIRST_CONTACT_HINT = "(first-time: {first_name})"
-    try:
-        record.append("Alice Example", "hi")
-        record.append(config.AGENT_NAME, "hello")
-        record.append("Bob", "sup")
-        record.append("Alice Example", "again")
-
-        msgs = llm._tail_messages()
-        user_contents = [m["content"] for m in msgs if m["role"] == "user"]
-        # Alice's first msg should have the hint; Bob's first msg too; Alice's second msg should NOT.
-        assert user_contents[0] == "Alice: hi (first-time: Alice)", user_contents[0]
-        assert user_contents[1] == "Bob: sup (first-time: Bob)", user_contents[1]
-        assert user_contents[2] == "Alice: again", user_contents[2]
-
-        # A second call with no new senders should not re-tag anyone
-        msgs2 = llm._tail_messages()
-        user_contents2 = [m["content"] for m in msgs2 if m["role"] == "user"]
-        assert all("first-time" not in c for c in user_contents2), user_contents2
-    finally:
-        config.FIRST_CONTACT_HINT = original
-    print("  first contact hint: PASS")
-
-
 def test_slug_from_url():
     from _1_800_operator.pipeline.meeting_record import slug_from_url
     assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == "pgy-qauk-frn"
@@ -181,7 +147,6 @@ if __name__ == "__main__":
     print("Chat hardening tests:")
     test_history_cap()
     test_meeting_record_tail_roundtrip()
-    test_first_contact_hint()
     test_slug_from_url()
     test_trigger_phrase_gating()
     test_trigger_phrase_stripping()

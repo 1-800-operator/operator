@@ -65,11 +65,13 @@ def test_ask_no_tools_calls_provider_once():
     assert reply == "Hello back."
     provider.complete.assert_called_once()
     kwargs = provider.complete.call_args.kwargs
-    # system = config.SYSTEM_PROMPT + SAFETY_RULES (appended in LLMClient.__init__
-    # to protect against prompt injection from tool results and captions)
+    # system = SAFETY_RULES (appended in LLMClient.__init__ to protect
+    # against prompt injection from tool results and captions). 14.19.7-F
+    # dropped the wizard's composed system prompt — claude reads its own
+    # CLAUDE.md natively when the binary spawns.
     from _1_800_operator.pipeline.llm import SAFETY_RULES
-    assert kwargs["system"] == config.SYSTEM_PROMPT + SAFETY_RULES
-    assert kwargs["model"] == config.LLM_MODEL
+    assert kwargs["system"] == SAFETY_RULES
+    assert kwargs["model"] == ""
     assert kwargs["max_tokens"] == config.MAX_TOKENS
     assert kwargs["tools"] is None
     # Tail should be the single user message from the record
@@ -84,46 +86,36 @@ def test_ask_no_tools_calls_provider_once():
 # ---------------------------------------------------------------------------
 
 def test_tail_messages_shape():
-    """Agent sender → assistant; user → 'first: text'; caption → <spoken> block; hint once."""
+    """Agent sender → assistant; user → 'first: text'; caption → <spoken> block."""
     client, _, record = make_client(ProviderResponse(text=""))
-    # Stash a first-contact hint for the test
-    original_hint = config.FIRST_CONTACT_HINT
-    config.FIRST_CONTACT_HINT = "(hint for {first_name})"
-    try:
-        agent = config.AGENT_NAME
-        record.append("Alice Smith", "hello")                      # user, first contact
-        record.append("Alice Smith", "and another")                # user, already greeted
-        record.append(agent, "acknowledged")                        # assistant
-        record.append("Bob Jones", "ambient talk", kind="caption")  # caption, first contact
-        record.append("Bob Jones", "direct msg")                    # user, already greeted via caption
-        msgs = client._tail_messages()
+    agent = config.AGENT_NAME
+    record.append("Alice Smith", "hello")
+    record.append("Alice Smith", "and another")
+    record.append(agent, "acknowledged")
+    record.append("Bob Jones", "ambient talk", kind="caption")
+    record.append("Bob Jones", "direct msg")
+    msgs = client._tail_messages()
 
-        # Agent mapped to assistant role
-        assistant_msgs = [m for m in msgs if m["role"] == "assistant"]
-        assert len(assistant_msgs) == 1
-        assert assistant_msgs[0]["content"] == "acknowledged"
+    # Agent mapped to assistant role
+    assistant_msgs = [m for m in msgs if m["role"] == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0]["content"] == "acknowledged"
 
-        # First Alice message carries the hint; second does not
-        alice_msgs = [m for m in msgs if m["role"] == "user" and m["content"].startswith("Alice")]
-        assert len(alice_msgs) == 2
-        assert "(hint for Alice)" in alice_msgs[0]["content"]
-        assert "(hint for Alice)" not in alice_msgs[1]["content"]
-        assert alice_msgs[0]["content"].startswith("Alice: hello")
+    # User chat messages render as "First: text"
+    alice_msgs = [m for m in msgs if m["role"] == "user" and m["content"].startswith("Alice")]
+    assert len(alice_msgs) == 2
+    assert alice_msgs[0]["content"] == "Alice: hello"
+    assert alice_msgs[1]["content"] == "Alice: and another"
 
-        # Caption gets wrapped in a <spoken> block; never carries the hint
-        # (ambient talk, not addressed to the bot) and does NOT mark Bob as greeted.
-        bob_caption = [m for m in msgs if '<spoken speaker="Bob">' in m["content"]]
-        assert len(bob_caption) == 1
-        assert "(hint for Bob)" not in bob_caption[0]["content"]
-        assert bob_caption[0]["content"].endswith("</spoken>")
+    # Caption wrapped in <spoken> block
+    bob_caption = [m for m in msgs if '<spoken speaker="Bob">' in m["content"]]
+    assert len(bob_caption) == 1
+    assert bob_caption[0]["content"].endswith("</spoken>")
 
-        # Bob's subsequent chat message is his first direct contact — hint attaches
-        bob_chat = [m for m in msgs if m["role"] == "user"
-                    and m["content"].startswith("Bob: direct msg")]
-        assert len(bob_chat) == 1
-        assert "(hint for Bob)" in bob_chat[0]["content"]
-    finally:
-        config.FIRST_CONTACT_HINT = original_hint
+    # Bob's chat message renders normally
+    bob_chat = [m for m in msgs if m["role"] == "user"
+                and m["content"].startswith("Bob: direct msg")]
+    assert len(bob_chat) == 1
     print("PASS  test_tail_messages_shape")
 
 

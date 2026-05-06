@@ -158,71 +158,6 @@ def test_validate_low_nonprintable():
 
 
 # ---------------------------------------------------------------------------
-# Integration: MCPClient.execute_tool raises on binary path
-# ---------------------------------------------------------------------------
-
-def test_mcp_blocks_binary_path():
-    from _1_800_operator.pipeline.mcp_client import MCPClient, MCPToolError
-
-    client = MCPClient()
-    # Register a fake server and tool
-    client._servers["github"] = MagicMock()
-    client._tools["github__get_file_contents"] = {
-        "server_name": "github",
-        "mcp_tool": MagicMock(),
-    }
-
-    try:
-        client.execute_tool("github__get_file_contents", {"path": "images/logo.png"})
-        assert False, "Should have raised MCPToolError"
-    except MCPToolError as e:
-        assert "non-text file" in str(e), f"Unexpected error: {e}"
-    print("PASS  test_mcp_blocks_binary_path")
-
-
-# ---------------------------------------------------------------------------
-# Integration: MCPClient.execute_tool allows text path
-# ---------------------------------------------------------------------------
-
-def test_mcp_allows_text_path():
-    from _1_800_operator.pipeline.mcp_client import MCPClient
-
-    client = MCPClient()
-    handle = MagicMock()
-    handle.call_tool.return_value = "file contents here"
-    client._servers["github"] = handle
-    client._tools["github__get_file_contents"] = {
-        "server_name": "github",
-        "mcp_tool": MagicMock(),
-    }
-
-    result = client.execute_tool("github__get_file_contents", {"path": "src/main.py"})
-    assert result == "file contents here"
-    print("PASS  test_mcp_allows_text_path")
-
-
-# ---------------------------------------------------------------------------
-# Integration: MCPClient.execute_tool allows extensionless path
-# ---------------------------------------------------------------------------
-
-def test_mcp_allows_extensionless():
-    from _1_800_operator.pipeline.mcp_client import MCPClient
-
-    client = MCPClient()
-    handle = MagicMock()
-    handle.call_tool.return_value = "makefile contents"
-    client._servers["github"] = handle
-    client._tools["github__get_file_contents"] = {
-        "server_name": "github",
-        "mcp_tool": MagicMock(),
-    }
-
-    result = client.execute_tool("github__get_file_contents", {"path": "Makefile"})
-    assert result == "makefile contents"
-    print("PASS  test_mcp_allows_extensionless")
-
-
-# ---------------------------------------------------------------------------
 # Integration: LLM.send_tool_result replaces binary content in history
 # ---------------------------------------------------------------------------
 
@@ -415,9 +350,6 @@ if __name__ == "__main__":
         test_validate_data_uri,
         test_validate_high_nonprintable,
         test_validate_low_nonprintable,
-        test_mcp_blocks_binary_path,
-        test_mcp_allows_text_path,
-        test_mcp_allows_extensionless,
         test_llm_blocks_binary_result,
         test_llm_passes_clean_result,
         test_validate_base64_gif_and_webp,

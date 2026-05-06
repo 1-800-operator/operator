@@ -54,15 +54,17 @@ Tests are standalone scripts — no pytest runner. Run them individually:
 ```bash
 source venv/bin/activate
 python tests/test_chat_hardening.py         # history cap, trigger gating, sender filter
-python tests/test_911_size_management.py    # tool-result size + context overflow
-python tests/test_912_tool_timeout.py       # tool heartbeat + hard timeout
 python tests/test_913_tool_history_collapse.py
 python tests/test_915_reconnection.py       # disconnect + grace-period exit
 python tests/test_guardrails.py             # binary/null-byte blocking
-python tests/test_anthropic_provider.py
-python tests/test_mcp_client.py
+python tests/test_claude_cli_provider.py    # claude_cli subprocess + permission bridge
+python tests/test_permission_chat_handler.py # PreToolUse → chat round-trip
 python tests/test_mcp_shutdown.py
+python tests/test_llm_client.py             # LLMClient ask/tool_call/streaming
+python tests/test_transcript_mcp.py         # captions → MCP search
 ```
+
+Or run all 21 at once: `for f in tests/test_*.py; do python "$f" || echo "FAIL: $f"; done`
 
 ## Architecture
 

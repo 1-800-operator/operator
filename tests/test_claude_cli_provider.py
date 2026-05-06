@@ -33,7 +33,6 @@ from _1_800_operator.pipeline.providers.claude_cli import (
     ClaudeCLIProvider,
     ClaudeCLINotFoundError,
 )
-from _1_800_operator.pipeline.providers.openai import OpenAIProvider  # noqa: F401  (import side effects: registers in __init__)
 
 
 def _skip_if_no_claude():
@@ -214,36 +213,16 @@ def test_permission_handler_deny():
             pass
 
 
-def test_build_provider_selects_claude_cli(monkeypatch_attrs):
-    """build_provider() returns a ClaudeCLIProvider when config.LLM_PROVIDER == 'claude_cli'."""
-    from _1_800_operator import config
+def test_build_provider_returns_claude_cli():
+    """build_provider() returns a ClaudeCLIProvider in v1 (claude is the only brain)."""
     from _1_800_operator.pipeline.providers import build_provider
 
-    saved = {k: getattr(config, k) for k in monkeypatch_attrs}
-    saved_disabled = getattr(config, "DISABLED_MCP_SERVERS", {})
-    try:
-        for k, v in monkeypatch_attrs.items():
-            setattr(config, k, v)
-        # Clear disabled MCPs — when present, the provider __init__ appends
-        # a "do not claim/call these" notice onto _append_system_prompt,
-        # which is correct prod behavior but irrelevant to this assertion.
-        config.DISABLED_MCP_SERVERS = {}
-        provider = build_provider()
-        assert isinstance(provider, ClaudeCLIProvider), (
-            f"expected ClaudeCLIProvider, got {type(provider).__name__}"
-        )
-        # The provider should have inherited SYSTEM_PROMPT as the
-        # --append-system-prompt content.
-        assert provider._append_system_prompt == monkeypatch_attrs["SYSTEM_PROMPT"], (
-            f"expected exact SYSTEM_PROMPT inheritance, got "
-            f"{provider._append_system_prompt!r}"
-        )
-        provider.stop()  # nothing was spawned, but stop is idempotent
-        print("  build_provider selects claude_cli OK")
-    finally:
-        for k, v in saved.items():
-            setattr(config, k, v)
-        config.DISABLED_MCP_SERVERS = saved_disabled
+    provider = build_provider()
+    assert isinstance(provider, ClaudeCLIProvider), (
+        f"expected ClaudeCLIProvider, got {type(provider).__name__}"
+    )
+    provider.stop()  # nothing was spawned, but stop is idempotent
+    print("  build_provider returns ClaudeCLIProvider OK")
 
 
 def test_subprocess_restart_with_resume():
@@ -472,11 +451,8 @@ def main():
     test_permission_handler_deny()
     print("test_subprocess_restart_with_resume")
     test_subprocess_restart_with_resume()
-    print("test_build_provider_selects_claude_cli")
-    test_build_provider_selects_claude_cli({
-        "LLM_PROVIDER": "claude_cli",
-        "SYSTEM_PROMPT": "You are a test bot. Be brief.",
-    })
+    print("test_build_provider_returns_claude_cli")
+    test_build_provider_returns_claude_cli()
     print("\nAll claude_cli provider tests passed.")
 
 
