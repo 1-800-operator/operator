@@ -17,32 +17,6 @@ import webbrowser
 from pathlib import Path
 
 _AGENTS_DIR = Path.home() / ".operator" / "agents"
-_BUNDLED_AGENTS_DIR = Path(__file__).resolve().parent / "agents"
-_SKILLS_DIR = Path.home() / ".operator" / "skills"
-_BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
-
-
-def _ensure_user_agents():
-    """Sync-on-every-run: copy any bundled bot that is missing from the
-    user's ~/.operator/agents/ dir. Existing user bots are never touched
-    or overwritten — only missing ones are seeded.
-
-    Runs from main() before any CLI dispatch. This keeps new bundled agents
-    (e.g., `claude` added post-first-run) discoverable by existing users
-    without forcing them to delete their agents dir. Tradeoff: if a user
-    deliberately deletes a bundled bot, it reappears on next run — delete
-    it again, or configure around it.
-    """
-    import shutil
-    if not _BUNDLED_AGENTS_DIR.exists():
-        return
-    _AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    for bundled in _BUNDLED_AGENTS_DIR.iterdir():
-        if not bundled.is_dir():
-            continue
-        dest = _AGENTS_DIR / bundled.name
-        if not dest.exists():
-            shutil.copytree(bundled, dest)
 
 
 def _migrate_legacy_user_artifacts():
@@ -81,28 +55,6 @@ def _migrate_legacy_user_artifacts():
                 f"[operator] WARN: could not migrate {src} → {dst}: {e}",
                 file=sys.stderr,
             )
-
-
-def _ensure_user_skills():
-    """Sync-on-every-run: copy any bundled skill that is missing from the
-    user's ~/.operator/skills/ dir. Existing user skills are never touched
-    or overwritten — only missing ones are seeded.
-
-    Same shape as `_ensure_user_agents` — additive, non-destructive. A user
-    who edits a bundled skill post-seed keeps their edits on subsequent
-    runs. A user who deletes a bundled skill sees it reappear on next run
-    (matches the agents-dir behavior).
-    """
-    import shutil
-    if not _BUNDLED_SKILLS_DIR.exists():
-        return
-    _SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    for bundled in _BUNDLED_SKILLS_DIR.iterdir():
-        if not bundled.is_dir():
-            continue
-        dest = _SKILLS_DIR / bundled.name
-        if not dest.exists():
-            shutil.copytree(bundled, dest)
 
 
 # ── Prevent Ctrl+C from killing child processes ────────────────────
@@ -458,8 +410,6 @@ def main():
     # current perms.
     os.umask(0o077)
     _migrate_legacy_user_artifacts()
-    _ensure_user_agents()
-    _ensure_user_skills()
     argv = sys.argv[1:]
 
     if not argv or argv[0] in ("-h", "--help"):
