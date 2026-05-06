@@ -22,170 +22,6 @@ _SKILLS_DIR = Path.home() / ".operator" / "skills"
 _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 
-# MCP-server overlay fields the user owns via `operator edit claude`.
-# Persisted to disk; preserved across boots and across cwd switches.
-# Anything outside this set (command, args, env, auth, auth_url, description)
-# is rediscovered fresh on every boot from cwd-aware `discover_all_mcps()`
-# and never written to disk — Claude Code's project-scope `mcpServers`
-# semantics make discovery cwd-sensitive, so persisting source-driven
-# fields would either flap by cwd or hide user edits behind stale state.
-_CLAUDE_MCP_OVERLAY_FIELDS = (
-    "enabled", "hints", "read_tools", "confirm_tools", "tool_timeout_seconds",
-)
-
-
-def _sync_claude_imports() -> None:
-    """Sync the `claude` agent's MCP overlay with the user's Claude Code config.
-
-    Runs on every boot of the claude agent. Maintains a slim *overlay* in
-    ~/.operator/agents/claude/config.yaml's `mcp_servers` block —
-    persisting only fields the user owns (`enabled`, `hints`, `read_tools`,
-    `confirm_tools`, `tool_timeout_seconds`). Source-driven fields
-    (command/args/env/auth/auth_url/description) are NEVER stored on disk
-    and are rediscovered fresh on every boot from cwd-aware
-    `discover_all_mcps()`.
-
-    Why overlay-only: Claude Code's project-scope `mcpServers` are
-    cwd-sensitive by design. Persisting the full discovered block on
-    disk meant switching cwds rewrote the cfg with whatever the new cwd
-    saw — pruning project-scope MCPs from "wrong" cwds and clobbering
-    the user's hand-authored hints. The overlay model says: cfg is the
-    user's authored truth (toggles + hints), cwd determines what's
-    *active* this run, never what's *persisted*.
-
-    Behavior:
-      - Discovered MCP not in overlay → adds `{enabled: True}` (default-on
-        for first sight; wizard's MCP toggle step lets the user disable).
-      - Discovered MCP already in overlay → no change. User's enable/hints
-        survive untouched.
-      - In overlay but not in current discovery → DORMANT for this run.
-        Overlay entry persists. config.py's runtime view excludes it
-        (banner + LLM tools). Reactivates next time it's rediscovered.
-      - The only way to remove a dormant entry is `operator edit claude`
-        (explicit user action) or a full `operator build` reset.
-
-    The `~3s` cost of `claude mcp list` is paid every boot. Acceptable
-    because discovery is the live source of truth — caching across boots
-    would defeat the cwd-aware semantics.
-
-    Comments in config.yaml are lost on rewrite (ruamel round-trip
-    preserves them, but we still only write when the overlay actually
-    changed to keep formatting churn off no-op boots).
-    """
-    cfg_path = _AGENTS_DIR / "claude" / "config.yaml"
-    if not cfg_path.is_file():
-        return
-
-    from _1_800_operator.pipeline.setup import _load_yaml, _dump_yaml
-    try:
-        cfg = _load_yaml(cfg_path)
-    except Exception:
-        return
-
-    from _1_800_operator.pipeline.claude_code_import import (
-        _slugify_mcp_name,
-        append_env_placeholders,
-        discover_all_mcps,
-        discover_mcp_health,
-    )
-
-    mcps, wrapped = discover_all_mcps()
-    existing_overlay = cfg.get("mcp_servers") or {}
-    if not isinstance(existing_overlay, dict):
-        existing_overlay = {}
-
-    def _compact(prev: dict | None) -> dict:
-        """Carry forward only meaningful overlay fields. `enabled` always
-        anchors the row (defaults True if absent); other fields drop when
-        empty so the cfg stays terse.
-        """
-        row: dict = {}
-        if isinstance(prev, dict):
-            for k in _CLAUDE_MCP_OVERLAY_FIELDS:
-                if k not in prev:
-                    continue
-                v = prev[k]
-                if k == "enabled":
-                    row["enabled"] = bool(v)
-                elif v:  # drop empty list / "" / 0
-                    row[k] = v
-        row.setdefault("enabled", True)
-        return row
-
-    new_overlay: dict = {}
-    added: list[str] = []
-    env_refs: set[str] = set()
-    discovered_names = {m.name for m in mcps}
-
-    for m in mcps:
-        prev = existing_overlay.get(m.name)
-        new_overlay[m.name] = _compact(prev if isinstance(prev, dict) else None)
-        if not isinstance(prev, dict):
-            added.append(m.name)
-        env_refs.update(m.env_vars_referenced)
-
-    # Dormant rows: in overlay but not in current discovery. Keep the row
-    # (overlay is the persistence layer; cwd determines what's active this
-    # run, never what's persisted).
-    dormant: list[str] = []
-    for name, prev in existing_overlay.items():
-        if name in discovered_names:
-            continue
-        new_overlay[name] = _compact(prev if isinstance(prev, dict) else None)
-        dormant.append(name)
-
-    env_file = Path.home() / ".operator" / ".env"
-    placeheld: list[str] = []
-    if env_refs:
-        placeheld = append_env_placeholders(sorted(env_refs), env_file)
-
-    cfg.pop("_claude_import_done", None)
-    cfg["mcp_servers"] = new_overlay
-
-    on_disk_cfg = _load_yaml(cfg_path)
-    on_disk_servers = on_disk_cfg.get("mcp_servers") or {}
-    if dict(new_overlay) != dict(on_disk_servers) or "_claude_import_done" in on_disk_cfg:
-        try:
-            _dump_yaml(cfg, cfg_path)
-        except OSError as e:
-            print(f"[claude] WARN: could not write {cfg_path}: {e}", file=sys.stderr)
-            return
-
-    parts = []
-    if added:
-        parts.append(f"+{len(added)} ({', '.join(added)})")
-    if dormant:
-        parts.append(f"~{len(dormant)} dormant ({', '.join(dormant)})")
-    if parts:
-        msg = f"[claude] MCP sync: {' '.join(parts)}"
-        if wrapped and added:
-            msg += f" — {wrapped} hosted wrapped via mcp-remote"
-        print(msg, file=sys.stderr)
-    if placeheld:
-        print(
-            f"[claude] added {len(placeheld)} env placeholder(s) to {env_file}: "
-            f"{', '.join(placeheld)} — edit the file to fill in values.",
-            file=sys.stderr,
-        )
-
-    # Pre-flight MCP health: surface anything `claude mcp list` already
-    # marks as unhealthy (e.g. "Needs authentication", "Failed to connect")
-    # to stderr before meeting join. Filter by overlay's `enabled` so
-    # disabled servers don't generate noise.
-    for name, _url, status, healthy in discover_mcp_health():
-        if healthy:
-            continue
-        slug = _slugify_mcp_name(name)
-        srv = new_overlay.get(slug)
-        if isinstance(srv, dict) and not srv.get("enabled", True):
-            continue
-        print(
-            f"[claude] ⚠ MCP needs attention: {name} — {status} "
-            f"→ run `operator auth {slug}`",
-            file=sys.stderr,
-        )
-
-
 def _ensure_user_agents():
     """Sync-on-every-run: copy any bundled bot that is missing from the
     user's ~/.operator/agents/ dir. Existing user bots are never touched
@@ -804,12 +640,6 @@ def _run_slip(name, rest):
         )
         return 2
 
-    # Sync claude MCPs (parity with _run_bot — picks up servers added/removed
-    # in ~/.claude.json since last run).
-    import time as _time_init
-    _t_sync = _time_init.monotonic()
-    _sync_claude_imports()
-
     import logging
     import signal
     import time as _time
@@ -983,17 +813,6 @@ def _run_bot(name, rest):
                 file=sys.stderr,
             )
             return 2
-        # Sync Claude Code MCP servers into the agent config on every boot —
-        # picks up servers added/removed/edited in `~/.claude.json` since
-        # the last run. Shares one cached `claude mcp list` shell-out with
-        # downstream config.py runtime view (per-process cache in
-        # `claude_code_import._claude_mcp_list_cached`).
-        _t_sync = _time_init.monotonic()
-        _sync_claude_imports()
-        _logging_init.getLogger("operator").info(
-            f"TIMING claude_sync={_time_init.monotonic() - _t_sync:.2f}s"
-        )
-
     # Codex agent — same hard-fail posture as claude. The codex bundled
     # agent's identity is "OpenAI Codex CLI as the meeting brain." If
     # codex isn't installed or the user isn't logged in via ChatGPT
