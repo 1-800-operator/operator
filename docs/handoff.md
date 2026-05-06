@@ -1,72 +1,40 @@
-# Session 192 handoff (2026-05-05) — slip CDP architecture pivot, end-to-end working as decide-before-joining v1
+# Session 193 handoff (2026-05-05) — three small launch-blockers shipped, audio spike landed, mass deletion at 3/8
 
-Long session, six discrete decision points, ~20 commits on `main` (none pushed to `origin` yet — see "Don't forget" below). Slip works end-to-end as a separate-profile dedicated Chrome window. The original "claude attaches to your existing Chrome tab" vision was killed by a Chromium security restriction that turned out to be unbypassable; the pivoted shape is live and tested but does NOT support mid-meeting handoff (user must run slip BEFORE joining).
+Started by pushing S192's 21 backlogged commits (bridge architecture cutover + slip pivot to dedicated-Chrome-window) and tagging `slip-cdp-v1-foundation` after a green live-test of slip in a real meeting. Then knocked through Phase 14.19.4 (`operator login claude` — single-purpose Playwright Google sign-in lifted from the wizard's step-2), 14.19.5 (`operator doctor` — five-check world-readiness gate built from existing primitives), and 14.19.6 (slip reply-prefix locked to `[🤖 Claude] ` after a real-Meet eyeball test). All three live-validated. Spawned a background subagent for Phase 14.20.1 (audio capture spike) which delivered three artifacts at `debug/14_20_audio_spike/`: a compileable Swift script, an STT comparison locking mlx-whisper-base, and a decision doc — and empirically confirmed two risks for 14.20.2 (ScreenCaptureKit's silent-failure mode + Developer-ID code-signing as a day-one requirement, not polish). Phase 14.20 promoted from Post-MVP to launch-blocker, slotted between 14.19 and Phase 16. Then started 14.19.7 (mass deletion of wizard-era code) and chunked it into 8 surgical sub-steps — A, B, C all shipped this session (~4,200 net lines deleted across three commits), each smoke-tested green between commits.
 
-## What landed
+## What landed (all pushed to `origin/main`)
 
-Phases 14.19.1, 14.19.2, 14.19.3, 14.19.3-quiet (new). Sub-commits: `bridges/claude.py` constants, slip/deploy command wiring + `--yolo`, AttachAdapter (CDP-attach + Chrome lifecycle + chat methods + meeting-entry wait + first-run sign-in support via fresh profile), `_run_slip` end-to-end pipeline (LLM + MeetingRecord + ChatRunner), and the quiet-mode rewrite that closes the self-reply cascade. Key commits:
+- `ac93e89` Phase 14.19.4 — `operator login claude`
+- `7bd9b08` roadmap — Phase 14.20 (Swift+ScreenCaptureKit+Whisper) promoted to launch-blocker
+- `3c1dc52` Phase 14.19.5 — `operator doctor`
+- `82694ff` Phase 14.19.6 — slip reply prefix locked to `[🤖 Claude] `
+- `0b7ad5a` 14.19.7-A — strip wizard CLI surface from `__main__` (-238)
+- `ae04a8e` 14.19.7-B — delete the wizard files (-2908: setup.py, build_card.py, picker.py, face.py, terminal.py, custom_template.yaml, `_sync_claude_imports`)
+- `e7ccadf` 14.19.7-C — delete bundled `agents/{claude,codex}/` and `skills/` directories (-1090)
 
-- `2296341` 14.19.1 — `bridges/claude.py`
-- `0230053` 14.19.2 — slip/deploy + `--yolo`
-- `17ef03d` … `8b7f9d1` — AttachAdapter iterations through the architecture pivot
-- `9a7ed64` — `_run_slip` end-to-end (chat-only)
-- `7813e11` — meeting-entry wait
-- `8361b16` — CDP probe + room-code-strict tab match
-- `8b7f9d1` — **the pivot to separate-profile model** (most important commit of the session)
-- `7c1f73a` / `0666e91` — defensive eviction + UX cleanup (no shell commands in error messages)
-- `3321a1c` — quiet mode + reply-prefix strip (kills self-reply cascade)
+Plus the foundation tag (`slip-cdp-v1-foundation`) and S192's 21 commits pushed at session start.
 
-## The strategic call locked this session
+## Exact next step (session 194)
 
-**slip = "decide before joining"; mid-meeting handoff is impossible with CDP-attach.**
+**Resume Phase 14.19.7 at step D+E** — one atomic config.py-rewrite-plus-callers chunk. D (OPERATOR_BOT env routing) and E (config.py schema parsing) are deeply intertwined: config.py's module load is gated on `OPERATOR_BOT`, so stripping the env var without the YAML loader leaves config.py crashing at import. Approach:
 
-Why: Chrome 121+ silently disables `--remote-debugging-port` against the user's logged-in default profile (Chromium issue 40066423, security mitigation against OAuth-token harvesting). The flag is accepted into argv but the TCP listener never binds. Verified via diagnostic spike on Chrome 147.0.7727.138. Unbypassable by any flag combination, launch method, or user-data-dir trick. Even the StackOverflow "Chrome Debugger.app wrapper" pattern fails because it targets the same default profile.
+1. Catalog every `config.*` reference in surviving files (`pipeline/chat_runner.py`, `pipeline/llm.py`, `pipeline/providers/*`, `pipeline/mcp_client.py`, `connectors/*`, `pipeline/meeting_record.py`, `__main__.py`).
+2. Triage each reference: hardcode (constants like `MAX_TOKENS`, `TOOL_TIMEOUT_SECONDS`), pull from `bridges/claude.py` (per-bridge values like trigger phrase, reply prefix), or remove (wizard-era — `AGENT_NAME`, `MCP_SERVERS`, `SKILLS_*`, `SYSTEM_PROMPT`, `INTRO_ON_JOIN`, `FIRST_CONTACT_HINT`, `AGENT_TAGLINE`, `PERMISSIONS_AUTO_APPROVE`, `PROGRESS_NARRATION_*`).
+3. Write the new minimal `config.py` (~50 LOC: paths + meeting-mechanic constants + runtime tunables; no YAML, no OPERATOR_BOT, no `load_dotenv`).
+4. Update each caller; commit per-file or as one cohesive commit (your call — single commit is cleaner if test green, per-file is safer if something snags).
+5. Drop `OPERATOR_BOT` from `__main__.py` (lines ~226, 534, 571, 745, 1001, 1029, 1114), `readiness.py` (line 43, 225 — comments only), `oauth_cache.py` (line 5 — comment only), `google_signin.py` (lines 36, 58 — comments + the inlined "avoid importing operator.config" workaround can collapse).
+6. Smoke: `python -c "import _1_800_operator.__main__"`, `operator doctor`, `python -m _1_800_operator slip --help`, `python -m _1_800_operator login claude` (don't actually re-auth).
+7. Then step F (chat_runner cleanup — drops `_narration_auto_approve`, `permission_chat_handler`, `codex_elicitation_handler`, `_tail_claude_stream`, then deletes `mcp_servers/claude_code.py` + `pipeline/auth.py`), step G (test triage — expect ~30 test files affected, mostly delete-the-file), step H (final smoke).
 
-Pivot: slip launches a separate Chrome window with its own profile dir at `~/.operator/slip_profile/`. Sidesteps the restriction (Chromium only blocks the default profile). The separate-profile Chrome reliably exposes 9222. Tested live. Works.
+## Open questions / blockers
 
-Trade-off the user explicitly accepted: if they're already in a meeting in their main Chrome and decide they want claude, **there is no way to add claude to that existing tab**. They must close their main-Chrome tab and rejoin via slip. The user's verdict: "no extension. this is fine for v1."
-
-## Slip's user-facing semantics now
-
-- `operator slip claude <meet-url>` opens a dedicated Chrome window (operator-owned profile)
-- First run: user signs into Google in the slip window once, profile persists for future runs
-- claude joins as the user's identity (room sees one participant entry "Jojo Shapiro")
-- claude responds with `🤖 ` prefix to distinguish bot speech from user typing
-- **Quiet mode**: no intro, no "Hold for Claude…" filler, ALWAYS requires `@claude` trigger (no 1-on-1 bypass)
-- On Ctrl+C: claude detaches; slip Chrome stays running so the meeting continues
-- Re-running slip while slip Chrome is still alive: instant attach (probe → reuse, no second window)
-- Other Chrome on port 9222 (e.g. validation spike, dev session): silently SIGTERM'd; slip launches its own
-
-## Functional gaps in slip v1 (deliberately deferred)
-
-1. **No caption capture.** AttachAdapter has no caption path at all. If a user runs slip and asks `@claude what did the other person just say` — claude has zero transcript context. Dial/deploy still capture captions via the existing DOM observer (their Chrome is headless, captions invisible). Slip's Chrome is visible to the user, so DOM captions would show on screen. Either need to (a) accept visible captions in slip Chrome with a "minimize the window" UX hint, or (b) revive the cancelled Swift+ScreenCaptureKit+Whisper plan. Pick after some user testing.
-2. **First-run sign-in friction.** Fresh slip profile dumps user on Meet's sign-in page. They figure it out. Friendly preflight ("first time slipping — sign in, then come back") is small polish.
-3. **Mid-meeting handoff.** Architectural ceiling, not fixable without an extension. `operator handoff <url>` command would smooth the awkward switch-windows moment but not eliminate it.
-4. **Default URL handler.** Registering operator as the macOS default app for meet.google.com URLs would route every Meet link through slip. ~2-3h work; meaningful UX gain.
-5. **First-reply latency in slip.** User noted "noticeable beat" before claude's first reply, slower than dial. Not investigated. Possibly the `@claude` poll cadence + claude_cli cold-start adding up. Defer until it's clearly a real complaint.
-
-## Dropped from S192's plan
-
-- **Phase 14.19.3c.2 through 14.19.3c.6** (Swift audio capture + Whisper STT pipeline + Screen Recording / Microphone permissions + dual-stream merger). The user explicitly approved this scope earlier in the session before the pivot. Once we pivoted to the separate-profile model, the audio plan became moot — slip Chrome can run captions invisibly if minimized, and the Granola-class clean-transcript goal can be achieved via DOM captions rather than building an STT pipeline from scratch. Cancellation is documented in the roadmap Post-MVP block. Spike artifacts at `debug/resume_spike/cdp_expose_function_*.py` are kept (untracked, historical record only).
-
-## Open in the working tree
-
-- 20 commits ahead of `origin/main`. Nothing pushed.
-- Tag `phase-14.18-frozen` from session start (pre-pivot reference) is local-only.
-- Should add tag `slip-cdp-v1-foundation` on HEAD (mark current state before any extension exploration).
-- `debug/resume_spike/` untracked, historical artifacts — leave alone.
-- `docs/pre-launch-audit.md` still untracked from S187. Defer until 14.19.7 mass-deletion lands (Pass 4 dead-code becomes easier when half the codebase is already gone).
-
-## Exact next step (session 193)
-
-User wants to validate slip in a **real meeting end-to-end** before pushing further. The latest commit (`3321a1c`) changed slip's behavior meaningfully (quiet mode, prefix strip) and only had one live test BEFORE that commit. Next session should:
-
-1. **Live-test slip with a real meeting + another participant.** Confirm: no intro fires, ambient chat from other participant doesn't trigger claude, `@claude what's the time` does work, no self-reply cascade, claude's `🤖 ` reply renders correctly in the room.
-2. If green: push to `origin/main` and tag.
-3. Then proceed to Phase 14.19.4 (`operator login claude`) or directly into Phase 14.19.7 (mass deletion of wizard-era code).
+- **Apple Developer account for 14.20.2** — Developer-ID code-signing is now a day-one requirement (Risk #2 from the audio spike was empirically confirmed). Does Anthropic / operator org have an Apple Developer account ($99/year + DUNS prep)? If not, getting one is on the critical path before 14.20.2 ships its first release. Without it, every operator update will TCC re-prompt every user, and dev-loop iteration on the helper requires re-granting permissions on every `swiftc` recompile.
+- **Doctor's TCC checks** — `operator doctor` doesn't yet check macOS Screen & System Audio Recording or Microphone grants. Phase 14.20.3 is the natural place to extend it via in-process `CGPreflightScreenCaptureAccess()` + `AVCaptureDevice.authorizationStatus(for: .audio)` probes (simpler than the SIP-protected `TCC.db` query path which requires Full Disk Access).
+- **Spike's runtime audio test still failing** — terminal-from-Cursor and terminal-from-Terminal.app both produce 0 bytes from spike_capture. Not blocking 14.20.2 (the architecture is independently validated by `voice-preserved`'s shipped ScreenCaptureKit code + Granola's same approach), but live runtime confirmation needs the Developer-ID-signed helper before it'll work cleanly. Treat current spike result as "API path validated, runtime grant attribution deferred to 14.20.2."
 
 ## Don't forget
 
-- Nothing pushed to `origin/main` or `public/main` this session. The bridge cutover is dev-only until live-tested.
-- The "captions ruin the magic" framing from earlier in the session was specifically about the visible-Chrome problem. Slip Chrome being a SEPARATE window (which the user can minimize) materially changes that calculus — DOM captions in slip Chrome are no longer magic-killing because the user need not look at slip Chrome at all. This unlocks a much simpler caption story than the Swift+Whisper plan we'd scoped. Worth re-evaluating in S193.
-- Two earlier feedback memories saved this session: `feedback_substantiate_design_deviations.md` (don't propose deviations from existing design without grounded reasoning — don't repeat the Bridge-dataclass mistake) and the audit lesson (read `connectors/session.py` first when writing connector-adjacent code; existing infrastructure usually already covers the case).
+- All session-193 commits are on `origin/main`; nothing on `public/main` yet (the public-snapshot dance is per-release, not per-commit).
+- `debug/14_20_audio_spike/` is untracked. Spike artifacts can be committed for archival or kept untracked — they're historical reference for 14.20.2, not load-bearing.
+- The "macOS will lie about granted permissions" framing of Risk #1 was overstated. Actual observed behavior: preflight returns true when the responsible-process attribution chain has *some* ancestor with a grant, but frame delivery enforces against the immediate responsible process. Real edge cases are narrower (Sequoia weekly re-prompt, TCC cache staleness, helper-bundle drift). Watchdog is still cheap insurance, just don't oversell it as the primary failure mode.
+- 14.19.7 step D+E rewrite of config.py is the largest single piece of remaining surgery in 14.19.7. Plan ~1.5h for it. Step F (chat_runner) is the second-largest — also touches a long-running threading-heavy file. G + H are smaller. Total remaining 14.19.7 work: ~2-2.5h.
