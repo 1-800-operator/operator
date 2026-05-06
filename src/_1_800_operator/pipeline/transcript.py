@@ -117,7 +117,15 @@ class TranscriptFinalizer:
                     self._current_speaker = None
                     self._current_text = ""
             if to_finalize:
-                self._emit(*to_finalize, reason="silence")
+                # Daemon thread — if _emit raises, the loop dies silently and
+                # silence detection is dead for the rest of the meeting.
+                # Other call sites (on_caption_update, stop) are wrapped at
+                # the connector layer or run on threads where exceptions
+                # surface, so they don't need this guard.
+                try:
+                    self._emit(*to_finalize, reason="silence")
+                except Exception as e:
+                    log.warning(f"TranscriptFinalizer: silence-loop _emit raised: {e}")
 
     # ── Finalization ──────────────────────────────────────────────────
 
@@ -126,18 +134,18 @@ class TranscriptFinalizer:
         if not text:
             return
         full_window = text
-        prior = self._last_window_per_speaker.get(speaker, "")
+        # Read prior + write new window in one critical section so concurrent
+        # _emit calls from different threads (silence loop vs speaker change)
+        # can't race on the per-speaker window dict.
+        with self._lock:
+            prior = self._last_window_per_speaker.get(speaker, "")
+            self._last_window_per_speaker[speaker] = full_window
         stripped = _strip_prior_prefix(text, prior)
         if not stripped:
-            self._last_window_per_speaker[speaker] = full_window
             return
         text = stripped
-        self._last_window_per_speaker[speaker] = full_window
         log.info(f"caption_finalized reason={reason} speaker={speaker} text=\"{text}\"")
-        try:
-            self._record.append(speaker, text, kind="caption", timestamp=timestamp)
-        except Exception as e:
-            log.warning(f"TranscriptFinalizer: record.append failed: {e}")
+        self._record.append(speaker, text, kind="caption", timestamp=timestamp)
 
     def stop(self) -> None:
         """Flush any pending utterance and stop the silence thread."""
