@@ -113,7 +113,6 @@ If a user wants persistent `--yolo` behavior, the answer is a shell alias. Opera
 
 The slip pivot to the separate-profile model (14.19.3) closed the original CDP-attach-to-existing-Chrome path. These items would re-open it or expand slip's reach; sequenced as follow-ups, not v1 blockers.
 
-- **Captions for slip.** AttachAdapter currently has no caption capture. dial/deploy still use the battle-tested `captions_js.py` DOM observer (Meet's built-in captions, invisible because their Chrome is headless). Slip Chrome is the user's visible window — Shift+C captions would show on screen. Two paths: (a) DOM captions in slip, accept that captions are visible to the user (acceptable if slip Chrome is minimized — same screen real estate situation as Granola's overlay); (b) the cancelled S192 Swift+ScreenCaptureKit+Whisper plan (dual-stream mic + system audio, two macOS permissions). Pick one based on user testing of (a) first.
 - **First-run sign-in friction.** Fresh slip profile drops the user on Google's sign-in flow inside the slip Chrome window. They figure it out without help. A friendly preflight in `_run_slip` ("first time slipping — sign into the window that just opened, then come back") would smooth the corner. ~30m work.
 - **Mid-meeting handoff.** `operator handoff <url>` command that detects user is already in the meeting on main Chrome, instructs them to close that tab, then launches slip. Doesn't bypass the "decide before joining" constraint but smooths the awkward "wait, switch windows" moment when the user changes their mind mid-meeting. ~30m work.
 - **Default URL handler.** Register operator as the macOS default app for `meet.google.com` URLs via Info.plist URL scheme. Every Meet link auto-routes to slip, eliminating the pre-planning problem at the OS level. ~2-3h work + first-run hook to ask the user if they want to set it as default.
@@ -141,6 +140,40 @@ The slip pivot to the separate-profile model (14.19.3) closed the original CDP-a
 ### Done when
 
 Three commands work end-to-end on a fresh Mac. Zero user-editable config files exist. The `agents/` directory is gone. The wizard is gone. `operator doctor` cleanly reports world-readiness. The README and `CLAUDE.md` describe a thin bridge product, not a bot platform.
+
+---
+
+## Phase 14.20: Slip caption capture — Swift + ScreenCaptureKit + Whisper (~2-3 days) ← BLOCKS LAUNCH
+
+*Promoted from Post-MVP in S193. v0.0.1 promised caption parity across bots (Phase 14.18 framing). Slip currently has zero caption capture in AttachAdapter — `@claude what did the other person just say` returns nothing — which breaks that promise for the entry-rung command. Closing the gap is launch-gating.*
+
+### Why Swift + ScreenCaptureKit + Whisper, not DOM captions
+
+S192 considered DOM captions in slip Chrome (cheap, ~1-2h, reuses `captions_js.py`). Rejected: slip Chrome is the user's visible window, Meet's caption overlay would render on top of their meeting view. The "minimize the slip window" workaround is fragile UX — users will forget, captions will surprise them mid-call, and the magic of slip ("claude is just there, invisible") collapses. The Swift pipeline keeps slip Chrome clean — captions are derived from system audio + mic, never from Meet's UI.
+
+Trade-off accepted: two macOS permissions (Screen Recording for system audio capture via ScreenCaptureKit, Microphone for the user's voice). Both are first-run prompts, both surface in `operator doctor` (Phase 14.19.5). Granola does the same; users tolerate it because the resulting transcript quality is materially better than DOM captions (no auto-correction garbage, full speaker separation, latency ~1s vs Meet's 3-5s).
+
+### Sequence and parallelism
+
+Independent of 14.19.4–11 — the audio pipeline doesn't touch any bridge code. Develop in parallel after 14.19.6 lands (so slip's reply-attribution UX is locked first), and **before 14.19.10** so the end-to-end ladder live-test exercises captions too. Final integration into the ladder live-test happens in 14.19.10.
+
+### Carry-over from cancelled S192 scope
+
+The cancelled "Phase 14.19.3c.2 through 14.19.3c.6" (audio capture + Whisper) had already framed the dual-stream merger + permissions story before being dropped for the CDP-attach pivot. Design notes survive in handoff S192 § "Dropped from S192's plan" and roadmap context. Spike artifacts at `debug/resume_spike/` are CDP-related (different domain, not audio); 14.20 starts a fresh spike directory.
+
+| Step | Description | Status | Time |
+|---|---|---|---|
+| 14.20.1 | **Spike: ScreenCaptureKit system-audio tap + Whisper streaming.** Validate latency budget on a real Meet — target <2s caption-to-meeting-record latency to compete with Meet's DOM captions. Compare `whisper.cpp` vs `mlx-whisper` (already a dependency on the voice-preserved branch) for streaming throughput on M-series Macs. Deliverable: a 30-line Swift script that prints transcribed system audio to stdout in real time, plus a decision doc on the STT engine. Spike artifacts in `debug/14_20_audio_spike/`. | ⬜ | ~4h |
+| 14.20.2 | **Swift helper binary — dual-stream capture.** Single Swift binary that captures system audio (ScreenCaptureKit) + mic (AVFoundation) simultaneously, merges to a single mono PCM stream with speaker tags (`[mic]` vs `[system]`), and writes either to a Unix socket or stdout in a framed format AttachAdapter can read. Build target: `~/.operator/bin/operator-audio-capture`. Built via `swiftc` in `install.sh` on macOS (skipped on Linux — slip is mac-only anyway). | ⬜ | ~6h |
+| 14.20.3 | **macOS permission UX.** First-run prompts for Screen Recording + Microphone surface naturally via the Swift binary's first call (TCC dialogs). `operator doctor` (14.19.5) gains two checks: TCC status for both permissions via `tccutil`/`sqlite3` query against the TCC database, with exact "fix it" guidance ("System Settings → Privacy & Security → Screen Recording → enable for terminal/iTerm"). | ⬜ | ~2h |
+| 14.20.4 | **Wire into AttachAdapter + MeetingRecord.** AttachAdapter spawns the Swift helper as a subprocess on `join()`; reads framed PCM-or-text output; pipes Whisper output into `MeetingRecord.append_caption()` using the same JSONL shape as `captions_js.py`. The transcript MCP (`mcp_servers/transcript_server.py`) reads the same record file → zero changes there. Slip captions appear in `~/.operator/history/<slug>.jsonl` indistinguishable from dial/deploy captions. | ⬜ | ~3h |
+| 14.20.5 | **Live-test on a real Meet.** Run `operator slip claude <url>`, speak a distinctive phrase aloud, ask `@claude what did I just say`. Verify (a) caption captured within ~2s, (b) stored in MeetingRecord JSONL, (c) transcript MCP serves it back to claude correctly, (d) speaker attribution (mic vs system) preserved. Then: same battery against another participant on the call (system audio path). | ⬜ | ~2h |
+
+**Phase total: ~17h (~2-3 days).**
+
+### Done when
+
+Slip captions match dial/deploy captions in latency and quality; both macOS permissions prompt cleanly on first run; `operator doctor` reports both as green; live-test on a real Meet shows `@claude what did the other person just say` returning a correct answer.
 
 ---
 
