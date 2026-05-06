@@ -1,0 +1,45 @@
+
+[trial 1] task: Use the Write tool to create the file /var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh00…
+[trial 1] [8.22s] tool Write → ALLOW
+
+--- trial 1 summary ---
+  exit code:           0
+  elapsed:             10.98s
+  hook calls:          1
+  saw_first_tool:      assistant_event
+  pre-tool text chars: 26
+  pre-tool text:       "I'll create that file now."
+
+[trial 2] task: Use the Read tool to read /etc/hosts. Then in one short sentence, report whether…
+[trial 2] [5.14s] tool Read → ALLOW
+
+--- trial 2 summary ---
+  exit code:           0
+  elapsed:             7.33s
+  hook calls:          1
+  saw_first_tool:      assistant_event
+  pre-tool text chars: 25
+  pre-tool text:       "I'll read /etc/hosts now."
+
+[trial 3] task: Use the Bash tool to run `echo probe10-bash-trial`. Then briefly report what it …
+[trial 3] [5.96s] tool Bash → ALLOW
+
+--- trial 3 summary ---
+  exit code:           0
+  elapsed:             9.56s
+  hook calls:          1
+  saw_first_tool:      assistant_event
+  pre-tool text chars: 31
+  pre-tool text:       "I'll run that echo command now."
+
+============================================================
+PROBE 10 SUMMARY — pre-tool voice steering
+============================================================
+  trial 1: pre-tool voice = YES (26 chars) | tools=['Write']
+      → "I'll create that file now."
+  trial 2: pre-tool voice = YES (25 chars) | tools=['Read']
+      → "I'll read /etc/hosts now."
+  trial 3: pre-tool voice = YES (31 chars) | tools=['Bash']
+      → "I'll run that echo command now."
+
+Pre-tool voice present in 3/3 trials. Mech 1.5 viable: YES.
