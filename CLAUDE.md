@@ -89,7 +89,6 @@ Pipeline (platform-agnostic)
   pipeline/llm.py             — LLMClient: builds prompt from MeetingRecord tail + in-memory
                                  scratchpad (tool calls/results), MCP status/hints injection
   pipeline/providers/         — neutral LLMProvider interface + OpenAI + Anthropic backends
-  pipeline/mcp_client.py      — stdio MCP transport, tool discovery, failure backoff
   pipeline/guardrails.py      — validate tool results (binary/null-byte rejection)
 ```
 

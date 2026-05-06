@@ -86,9 +86,6 @@ class LLMClient:
         self._max_messages = config.HISTORY_MESSAGES
         self._system_prompt = SAFETY_RULES
         self._max_tokens = config.MAX_TOKENS
-        # Cached text of the current MCP-status block so inject_mcp_status can
-        # be called more than once per session without stacking duplicates.
-        self._mcp_status_text: str = ""
 
     def set_record(self, record: MeetingRecord):
         """Attach (or replace) the MeetingRecord backing this client.
@@ -104,108 +101,6 @@ class LLMClient:
                 setter(record.path)
             except Exception as e:
                 log.warning(f"LLM: provider rejected meeting record path: {e}")
-
-    def inject_skills(self, skills: list, progressive: bool):
-        """Advertise available skills in the system prompt.
-
-        progressive=True  → name+description menu only; LLM calls load_skill to pull the body.
-        progressive=False → full bodies dumped inline; no extra round-trip.
-
-        Call this BEFORE inject_mcp_hints / inject_mcp_status so the final ordering
-        is: base → skills → MCP hints → MCP status (most-dynamic last for future caching).
-        """
-        if not skills:
-            return
-        if progressive:
-            lines = [f"- {s.name}: {s.description}" for s in skills]
-            block = (
-                "\nSkills available this session (callable via the load_skill tool):\n"
-                + "\n".join(lines)
-                + "\n\nCall load_skill(name=\"<name>\") ONLY when the user's request clearly "
-                "matches one of these descriptions. Do not call load_skill for unrelated "
-                "chit-chat, small talk, or general questions."
-            )
-        else:
-            sections = [f"## {s.name}\n{s.body}" for s in skills]
-            block = (
-                "\nSkills available this session — follow the instructions in the matching "
-                "skill when the user's request applies:\n\n"
-                + "\n\n".join(sections)
-            )
-        self._system_prompt += block
-        log.info(
-            f"LLM injected skills ({'menu' if progressive else 'full-body'}): "
-            f"{', '.join(s.name for s in skills)}"
-        )
-
-    def inject_mcp_hints(self, servers: dict):
-        """Append per-server hints from config to the system prompt."""
-        sections = []
-        for name, srv in servers.items():
-            hints = srv.get("hints", "").strip()
-            if hints:
-                sections.append(f"\n{name} tool usage:\n{hints}")
-        if sections:
-            self._system_prompt += "\n" + "\n".join(sections)
-            log.info(f"LLM injected MCP hints for: {', '.join(s for s, srv in servers.items() if srv.get('hints', '').strip())}")
-
-    def inject_mcp_status(
-        self,
-        loaded: list[str],
-        failed_to_load: dict[str, dict],
-        disabled_runtime: dict[str, dict] | None = None,
-    ):
-        """Tell the LLM which MCP servers are actually available this session.
-
-        failed_to_load values are structured records from MCPClient.startup_failures
-        with shape {kind, fix, raw, [vars]}. disabled_runtime values come from
-        MCPClient.runtime_failures with shape {kind, reason}. We render per-server
-        kind so the model can answer "why is Linear broken" without guessing.
-
-        Safe to call more than once — replaces any previously-injected block
-        rather than stacking.
-        """
-        disabled_runtime = disabled_runtime or {}
-        parts = []
-        if loaded:
-            parts.append(f"MCP servers loaded this session: {', '.join(loaded)}.")
-        if failed_to_load:
-            lines = [
-                f"  - {name} ({info.get('kind', 'unknown')}): {info.get('fix', info.get('raw', '?'))}"
-                for name, info in failed_to_load.items()
-            ]
-            parts.append(
-                "MCP servers that FAILED to load:\n" + "\n".join(lines) + "\n"
-                "If the user asks about tools from a failed server, tell them the specific "
-                "reason above and to check /tmp/operator.log — do not pretend the tool exists."
-            )
-        if disabled_runtime:
-            lines = [
-                f"  - {name} ({info.get('kind', 'runtime_failure')}): {info.get('reason', '?')}"
-                for name, info in disabled_runtime.items()
-            ]
-            parts.append(
-                "MCP servers DISABLED this session after repeated tool-call failures:\n"
-                + "\n".join(lines) + "\n"
-                "Do not attempt these tools. If the user asks, relay the specific reason above."
-            )
-
-        if self._mcp_status_text and self._mcp_status_text in self._system_prompt:
-            self._system_prompt = self._system_prompt.replace(self._mcp_status_text, "")
-        self._mcp_status_text = ("\n" + "\n".join(parts)) if parts else ""
-        if self._mcp_status_text:
-            self._system_prompt += self._mcp_status_text
-        log.info(
-            f"LLM injected MCP status — loaded={loaded} "
-            f"failed_to_load={list(failed_to_load.keys())} "
-            f"disabled_runtime={list(disabled_runtime.keys())}"
-        )
-
-    def inject_github_user(self, login: str):
-        """Add the authenticated GitHub login to the system prompt."""
-        hint = f"\nThe authenticated GitHub user's login is \"{login}\". Always use \"{login}\" as the owner — never guess from chat display names."
-        self._system_prompt += hint
-        log.info(f"LLM injected GitHub user: {login}")
 
     def _tail_messages(self) -> list[dict]:
         """Build neutral-shape messages from the meeting record tail."""
