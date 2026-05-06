@@ -191,19 +191,31 @@ fi
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so
 # `operator` will be found in this terminal *and* future ones). If not, the
-# sendoff prefixes the next-step command with `source ~/.local/bin/env &&`
+# sendoff prefixes the next-step commands with `source ~/.local/bin/env &&`
 # so the user can run operator without opening a new terminal.
 case ":${INITIAL_PATH}:" in
-  *":${HOME}/.local/bin:"*) OPERATOR_ON_PATH=1 ;;
-  *) OPERATOR_ON_PATH=0 ;;
+  *":${HOME}/.local/bin:"*) PATH_PREFIX="" ;;
+  *) PATH_PREFIX="source ~/.local/bin/env && " ;;
 esac
 
-printf '\033[1;32m✓\033[0m \033[1moperator successfully installed!\033[0m\n'
+printf '\n\033[1;32m✓\033[0m \033[1moperator successfully installed!\033[0m\n'
 echo
 info "Docs: https://github.com/1-800-operator/operator"
 echo
-if [ "${OPERATOR_ON_PATH}" = "1" ]; then
-  printf '  Next: run \033[1;95moperator setup\033[0m to get started\n'
-else
-  printf '  Next: run \033[1;95msource ~/.local/bin/env && operator setup\033[0m to get started\n'
-fi
+bold "Next:"
+printf '  Verify your install:\n'
+printf '    %s\033[1;95moperator doctor\033[0m\n' "${PATH_PREFIX}"
+echo
+printf '  Then dial into a meeting:\n'
+printf '    %s\033[1;95moperator slip claude\033[0m \033[2m<meet-url>\033[0m   attach claude to your own Chrome\n' "${PATH_PREFIX}"
+printf '    %s\033[1;95moperator dial claude\033[0m                  dial claude into a fresh meet.new\n' "${PATH_PREFIX}"
+echo
+info "Operator drives the Claude Code CLI for its LLM brain. If you haven't already:"
+info "  Install:  https://claude.ai/code"
+info "  Sign in:  claude login"
+echo
+info "Flags + power-user setup:"
+info "  --yolo                 Skip per-tool permission prompts on any mode."
+info "  ~/.claude/settings.json   Operator inherits your Claude Code allow-list —"
+info "                            tools you've already trusted there auto-approve"
+info "                            in operator too (no extra wiring)."
