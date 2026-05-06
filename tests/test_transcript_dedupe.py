@@ -66,7 +66,7 @@ def test_finalizer_dedupes_same_speaker_continuation():
         tf2.on_caption_update("Alice", "Hello, world. how are you", 1001.0)
         tf2.stop()
 
-    rows = [r for r in rec.tail(10) if r.get("kind") == "caption"]
+        rows = [r for r in rec.tail(10) if r.get("kind") == "caption"]
     assert len(rows) == 2, [r["text"] for r in rows]
     assert rows[0]["text"] == "hello world", rows[0]
     assert rows[1]["text"] == "how are you", rows[1]
@@ -82,7 +82,7 @@ def test_finalizer_resets_per_speaker():
         tf.on_caption_update("Bob", "alice said this is what bob also says", 2000.0)
         tf.stop()
 
-    rows = [r for r in rec.tail(10) if r.get("kind") == "caption"]
+        rows = [r for r in rec.tail(10) if r.get("kind") == "caption"]
     assert len(rows) == 1
     assert rows[0]["sender"] == "Bob"
     assert rows[0]["text"] == "alice said this is what bob also says", rows[0]

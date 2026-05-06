@@ -73,40 +73,36 @@ class MeetingRecord:
         except OSError as e:
             log.warning(f"MeetingRecord: chmod 0o700 on {self.root} failed: {e}")
         self.path = self.root / f"{slug}.jsonl"
-        # Write a one-time meta header on first open of a new file so the
-        # record is self-describing: `head -1 file.jsonl` reveals the
-        # meeting URL, slug, and when it was first joined. Rejoins of an
-        # existing record leave the header alone.
+        # Open-time writes, batched into one file open so header + session_start
+        # land atomically (either both or neither) on every meeting open:
+        # - meta header (first open of a new file only): self-describing,
+        #   `head -1 file.jsonl` reveals meeting URL, slug, first-joined time.
+        # - session_start marker (every open): tail() only replays entries
+        #   after the most recent marker, so the LLM never sees prior runs'
+        #   assistant answers and stops short-circuiting tool calls by echoing.
         is_new = not self.path.exists() or self.path.stat().st_size == 0
+        boot_entries: list[dict] = []
         if is_new:
-            header = {
+            boot_entries.append({
                 "kind": "meta",
                 "created_at": time.time(),
                 "slug": slug,
                 **(meta or {}),
-            }
-            try:
-                with self.path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(header, ensure_ascii=False) + "\n")
-            except OSError as e:
-                log.warning(f"MeetingRecord header write failed: {e}")
-        # Session-boundary marker. tail() only replays entries after the
-        # most recent marker, so the LLM never sees prior runs' assistant
-        # answers and stops short-circuiting tool calls by echoing them.
-        boundary = {"kind": "session_start", "timestamp": time.time()}
-        try:
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(boundary, ensure_ascii=False) + "\n")
-        except OSError as e:
-            log.warning(f"MeetingRecord session_start write failed: {e}")
+            })
+        boot_entries.append({"kind": "session_start", "timestamp": time.time()})
+        with self.path.open("a", encoding="utf-8") as f:
+            for entry in boot_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         # Tighten file perms once on open. Covers brand-new files (where
         # the umask already produced 0o600 — chmod is a no-op then) and
         # legacy files from before the umask fix that may be world-readable.
-        if self.path.exists():
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError as e:
-                log.warning(f"MeetingRecord: chmod 0o600 on {self.path} failed: {e}")
+        # chmod can legitimately fail on network FS that doesn't support mode
+        # bits — keep the try/except, this isn't the same trust-the-OS case
+        # as the file write.
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError as e:
+            log.warning(f"MeetingRecord: chmod 0o600 on {self.path} failed: {e}")
         log.info(f"MeetingRecord opened {self.path}")
 
     def append(self, sender: str, text: str, kind: str = "chat",
@@ -118,14 +114,12 @@ class MeetingRecord:
             "kind": kind,
         }
         with self._lock:
-            if self.path is not None:
+            if self.path is None:
+                self._memory.append(entry)
+            else:
                 line = json.dumps(entry, ensure_ascii=False)
-                try:
-                    with self.path.open("a", encoding="utf-8") as f:
-                        f.write(line + "\n")
-                except OSError as e:
-                    log.warning(f"MeetingRecord append failed ({self.path}): {e}")
-            self._memory.append(entry)
+                with self.path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
         return entry
 
     def tail(self, n: int) -> list[dict]:

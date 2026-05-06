@@ -105,11 +105,11 @@ def test_existing_file_rejoin_preserves_meta():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: append writes to file + memory, auto-timestamps
+# Test 4: append writes to file with auto-timestamp + honored overrides
 # ---------------------------------------------------------------------------
 
-def test_append_writes_file_and_memory():
-    """append() persists to JSONL and in-memory list; timestamp auto-populates when omitted."""
+def test_append_writes_file():
+    """append() persists to JSONL; timestamp auto-populates when omitted; in-memory list stays empty in slug mode."""
     with tempfile.TemporaryDirectory() as tmp:
         rec = MeetingRecord(slug="t", root=Path(tmp))
         before = time.time()
@@ -121,18 +121,18 @@ def test_append_writes_file_and_memory():
         assert entry["kind"] == "chat"
         assert before <= entry["timestamp"] <= after
 
-        # In-memory mirror
-        assert rec._memory[-1] == entry
-
         # File mirror
         entries = read_lines(rec.path)
         chat_entries = [e for e in entries if e.get("kind") == "chat"]
         assert len(chat_entries) == 1 and chat_entries[0] == entry
 
+        # In slug mode the in-memory list is unused — file is the single source of truth.
+        assert rec._memory == []
+
         # Explicit timestamp + custom kind honored
         fixed = rec.append("bob", "system msg", kind="system", timestamp=123.0)
         assert fixed["timestamp"] == 123.0 and fixed["kind"] == "system"
-    print("PASS  test_append_writes_file_and_memory")
+    print("PASS  test_append_writes_file")
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +319,7 @@ if __name__ == "__main__":
         test_slug_from_url,
         test_new_file_writes_meta_and_session_start,
         test_existing_file_rejoin_preserves_meta,
-        test_append_writes_file_and_memory,
+        test_append_writes_file,
         test_tail_scopes_to_latest_session,
         test_tail_edges,
         test_concurrent_appends_no_torn_lines,
