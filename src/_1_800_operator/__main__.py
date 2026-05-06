@@ -3,13 +3,12 @@ Operator — AI Meeting Participant
 Cross-platform entry point. Auto-detects OS and dispatches to the right adapter.
 
 Usage:
-    operator dial <name> <url> Dial named agent into a specific Meet
-    operator dial <name>       Auto-open a new Meet, dial in that bot
-    operator try <name>       Terminal test-drive (no Meet)
-    operator build            Create a new agent (wizard)
-    operator edit <target>    Edit an agent config (wizard, surgical) or .env (in $EDITOR)
-    operator where <target>   Print the absolute path of a config file
-    operator                  Print usage + agent list
+    operator slip <name> [url]    Attach an agent to your own Chrome session
+    operator dial <name> [url]    Dial named agent as a separate participant
+    operator deploy <name> <url>  Send an agent into an existing meeting
+    operator login <name>         Sign into Google for dial/deploy
+    operator doctor               Diagnostic check — is the world ready?
+    operator                      Print usage + agent list
 """
 import os
 import subprocess
@@ -540,16 +539,11 @@ def _bot_tagline(name):
 
 def _print_usage():
     print("Usage:")
-    print("  operator dial <name> [url]      Dial an agent into a Meet (auto-opens one if no url)")
-    print("  operator deploy <name> <url>    Send an agent into an existing meeting (Phase 14.19)")
-    print("  operator slip <name> [url]      Attach an agent to your own Chrome session (Phase 14.19)")
-    print("  operator login <name>           Sign into Google for dial/deploy (Phase 14.19.4)")
-    print("  operator doctor                 Diagnostic check — is the world ready? (Phase 14.19.5)")
-    print("  operator try <name>             Terminal test-drive (no Meet)")
-    print("  operator build                  Create a new agent (wizard)")
-    print("  operator auth <mcp>             Authorize an OAuth MCP (Linear, etc.)")
-    print("  operator edit <target>          Open an agent config (or .env) in $EDITOR")
-    print("  operator where <target>         Print the absolute path of a config file")
+    print("  operator slip <name> [url]      Attach an agent to your own Chrome session")
+    print("  operator dial <name> [url]      Dial an agent into a Meet as a separate participant")
+    print("  operator deploy <name> <url>    Send an agent into an existing meeting")
+    print("  operator login <name>           Sign into Google for dial/deploy")
+    print("  operator doctor                 Diagnostic check — is the world ready?")
     print()
     print("Flags:")
     print("  --force                         Retry join even if a session is flagged stuck")
@@ -562,91 +556,6 @@ def _print_usage():
         for b in bots:
             tag = _bot_tagline(b)
             print(f"  {b:<12} {tag}")
-
-
-def _resolve_config_target(target):
-    """Map a user-supplied target to an on-disk path under ~/.operator/.
-
-    Accepts a bot name (`claude`, `pm`, …) or the special token `.env` / `env`.
-    Returns (path, error_message); exactly one is non-None.
-    """
-    home = Path.home() / ".operator"
-    if target in (".env", "env"):
-        return home / ".env", None
-    if target in _available_bots():
-        return _AGENTS_DIR / target / "config.yaml", None
-    return None, f"Unknown target: {target!r}. Expected a bot name or `.env`."
-
-
-def _run_edit(argv):
-    """`operator edit <name>` is the surgical-modify path. For bot
-    names, run the same wizard as `operator build` minus the
-    "reset to bundled?" gate — every step pre-loaded with current state,
-    user accepts/changes each one, atomic write at the end. For `.env`
-    (which has no toggleable shape), keep the $EDITOR flow.
-    """
-    if not argv:
-        print("Usage: operator edit <bot-name | .env>\n")
-        _print_usage()
-        return 2
-    target = argv[0]
-    if target in (".env", "env"):
-        return _run_edit_env_file()
-    if target not in _available_bots():
-        print(
-            f"Unknown target: {target!r}. Expected a bot name or `.env`.\n"
-            f"Available bots: {', '.join(sorted(_available_bots())) or '(none)'}"
-        )
-        _print_usage()
-        return 2
-    from _1_800_operator.pipeline.install_preflight import run_install_preflight
-    run_install_preflight()
-    from _1_800_operator.pipeline.setup import run as _wizard_run
-    return _wizard_run([], target_agent=target, reset_allowed=False)
-
-
-def _run_edit_env_file():
-    """`operator edit .env` keeps the $EDITOR flow — env-var key/value
-    pairs are the wrong shape for a TUI."""
-    import shlex
-    path = Path.home() / ".operator" / ".env"
-    if not path.exists():
-        print(f"Config file does not exist: {path}")
-        return 1
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    cmd = shlex.split(editor) + [str(path)]
-    subprocess.call(cmd)
-    # Editors (vim especially) sometimes exit nonzero for benign reasons —
-    # swapfile noise, terminal weirdness — even when the user saved cleanly.
-    # Don't propagate that to the shell prompt; the only thing that matters
-    # is whether the file still exists. Print a positive signal so the user
-    # has no ambiguity about whether their edit landed.
-    if path.exists():
-        print(f"Saved {path}")
-        return 0
-    print(f"File no longer exists: {path}")
-    return 1
-
-
-def _run_where(argv):
-    if not argv:
-        print("Usage: operator where <bot-name | .env>\n")
-        _print_usage()
-        return 2
-    path, err = _resolve_config_target(argv[0])
-    if err:
-        print(err)
-        _print_usage()
-        return 2
-    print(path)
-    return 0
-
-
-def _run_setup():
-    from _1_800_operator.pipeline.install_preflight import run_install_preflight
-    run_install_preflight()
-    from _1_800_operator.pipeline.setup import run as _wizard_run
-    return _wizard_run([])
 
 
 def _run_login(name):
@@ -705,15 +614,6 @@ def _run_login(name):
     return 0
 
 
-# _run_auth and _find_oauth_mcp_config moved to operator.pipeline.auth in
-# Phase 15.7.4 so the wizard's inline "authorize now?" prompt and this CLI
-# dispatch hit the same code path. Re-exported here for backward compat.
-from _1_800_operator.pipeline.auth import (
-    find_oauth_mcp_config as _find_oauth_mcp_config,
-    run_auth as _run_auth,
-)
-
-
 def main():
     # Strip group/world bits from anything we create under ~/.operator/.
     # Files are born 0o600 and dirs 0o700 with this mask, closing the
@@ -732,26 +632,6 @@ def main():
 
     first = argv[0]
 
-    if first in ("build", "setup"):
-        # `setup` kept as undocumented alias for muscle memory after the
-        # build rename — not advertised in --help; safe to drop later.
-        if len(argv) > 1:
-            print(f"Unexpected argument after 'build': {argv[1]!r}\n")
-            _print_usage()
-            return 2
-        return _run_setup()
-    if first == "try":
-        if len(argv) < 2:
-            print("Usage: operator try <name>\n")
-            _print_usage()
-            return 2
-        return _run_try(argv[1])
-    if first == "auth":
-        if len(argv) != 2:
-            print("Usage: operator auth <mcp>\n")
-            _print_usage()
-            return 2
-        return _run_auth(argv[1])
     if first == "login":
         if len(argv) != 2:
             print("Usage: operator login <name>\n")
@@ -765,10 +645,6 @@ def main():
             return 2
         from _1_800_operator.pipeline.doctor import run_doctor
         return run_doctor()
-    if first == "edit":
-        return _run_edit(argv[1:])
-    if first == "where":
-        return _run_where(argv[1:])
     # `run` kept as a hidden alias for muscle memory + external links after
     # the dial rename — not advertised in --help; safe to drop later.
     if first in ("dial", "run"):
@@ -842,120 +718,6 @@ def main():
     print(f"Unknown bot or subcommand: {first!r}\n")
     _print_usage()
     return 2
-
-
-def _run_try(name):
-    """Terminal test-drive — boot the full pipeline (LLM + MCP + skills) against
-    a stdin/stdout connector instead of a Meet. Mirrors _run_macos up to the
-    browser join, but synchronous MCP startup (no browser to overlap with) and
-    a plain 'chat ready' banner on stderr.
-    """
-    if name not in _available_bots():
-        print(f"Unknown bot: {name!r}\n")
-        _print_usage()
-        return 2
-
-    # Must land before any `from _1_800_operator import config`.
-    os.environ["OPERATOR_BOT"] = name
-
-    import logging
-    import signal
-    import time as _time
-
-    logging.basicConfig(
-        filename="/tmp/operator.log",
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    )
-    # Keep stderr clean — terminal UX is the chat itself. Logs stay in /tmp/operator.log.
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
-
-    log = logging.getLogger("operator")
-
-    from _1_800_operator import config
-    from _1_800_operator.connectors.terminal import TerminalConnector
-    from _1_800_operator.pipeline import ui
-    from _1_800_operator.pipeline.chat_runner import ChatRunner
-    from _1_800_operator.pipeline.llm import LLMClient
-    from _1_800_operator.pipeline.meeting_record import MeetingRecord
-    from _1_800_operator.pipeline.providers import build_provider
-    from _1_800_operator.pipeline.skills import load_skills
-
-    skills = load_skills(
-        config.SKILLS_ENABLED,
-        external_paths=config.SKILLS_EXTERNAL_PATHS,
-        shared_library_dir=config.SKILLS_SHARED_LIBRARY,
-    )
-    _print_startup_banner(skills)
-
-    llm = LLMClient(build_provider())
-    llm.inject_skills(skills, config.SKILLS_PROGRESSIVE_DISCLOSURE)
-
-    mcp = None
-    # Track A (claude_cli): the user's claude subprocess owns its own MCP servers
-    # via ~/.claude.json — operator's own MCPClient must not try to connect to
-    # them (the config blocks are toggle-only stubs without `command`/`args`).
-    if config.MCP_SERVERS and config.LLM_PROVIDER != "claude_cli":
-        from _1_800_operator.pipeline.mcp_client import MCPClient
-        mcp = MCPClient()
-        try:
-            mcp.connect_all()
-            llm.inject_mcp_hints(config.MCP_SERVERS)
-            loaded = [n for n in config.MCP_SERVERS if n not in mcp.startup_failures]
-            llm.inject_mcp_status(loaded, mcp.startup_failures)
-            gh_login = mcp.resolve_github_user()
-            if gh_login:
-                llm.inject_github_user(gh_login)
-        except Exception as e:
-            log.error(f"MCP client startup failed: {e}")
-            ui.err("MCP startup failed")
-            mcp = None
-
-    connector = TerminalConnector(bot_name=config.AGENT_NAME)
-    slug = f"terminal-{int(_time.time())}"
-    record = MeetingRecord(slug=slug, meta={"mode": "terminal", "bot": name})
-    llm.set_record(record)
-
-    print("\nchat ready — type to message, /quit or Ctrl+D to exit\n", file=sys.stderr)
-
-    runner = ChatRunner(
-        connector,
-        llm,
-        mcp_client=mcp,
-        meeting_record=record,
-        skills=skills,
-        skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
-    )
-
-    _shutdown_called = False
-
-    def _shutdown(signum=None, frame=None):
-        nonlocal _shutdown_called
-        if _shutdown_called:
-            return
-        _shutdown_called = True
-        if signum:
-            log.info(f"Received signal {signum} — shutting down")
-        runner.stop()
-        if mcp:
-            mcp.shutdown()
-        connector.leave()
-        _kill_orphaned_children()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    try:
-        runner.run(meeting_url=None)
-    except KeyboardInterrupt:
-        log.info("Interrupted — exiting terminal test-drive")
-    finally:
-        _shutdown()
-        ui.ok("Goodbye.")
-    return 0
 
 
 def _consume_yolo(args):
