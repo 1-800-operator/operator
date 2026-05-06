@@ -84,11 +84,8 @@ class LLMClient:
         # assistant text that closes a tool loop.
         self._scratch: list[dict] = []
         self._max_messages = config.HISTORY_MESSAGES
-        self._system_prompt = config.SYSTEM_PROMPT + SAFETY_RULES
+        self._system_prompt = SAFETY_RULES
         self._max_tokens = config.MAX_TOKENS
-        # Session-local set of first names already greeted. Resets on restart
-        # so a fresh Operator process will re-greet participants once.
-        self._greeted: set[str] = set()
         # Cached text of the current MCP-status block so inject_mcp_status can
         # be called more than once per session without stacking duplicates.
         self._mcp_status_text: str = ""
@@ -211,15 +208,9 @@ class LLMClient:
         log.info(f"LLM injected GitHub user: {login}")
 
     def _tail_messages(self) -> list[dict]:
-        """Build neutral-shape messages from the meeting record tail.
-
-        On each participant's first appearance this session, append
-        `config.FIRST_CONTACT_HINT` (rendered with their first name) to
-        that one message so the LLM knows to greet them by name once.
-        """
+        """Build neutral-shape messages from the meeting record tail."""
         entries = self._record.tail(self._max_messages)
         agent = (config.AGENT_NAME or "").lower()
-        hint_template = config.FIRST_CONTACT_HINT
         messages: list[dict] = []
         for e in entries:
             kind = e.get("kind", "chat")
@@ -235,13 +226,6 @@ class LLMClient:
                 messages.append({"role": "user", "content": wrap_spoken(first, text)})
                 continue
             content = f"{first}: {text}" if first else text
-            if hint_template and first and first not in self._greeted:
-                self._greeted.add(first)
-                try:
-                    hint = hint_template.format(first_name=first)
-                except (KeyError, IndexError):
-                    hint = hint_template
-                content = f"{content} {hint}"
             messages.append({"role": "user", "content": content})
         return messages
 
@@ -280,7 +264,7 @@ class LLMClient:
             messages = self._build_messages(extra_user_msg=message)
 
         log.info(
-            f"LLM ask model={config.LLM_MODEL} max_tokens={self._max_tokens} "
+            f"LLM ask max_tokens={self._max_tokens} "
             f"messages={len(messages)} prompt_chars={len(message)} "
             f"tools={len(tools) if tools else 0} streaming={bool(on_paragraph)}"
         )
@@ -292,7 +276,7 @@ class LLMClient:
                 response = self._provider.complete_streaming(
                     system=system_text,
                     messages=messages,
-                    model=config.LLM_MODEL,
+                    model="",
                     max_tokens=self._max_tokens,
                     tools=tools,
                     on_paragraph=on_paragraph,
@@ -302,7 +286,7 @@ class LLMClient:
                 response = self._provider.complete(
                     system=system_text,
                     messages=messages,
-                    model=config.LLM_MODEL,
+                    model="",
                     max_tokens=self._max_tokens,
                     tools=tools,
                     retry_rate_limits=retry_rate_limits,
@@ -353,12 +337,12 @@ class LLMClient:
     def ask_stream(self, message):
         """Stream tokens from the LLM. Does NOT record to the meeting record."""
         messages = self._build_messages(extra_user_msg=message)
-        log.info(f"LLM ask_stream model={config.LLM_MODEL} max_tokens={self._max_tokens} messages={len(messages)} prompt_chars={len(message)}")
+        log.info(f"LLM ask_stream max_tokens={self._max_tokens} messages={len(messages)} prompt_chars={len(message)}")
         try:
             yield from self._provider.complete_stream(
                 system=self._system_prompt,
                 messages=messages,
-                model=config.LLM_MODEL,
+                model="",
                 max_tokens=self._max_tokens,
             )
         except Exception as e:
@@ -368,7 +352,7 @@ class LLMClient:
     def warmup(self):
         """Fire a 1-token request to establish the TCP/TLS connection pool."""
         try:
-            self._provider.warmup(config.LLM_MODEL)
+            self._provider.warmup("")
             log.info("LLM warmup complete")
         except Exception as e:
             log.warning(f"LLM warmup failed (non-fatal): {e}")
@@ -439,7 +423,7 @@ class LLMClient:
         response = self._provider.complete(
             system=self._system_prompt,
             messages=[{"role": "user", "content": prompt}],
-            model=config.LLM_MODEL,
+            model="",
             max_tokens=self._max_tokens,
             tools=None,
         )
@@ -486,7 +470,7 @@ class LLMClient:
                 response = self._provider.complete_streaming(
                     system=self._system_prompt,
                     messages=messages,
-                    model=config.LLM_MODEL,
+                    model="",
                     max_tokens=self._max_tokens,
                     tools=tools,
                     on_paragraph=on_paragraph,
@@ -495,7 +479,7 @@ class LLMClient:
                 response = self._provider.complete(
                     system=self._system_prompt,
                     messages=messages,
-                    model=config.LLM_MODEL,
+                    model="",
                     max_tokens=self._max_tokens,
                     tools=tools,
                 )

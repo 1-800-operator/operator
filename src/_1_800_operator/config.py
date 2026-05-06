@@ -1,23 +1,19 @@
 """Operator config — paths, runtime tunables, and claude-bridge constants.
 
-v1 (Phase 14.19.7) ships claude as the only bridge. Every wizard-era knob —
-per-bot YAML loading, OPERATOR_BOT env routing, system_prompt composition,
-SKILLS_*, PERMISSIONS_*, PROGRESS_NARRATION_*, MCP_SERVERS — is gone. What
-remains is:
+v1 (Phase 14.19.7) ships claude as the only bridge. Wizard-era knobs
+(per-bot YAML loading, OPERATOR_BOT routing, system_prompt composition,
+SKILLS_*, PERMISSIONS_*, PROGRESS_NARRATION_*, MCP_SERVERS, OpenAI /
+Anthropic API keys) are all gone — claude reads its own ~/.claude/
+hierarchy natively when the binary spawns. What remains is:
 
-  1. The runtime tuning block (timeouts, paths) that callers across pipeline/
-     and connectors/ read by name. Hardcoded; edit here to change globally.
+  1. The runtime tuning block (timeouts, paths) that callers across
+     pipeline/ and connectors/ read by name. Hardcoded; edit here to
+     change runtime behavior globally.
   2. A small set of claude-bridge constants (AGENT_NAME, TRIGGER_PHRASE,
-     HISTORY_MESSAGES, FIRST_CONTACT_HINT, INTRO_ON_JOIN) that LLMClient
-     and ChatRunner read by name. Inlined here for now; when a second
-     bridge (codex/gemini) lands, callers will pick the right bridge
-     module instead.
-
-A handful of empty-collection constants (MCP_SERVERS, PERMISSIONS_*,
-SKILLS_*, PROGRESS_NARRATION_*, LLM_MODEL, SYSTEM_PROMPT) are kept as scaffolding
-for callers that step F (chat_runner / mcp_client cleanup) hasn't finished
-deleting yet. They evaluate to falsy / no-ops so the existing code paths
-short-circuit; they go away with their consumers.
+     HISTORY_MESSAGES, CAPTIONS_ENABLED) that LLMClient and ChatRunner
+     read by name. Inlined here for now; when a second bridge
+     (codex/gemini) lands, callers will pick the right bridge module
+     instead.
 """
 
 import os
@@ -38,40 +34,10 @@ load_dotenv(Path.home() / ".operator" / ".env")
 # bridge modules and callers pick the right one.
 from _1_800_operator.bridges import claude as _claude_bridge
 
-AGENT_NAME         = "Claude"
-TRIGGER_PHRASE     = _claude_bridge.TRIGGER_PHRASE  # "@claude"
-HISTORY_MESSAGES   = 40
-FIRST_CONTACT_HINT = ""
-INTRO_ON_JOIN      = True
-CAPTIONS_ENABLED   = False
-
-# Provider — claude_cli is the only brain in v1. Kept as a constant so the
-# remaining `if config.LLM_PROVIDER != "claude_cli"` guards in chat_runner /
-# mcp_client / __main__ short-circuit cleanly until step F removes them.
-LLM_PROVIDER = "claude_cli"
-LLM_MODEL    = ""  # claude_cli ignores it — the inner CLI picks its own model
-
-# System prompt: claude reads its own CLAUDE.md and skills natively when the
-# binary spawns. Operator no longer composes a prompt; LLMClient just appends
-# its SAFETY_RULES (data-vs-instructions guard for <spoken>/<tool_result>).
-SYSTEM_PROMPT = ""
-
-# Empty in v1 — claude owns its own MCPs, skills, and permission policy via
-# its own settings hierarchy (read by the spawned `claude` binary). These
-# constants stay defined so the dead branches in chat_runner / mcp_client /
-# __main__ that still reference them short-circuit. Step F deletes the
-# consumers and these constants drop entirely.
-MCP_SERVERS               = {}
-DISABLED_MCP_SERVERS      = {}
-PERMISSIONS_AUTO_APPROVE  = []
-PERMISSIONS_ALWAYS_ASK    = []
-SKILLS_ENABLED            = []
-SKILLS_EXTERNAL_PATHS     = []
-SKILLS_SHARED_LIBRARY     = Path.home() / ".operator" / "skills"
-SKILLS_PROGRESSIVE_DISCLOSURE = True
-PROGRESS_NARRATION_ENABLED       = False
-PROGRESS_NARRATION_MIN_SILENCE_S = 4.0
-PROGRESS_NARRATION_THROTTLE_S    = 5.0
+AGENT_NAME       = "Claude"
+TRIGGER_PHRASE   = _claude_bridge.TRIGGER_PHRASE  # "@claude"
+HISTORY_MESSAGES = 40
+CAPTIONS_ENABLED = True
 
 
 # ── INTERNAL TUNING ───────────────────────────────────────────────────────
@@ -113,12 +79,6 @@ DEFAULT_TOOL_TIMEOUTS = {
     "gmail":        30,
     "drive":        30,
 }
-
-
-# Secrets from shared .env. Empty under claude-only v1 (claude_cli doesn't
-# need either); kept defined so any straggler import doesn't NameError.
-OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 
 def relativize_home(p):

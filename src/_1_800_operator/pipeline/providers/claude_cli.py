@@ -114,37 +114,9 @@ class ClaudeCLIProvider(LLMProvider):
         self._append_system_prompt = append_system_prompt or None
         self._cwd = cwd or os.path.expanduser("~")
         self._permission_handler = permission_handler
-        # Layer a notice naming the disabled MCP servers onto the system
-        # prompt so the model neither lists them when asked nor attempts
-        # to call them. The CLI's tool definitions for these still load
-        # (claude.ai-hosted MCPs aren't governed by `disabledMcpjsonServers`
-        # and live behind claude.ai OAuth, so we can't excise them from
-        # context without re-auth UX regression). This notice is the
-        # cheapest functional disable: bridge-guard catches any call
-        # attempts that slip through, but the prompt nudge keeps the
-        # model from claiming or trying in the first place.
-        try:
-            from _1_800_operator import config as _cfg
-            disabled = sorted((_cfg.DISABLED_MCP_SERVERS or {}).keys())
-        except Exception:
-            disabled = []
-        if disabled:
-            disable_notice = (
-                f"\n\nNOTE: The following MCP servers are disabled in this "
-                f"bot's configuration and MUST NOT be used or claimed as "
-                f"available: {', '.join(disabled)}. If asked what tools you "
-                f"have, do not mention them. If asked to do something that "
-                f"would require one of these servers, say it's disabled in "
-                f"the bot's config and offer to walk the user through "
-                f"`operator edit claude` to re-enable."
-            )
-            existing = self._append_system_prompt or ""
-            self._append_system_prompt = (existing + disable_notice).lstrip()
         # Optional progress narrator: callable (tool_name, tool_input) ->
         # None, fired on every tool_use content block as the model emits
-        # them. Lets the chat runner post a "📖 reading X" line so the
-        # user isn't left in the dark during silent (auto-approved)
-        # tool runs. None disables narration.
+        # them. None disables narration.
         self._progress_callback = None
 
         self._proc = None
@@ -402,34 +374,6 @@ class ClaudeCLIProvider(LLMProvider):
             f"{shlex.quote(str(req))} {shlex.quote(str(resp))}"
         )
 
-        # Propagate operator's overlay disable-state to the inner CLI via
-        # `disabledMcpjsonServers`. Without this, a server the user toggled
-        # off in `operator edit claude` would still be auto-loaded by the
-        # CLI subprocess and exposed to the model — making operator's
-        # disable cosmetic at the banner/preflight surface only.
-        # Caveat: `disabledMcpjsonServers` only governs servers registered
-        # via JSON (`~/.claude.json`#mcpServers + `.mcp.json`); claude.ai-
-        # hosted MCPs (Gmail/Drive/Calendar/Linear from `claude mcp list`)
-        # have no known runtime disable surface today, so disabling those
-        # in operator stays cosmetic until we find a CLI knob.
-        from _1_800_operator import config as _cfg
-        # Discover JSON-keyed names from ~/.claude.json so we can map our
-        # slugified disabled set back to raw JSON keys. (CLI-discovered
-        # claude.ai names get slugified at import; JSON-keyed names pass
-        # through unchanged. Names that exist in both forms in the
-        # disabled set get included as-is — extras are harmless.)
-        try:
-            from _1_800_operator.pipeline.claude_code_import import read_user_mcp_config
-            json_cfg = read_user_mcp_config()
-            json_keys: set[str] = set((json_cfg.get("mcpServers") or {}).keys())
-            for proj in (json_cfg.get("projects") or {}).values():
-                json_keys.update((proj.get("mcpServers") or {}).keys())
-        except Exception:
-            json_keys = set()
-        disabled_json = sorted(
-            n for n in (_cfg.DISABLED_MCP_SERVERS or {}).keys() if n in json_keys
-        )
-
         settings = {
             "hooks": {
                 "PreToolUse": [
@@ -446,8 +390,6 @@ class ClaudeCLIProvider(LLMProvider):
                 ]
             }
         }
-        if disabled_json:
-            settings["disabledMcpjsonServers"] = disabled_json
         (tmp / "settings.json").write_text(json.dumps(settings, indent=2))
         log.info(f"ClaudeCLI permission bridge: tempdir={tmp}")
 

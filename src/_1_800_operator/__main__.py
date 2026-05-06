@@ -393,7 +393,6 @@ def _run_slip(name, rest):
     runner = ChatRunner(
         connector,
         llm,
-        mcp_client=None,  # track A — claude owns its MCPs
         meeting_record=meeting_record,
         # slip is "speak when spoken to": no intro, no Hold-for-Claude
         # filler, no 1-on-1 trigger bypass. claude only responds when
@@ -565,7 +564,6 @@ def _run_macos(meeting_url=None, force=False):
     runner = ChatRunner(
         connector,
         llm,
-        mcp_client=None,  # claude owns its own MCPs
         meeting_record=meeting_record,
     )
 
@@ -663,7 +661,6 @@ def _run_linux(meeting_url, force=False):
     runner = ChatRunner(
         connector,
         llm,
-        mcp_client=None,  # claude owns its own MCPs
     )
 
     _shutdown_called = False
