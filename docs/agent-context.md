@@ -41,13 +41,14 @@
 - `docs/apple-dev-setup.md` — productization checklist
 - `tests/_helper_smoke_12s.py` — manual debug smoke (kept; gitignored-pattern friendly with `_` prefix so the `for f in tests/test_*.py` runner skips it)
 
-**Until launch: everything we can do.** While Apple Dev is in flight (1-2 day wait for cert + ~3-4h of work to wrap as `.app` + notarize), the user wants to grind through everything else launch-related. Priority order from S195/S196 carry-forwards: 14.19.9 (install.sh sendoff/welcome refresh — surface `--yolo` + `~/.claude/settings.json` overlay), 14.19.10 (fresh-Mac ladder live-test — needs a fresh machine or VM), 14.19.11 (docs refresh + `mcp_client.py` ~700 LOC deletion). Plus pre-launch audit at `docs/pre-launch-audit.md` (untracked but in tree). And the landing page work in `docs/landing-page.md` + `public/`.
+**Until launch: everything we can do.** While Apple Dev is in flight (1-2 day wait for cert + ~3-4h of work to wrap as `.app` + notarize), the user wants to grind through everything else launch-related. **Two carry-forwards already cleared in S198:** 14.19.11 (`91de7b4`, -1130 LOC: deleted dead `mcp_client.py` + `test_mcp_shutdown.py` + four dead `inject_*` helpers in llm.py) and 14.19.9 (`e5d2f99`: install.sh sendoff fix — was telling users to run the deleted `operator setup` command, now points to `doctor` + `slip claude` + `dial claude` and surfaces `--yolo` + the `~/.claude/settings.json` allow-list overlay). Remaining queue: 14.19.10 (fresh-Mac ladder live-test — needs a fresh machine or VM), pre-launch audit at `docs/pre-launch-audit.md` (untracked but in tree), landing page work in `docs/landing-page.md` + `public/`.
 
 **Next-step menu when picking up S199:**
-1. **14.19.11 — `mcp_client.py` deletion** (~30min). Lowest risk; pure cleanup. Mostly-empty file per S195 — find what's still load-bearing, what isn't, delete the dead code.
-2. **14.19.9 — install.sh sendoff/welcome refresh** (~1-2h). Dovetails with the new step 8 (codesign) we just added. Surface `--yolo` + `~/.claude/settings.json` import in the welcome copy.
+1. ~~**14.19.11 — `mcp_client.py` deletion**~~ ✓ shipped `91de7b4`.
+2. ~~**14.19.9 — install.sh sendoff/welcome refresh**~~ ✓ shipped `e5d2f99`.
 3. **Pre-launch audit walkthrough** (~1h). Read `docs/pre-launch-audit.md`, triage what's done vs open, surface anything that needs attention before launch.
 4. **Landing page review** (~1h). `docs/landing-page.md` + `public/`. Coordinate with Apple Dev approval timeline.
+5. **14.19.10 — fresh-Mac ladder live-test** (needs fresh hardware/VM). Verify install.sh end-to-end on a clean Mac: curl install → operator doctor → operator slip claude → join meeting → speak → caption appears. Validates both the Apple Dev path (when cert lands) and the dev-machine path concurrently.
 
 When Apple Dev cert lands → **14.20.5**: wrap helper as `.app`, sign with Developer-ID + hardened runtime + entitlements, notarize, drop the disclaim wrapper from the productized path (keep it as a documented fallback for IDE-launched dev workflows). Real-Meet smoke confirms full slip-mode end-to-end.
 
