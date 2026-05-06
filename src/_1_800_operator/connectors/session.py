@@ -1,8 +1,10 @@
 """
-Session recovery utilities for Google Meet connectors.
+Session utilities shared by the Google Meet connectors.
 
-Provides detection of logged-out / revoked-session states, cookie injection
-from auth_state.json, and a JoinStatus primitive for browser→runner signalling.
+Covers logged-out / revoked-session detection, cookie injection from
+auth_state.json, the JoinStatus primitive for browser→runner signalling,
+single-instance enforcement (Chrome SingletonLock + operator PID file,
+including --force takeover), and on-failure debug artifact dumps.
 """
 import json
 import logging
@@ -68,6 +70,7 @@ def _chrome_kill_and_clear(lock_path):
     already dead.  Safe to call on a stale or already-gone lock.
     """
     import signal as _signal
+    import subprocess as _subprocess
     import time as _time
 
     pid_file = os.path.join(os.path.dirname(lock_path), ".operator.pid")
@@ -81,6 +84,27 @@ def _chrome_kill_and_clear(lock_path):
             operator_pid = None          # never kill ourselves
     except (FileNotFoundError, ValueError):
         pass
+
+    # Verify the PID still belongs to operator before signalling — macOS
+    # recycles PIDs aggressively, so a stale .operator.pid from a crashed
+    # prior run could now point at an unrelated user process (browser, IDE).
+    # Chrome's SingletonLock (step 2) doesn't need this guard: Chrome
+    # rewrites the symlink atomically on start/exit, so its stale-lock
+    # window is far narrower than our PID file's.
+    if operator_pid:
+        try:
+            comm = _subprocess.run(
+                ["ps", "-p", str(operator_pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.strip().lower()
+        except (OSError, _subprocess.TimeoutExpired):
+            comm = ""
+        if "python" not in comm and "operator" not in comm:
+            log.warning(
+                f"session: .operator.pid points at pid={operator_pid} "
+                f"(comm={comm!r}) — not operator, skipping kill"
+            )
+            operator_pid = None
 
     if operator_pid:
         try:
@@ -250,28 +274,19 @@ def save_debug(page, label="debug"):
     """Save a screenshot and HTML dump for diagnosis."""
     debug_dir = config.DEBUG_DIR
     os.makedirs(debug_dir, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(debug_dir, 0o700)
-    except OSError:
-        pass
+    os.chmod(debug_dir, 0o700)
     png_path = os.path.join(debug_dir, f"{label}.png")
     html_path = os.path.join(debug_dir, f"{label}.html")
     try:
         page.screenshot(path=png_path, full_page=True)
-        try:
-            os.chmod(png_path, 0o600)
-        except OSError:
-            pass
+        os.chmod(png_path, 0o600)
         log.info(f"session: screenshot saved to {debug_dir}/{label}.png")
     except Exception as e:
         log.warning(f"session: screenshot failed: {e}")
     try:
         with open(html_path, "w") as f:
             f.write(page.content())
-        try:
-            os.chmod(html_path, 0o600)
-        except OSError:
-            pass
+        os.chmod(html_path, 0o600)
         log.info(f"session: HTML saved to {debug_dir}/{label}.html")
     except Exception as e:
         log.warning(f"session: HTML dump failed: {e}")
