@@ -20,9 +20,6 @@ import re
 from dataclasses import dataclass, field
 
 
-# Two-or-more consecutive newlines = paragraph boundary. Tightened to
-# require at least one is followed by a non-whitespace char on the next
-# break, but the simple `\n{2,}` split is what models actually emit.
 _PARAGRAPH_BOUNDARY_RE = re.compile(r"\n{2,}")
 # Lines made entirely of separator glyphs (`---`, `***`, `===`, `___`,
 # `~~~`, mixed) are visual decoration the model uses between paragraphs.
@@ -50,14 +47,6 @@ def flush_paragraphs(buffer: str, on_paragraph, *, force_final: bool = False) ->
             continue
         on_paragraph(stripped)
     return remainder
-
-
-class ContextOverflowError(Exception):
-    """Raised by a provider when the model reports the context window is exceeded.
-
-    LLMClient catches this and surfaces {"type": "context_overflow"} to callers
-    after clearing history.
-    """
 
 
 @dataclass
@@ -110,15 +99,6 @@ class LLMProvider:
                  fast. Used by ChatRunner's narrate-the-failure fallback so the
                  user doesn't wait through a second retry window after the
                  original call already exhausted its retries.
-
-        Raises ContextOverflowError if the model's context window is exceeded.
-        """
-        raise NotImplementedError
-
-    def complete_stream(self, system, messages, model, max_tokens):
-        """Stream a plain-text completion. Yields text chunks (str) as they arrive.
-
-        Tool-call streaming is not part of this interface.
         """
         raise NotImplementedError
 

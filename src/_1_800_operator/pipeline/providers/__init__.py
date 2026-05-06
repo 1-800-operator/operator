@@ -1,6 +1,5 @@
 from _1_800_operator.pipeline.providers.base import (
     LLMProvider,
-    ContextOverflowError,
     ToolCall,
     ProviderResponse,
 )
@@ -21,7 +20,6 @@ def build_provider():
 
 __all__ = [
     "LLMProvider",
-    "ContextOverflowError",
     "ToolCall",
     "ProviderResponse",
     "ClaudeCLIProvider",
