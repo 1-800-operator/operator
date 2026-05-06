@@ -17,6 +17,42 @@
 
 ## Current Status
 
+**Session 192 (May 5, 2026) — Phase 14.19.1, 14.19.2, 14.19.3 implementation + STRATEGIC PIVOT to separate-profile slip model after discovering Chrome 121+ silently disables `--remote-debugging-port` for the user's logged-in default profile. Slip works end-to-end as a "decide before joining" tool with a dedicated Chrome window. ~20 commits on main, none pushed yet.**
+
+The session started executing the bridge architecture cutover and ran into a wall mid-Phase 14.19.3: the original "claude attaches to your existing Chrome tab" vision is technically impossible on modern Chrome. Chromium issue 40066423 — security mitigation against malware harvesting OAuth tokens via DevTools — silently disables CDP debug port binding when launched against the user's default (logged-in) profile. The flag is accepted into argv, observable in `pgrep`/`ps`, but Chrome refuses to bind the TCP listener. Verified via diagnostic spike on Chrome 147.0.7727.138.
+
+**The pivot (commit `8b7f9d1`):** slip launches a SEPARATE Chrome window with operator's own profile dir at `~/.operator/slip_profile/`. This sidesteps the restriction (Chromium only blocks the default profile). The separate-profile Chrome reliably exposes 9222. User-visible consequence: slip is now "decide BEFORE joining"; if the user is already in a meeting in their main Chrome and decides they want claude, they cannot add claude to that existing tab. They must close their main-Chrome tab and rejoin via slip.
+
+**The user explicitly accepted this constraint for v1** ("no extension. this is fine for v1."). The only architectural path that would re-enable mid-meeting handoff is a Chrome extension (different distribution, different permission model, ~1-2 weeks of work). Reserved as Post-MVP.
+
+**Slip's locked v1 semantics:**
+- `operator slip claude <meet-url>` opens a dedicated Chrome window (operator-owned profile)
+- First run: user signs into Google in slip Chrome once; profile persists
+- claude joins as the user's identity (room sees one participant); replies prefixed with `🤖 ` to distinguish bot vs. user typing
+- **Quiet mode**: no intro, no "Hold for Claude…" filler, ALWAYS requires `@claude` trigger (no 1-on-1 bypass) — slip is "speak when spoken to"
+- Other Chromes on port 9222 silently SIGTERM'd before slip launches its own
+- On Ctrl+C: claude detaches; slip Chrome stays running so the meeting continues
+
+**Functional gaps deliberately deferred to Post-MVP** (documented in roadmap):
+1. **No caption capture in slip** — AttachAdapter has zero caption path. Dial/deploy still capture via existing DOM observer. Slip Chrome is visible to user, so DOM captions would show on screen — either accept (with "minimize the window" UX hint) or build the cancelled Swift+Whisper STT pipeline. Pick after some user testing of (a).
+2. **First-run sign-in friction** — slip drops user on Google sign-in inside slip Chrome window, no friendly preflight.
+3. **Mid-meeting handoff** — architecturally impossible without extension.
+4. **Default URL handler** — registering operator as macOS default for meet.google.com would route Meet links to slip automatically, eliminating pre-planning.
+
+**Cancelled mid-session:** the planned 14.19.3c.2-c.6 Swift audio capture + Whisper STT pipeline (~10h scope) became moot once the slip-Chrome-is-a-separate-window pivot landed. With slip Chrome minimizable, captions can be enabled visibly without ruining the user's main browser experience — DOM captions cover the use case at zero implementation cost. Spike artifacts kept as historical record at `debug/resume_spike/`.
+
+**Two new feedback memories saved this session:**
+- `feedback_substantiate_design_deviations.md` — when proposing a deviation from existing design, substantiate with concrete reasoning, not vague cleanliness claims. Earned after I proposed a Bridge dataclass with a flag that lived on the wrong axis.
+- Audit lesson (encoded inline): when writing connector-adjacent code, read `connectors/session.py` first. Shared infrastructure usually already covers the case (JoinStatus, save_debug, Meet-URL regex). Caught after I wrote AttachAdapter from scratch without consulting battle-tested helpers.
+
+**Exact next step (session 193):** Live-test slip in a REAL meeting with another participant. The latest commit (`3321a1c`, quiet mode + prefix strip) changed slip's behavior meaningfully and only had one earlier live test against the older code. Validate: no intro fires, ambient chat from another participant doesn't trigger claude, `@claude` invocation works, no self-reply cascade, `🤖 ` prefix renders correctly. If green → push 20 commits to origin/main and tag, then proceed to 14.19.4 (`operator login claude`) or directly to 14.19.7 (mass deletion of wizard-era code, half the codebase).
+
+**S192 git state:** ~20 commits on `main`. Nothing pushed to origin or public yet. Local tag `phase-14.18-frozen` from session start (pre-pivot reference). Should add `slip-cdp-v1-foundation` on HEAD before pushing. Untracked: `debug/resume_spike/` (historical), `docs/pre-launch-audit.md` (S187, defer until 14.19.7).
+
+---
+
+## Prior Status (preserved)
+
 **Session 191 (May 5, 2026) — Strategic pivot session. No code changes. Major roadmap restructure: bridge architecture cutover queued as Phase 14.19, custom-bot work deferred to Post-MVP "Operator Studio", Claude Code Plugin vision locked in Post-MVP as Shape E (terminal replacement for Operator users).**
 
 This was a conversation-and-roadmap session, not an implementation session. Started from S190's just-shipped install path A, pivoted to broader pre-launch product questions, then arrived at a major v0.0.1 scope reduction.
