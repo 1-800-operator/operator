@@ -5,10 +5,9 @@ Covers pipeline/llm.py:
   1. ask() — single provider.complete call, system prompt + tail wired
   2. _tail_messages — agent sender → assistant role; others get "first: text";
      caption kind wrapped in <spoken> blocks
-  3. ContextOverflowError — returns {"type": "context_overflow"}, halves replay window
-  4. intro() — one provider.complete, no history, returns trimmed text;
+  3. intro() — one provider.complete, no history, returns trimmed text;
      provider exceptions propagate (ChatRunner is responsible)
-  5. wrap_spoken — sanitizes attacker-controlled speaker names
+  4. wrap_spoken — sanitizes attacker-controlled speaker names
 
 Uses MagicMock for the provider and an in-memory MeetingRecord.
 
@@ -26,7 +25,7 @@ from unittest.mock import MagicMock
 from _1_800_operator import config
 from _1_800_operator.pipeline.llm import LLMClient
 from _1_800_operator.pipeline.meeting_record import MeetingRecord
-from _1_800_operator.pipeline.providers import ProviderResponse, ContextOverflowError
+from _1_800_operator.pipeline.providers import ProviderResponse
 
 
 # ---------------------------------------------------------------------------
@@ -118,30 +117,7 @@ def test_tail_messages_shape():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: ContextOverflowError — halves replay window
-# ---------------------------------------------------------------------------
-
-def test_context_overflow_halves_replay_window():
-    """ask() on ContextOverflowError returns overflow sentinel and halves _max_messages (floor 2)."""
-    client, provider, _ = make_client()
-    provider.complete.side_effect = ContextOverflowError()
-    client._max_messages = 40
-
-    result = client.ask("anything")
-
-    assert result == {"type": "context_overflow"}
-    assert client._max_messages == 20
-
-    # Repeat until floor
-    provider.complete.side_effect = ContextOverflowError()
-    for _ in range(10):
-        client.ask("again")
-    assert client._max_messages == 2, f"Expected floor 2, got {client._max_messages}"
-    print("PASS  test_context_overflow_halves_replay_window")
-
-
-# ---------------------------------------------------------------------------
-# Test 4: intro() — single-shot, no history, exceptions propagate
+# Test 3: intro() — single-shot, no history, exceptions propagate
 # ---------------------------------------------------------------------------
 
 def test_intro_single_shot_and_propagates_errors():
@@ -174,7 +150,7 @@ def test_intro_single_shot_and_propagates_errors():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: wrap_spoken strips attribute-breaking chars from speaker
+# Test 4: wrap_spoken strips attribute-breaking chars from speaker
 # ---------------------------------------------------------------------------
 
 def test_wrap_spoken_sanitizes_speaker():
@@ -201,7 +177,6 @@ if __name__ == "__main__":
     tests = [
         test_ask_no_tools_calls_provider_once,
         test_tail_messages_shape,
-        test_context_overflow_halves_replay_window,
         test_intro_single_shot_and_propagates_errors,
         test_wrap_spoken_sanitizes_speaker,
     ]

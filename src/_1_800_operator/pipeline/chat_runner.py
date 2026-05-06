@@ -544,10 +544,11 @@ class ChatRunner:
         self._dispatch_result(result)
 
     def _dispatch_result(self, result):
-        """Route an LLM result (text or context_overflow).
+        """Route an LLM result.
 
         claude_cli owns its own tool loop, so the only result shapes that
-        reach here are text (streamed or non-streamed) and context_overflow.
+        reach here are text (streamed or non-streamed). Anything else is
+        a bug — narrate-failure path catches it.
         """
         if isinstance(result, str):
             self._send(result)
@@ -558,9 +559,6 @@ class ChatRunner:
             # Streaming path already posted each paragraph via on_paragraph.
             if not result.get("streamed"):
                 self._send(result["content"])
-            self._emit_turn_done()
-        elif kind == "context_overflow":
-            self._send("Our conversation got too long — I've cleared the history. What would you like to do next?")
             self._emit_turn_done()
         else:
             log.error(f"_dispatch_result: unknown result shape {result!r}")

@@ -19,21 +19,29 @@ def test_history_cap():
 
     record = MeetingRecord(slug=None)  # in-memory
     llm = LLMClient(MagicMock(), record=record)
-    llm._max_messages = 5
+    # Monkeypatch the history cap for the duration of the test. The cap
+    # used to live as `llm._max_messages` (mutable per-meeting) but was
+    # collapsed to `config.HISTORY_MESSAGES` (constant) when we deleted
+    # the now-dead context-overflow shrinking machinery.
+    original_cap = config.HISTORY_MESSAGES
+    config.HISTORY_MESSAGES = 5
 
-    for i in range(10):
-        record.append(sender="Alice", text=f"user msg {i}")
-        record.append(sender=config.AGENT_NAME, text=f"bot reply {i}")
+    try:
+        for i in range(10):
+            record.append(sender="Alice", text=f"user msg {i}")
+            record.append(sender=config.AGENT_NAME, text=f"bot reply {i}")
 
-    llm._provider.complete.return_value = ProviderResponse(
-        text="ok", tool_calls=[], stop_reason="end",
-    )
-    llm.ask("probe", record=False)  # don't append; we just want to inspect the call
+        llm._provider.complete.return_value = ProviderResponse(
+            text="ok", tool_calls=[], stop_reason="end",
+        )
+        llm.ask("probe", record=False)  # don't append; we just want to inspect the call
 
-    call_args = llm._provider.complete.call_args
-    messages = call_args.kwargs["messages"]
-    # 5 tail entries + 1 trailing user turn (extra_user_msg)
-    assert len(messages) == 6, f"Expected 6 messages, got {len(messages)}: {messages}"
+        call_args = llm._provider.complete.call_args
+        messages = call_args.kwargs["messages"]
+        # 5 tail entries + 1 trailing user turn (extra_user_msg)
+        assert len(messages) == 6, f"Expected 6 messages, got {len(messages)}: {messages}"
+    finally:
+        config.HISTORY_MESSAGES = original_cap
     # Oldest kept should be entry index -5 (counting from end of the 20 entries written)
     # The 20 entries are: user0, bot0, user1, bot1, ..., user9, bot9. Last 5 are:
     # user8, bot8, user9, bot9 is only 4; wait — 20 entries, last 5 = bot7, user8, bot8, user9, bot9

@@ -13,7 +13,6 @@ text out.
 import logging
 import re
 from _1_800_operator import config
-from _1_800_operator.pipeline.providers import ContextOverflowError
 from _1_800_operator.pipeline.meeting_record import MeetingRecord
 
 log = logging.getLogger(__name__)
@@ -66,7 +65,6 @@ class LLMClient:
     def __init__(self, provider, record: MeetingRecord | None = None):
         self._provider = provider
         self._record = record if record is not None else MeetingRecord(slug=None)
-        self._max_messages = config.HISTORY_MESSAGES
         self._system_prompt = SAFETY_RULES
         self._max_tokens = config.MAX_TOKENS
 
@@ -87,7 +85,7 @@ class LLMClient:
 
     def _tail_messages(self) -> list[dict]:
         """Build neutral-shape messages from the meeting record tail."""
-        entries = self._record.tail(self._max_messages)
+        entries = self._record.tail(config.HISTORY_MESSAGES)
         agent = (config.AGENT_NAME or "").lower()
         messages: list[dict] = []
         for e in entries:
@@ -128,8 +126,6 @@ class LLMClient:
         `{"type": "text", "content": ..., "streamed": True}` so the caller
         knows the content has already been posted paragraph-by-paragraph and
         should not re-send it as one blob.
-
-        On context overflow, returns `{"type": "context_overflow"}`.
         """
         if record:
             messages = self._build_messages()
@@ -161,10 +157,6 @@ class LLMClient:
                     max_tokens=self._max_tokens,
                     retry_rate_limits=retry_rate_limits,
                 )
-        except ContextOverflowError:
-            log.warning("LLM context length exceeded — shrinking replay window")
-            self._max_messages = max(2, self._max_messages // 2)
-            return {"type": "context_overflow"}
         except Exception as e:
             log.error(f"LLM API call failed: {e}", exc_info=True)
             raise

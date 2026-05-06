@@ -47,8 +47,17 @@ log = logging.getLogger(__name__)
 SPAWN_INIT_TIMEOUT_SECONDS = 30
 # How long a single turn (user message in -> result event out) is allowed
 # to take before we treat the subprocess as hung. Generous because inner
-# claude may chain many tool calls before producing a final reply.
+# claude may chain many tool calls before producing a final reply. Hard
+# ceiling — backstop only.
 TURN_TIMEOUT_SECONDS = 600
+# Inter-event silence threshold for the wedge watchdog. If the subprocess
+# emits no event of any kind for this long AND no tool is currently in
+# flight, we conclude the subprocess is wedged and abort the turn (caller
+# narrates the failure, user gets a recoverable message instead of waiting
+# the full TURN_TIMEOUT_SECONDS ceiling). Tools legitimately produce no
+# top-level events while running (a 5-minute Bash test suite is normal),
+# so the gate is silence + not-in-flight, never silence alone.
+HEARTBEAT_SILENCE_SECONDS = 60
 
 
 # Framework-level UX guarantee for chat-mediated tool confirmation.
@@ -432,6 +441,11 @@ class ClaudeCLIProvider(LLMProvider):
                 env=env,
             )
         except OSError as exc:
+            # Bridge tempdir + named pipes were created in
+            # _setup_permission_bridge above; if Popen fails, tear them down
+            # before raising so we don't accumulate orphan /tmp dirs across
+            # repeated spawn failures.
+            self._teardown_permission_bridge()
             raise ClaudeCLIProtocolError(f"failed to launch claude CLI: {exc}") from exc
 
         self._out_q = Queue()
@@ -731,6 +745,72 @@ class ClaudeCLIProvider(LLMProvider):
         self._terminate_subprocess()
         self._teardown_permission_bridge()
 
+    # --- event-loop helpers (used by _send_and_collect{,_streaming}) --
+
+    def _check_heartbeat(self, last_event_ts: float, tool_in_flight: bool):
+        """Raise ClaudeCLIProtocolError if the subprocess looks wedged.
+
+        Wedge = no event for HEARTBEAT_SILENCE_SECONDS AND no tool in flight.
+        Tools legitimately produce silent stretches (e.g. a 5-min Bash run);
+        the gate is silence + not-in-flight, never silence alone.
+        """
+        if tool_in_flight:
+            return
+        if time.monotonic() - last_event_ts <= HEARTBEAT_SILENCE_SECONDS:
+            return
+        raise ClaudeCLIProtocolError(
+            f"claude subprocess silent for {HEARTBEAT_SILENCE_SECONDS}s "
+            "with no tool in flight — treating as wedged"
+        )
+
+    def _dispatch_assistant_blocks(self, payload, *, accumulate_text):
+        """Walk an assistant event's content blocks, returning per-block effects.
+
+        Returns a tuple (text_chunks, saw_tool_use) where:
+          - text_chunks: list of text-block strings (empty when streaming —
+            stream_event handles partial deltas; assistant text is just
+            terminal echo). Caller passes accumulate_text=True for the
+            non-streaming path to opt into reconstruction from blocks.
+          - saw_tool_use: True iff at least one tool_use block was seen.
+            Caller uses this to flip tool_in_flight and (in streaming) to
+            dispatch the progress_callback.
+
+        The progress_callback dispatch happens here so both event loops
+        narrate inner tool use uniformly.
+        """
+        text_chunks: list[str] = []
+        saw_tool_use = False
+        for block in (payload.get("message") or {}).get("content") or []:
+            btype = block.get("type")
+            if btype == "text" and accumulate_text:
+                text_chunks.append(block.get("text", ""))
+            elif btype == "tool_use":
+                saw_tool_use = True
+                if self._progress_callback:
+                    try:
+                        self._progress_callback(
+                            block.get("name", ""),
+                            block.get("input") or {},
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            f"ClaudeCLI: progress_callback raised on tool_use "
+                            f"{block.get('name', '')!r}: {exc}"
+                        )
+        return text_chunks, saw_tool_use
+
+    @staticmethod
+    def _user_event_carries_tool_result(payload) -> bool:
+        """True if a `user` event carries any tool_result block.
+
+        Tool results arrive on the stream as user events (claude's protocol).
+        Both event loops use this to flip tool_in_flight back to False.
+        """
+        for block in (payload.get("message") or {}).get("content") or []:
+            if block.get("type") == "tool_result":
+                return True
+        return False
+
     # --- LLMProvider interface ----------------------------------------
 
     def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
@@ -801,11 +881,15 @@ class ClaudeCLIProvider(LLMProvider):
         deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         text_parts = []
         result_evt = None
+        last_event_ts = time.monotonic()
+        tool_in_flight = False
         while time.monotonic() < deadline:
             try:
                 kind, payload = self._out_q.get(timeout=0.5)
             except Empty:
+                self._check_heartbeat(last_event_ts, tool_in_flight)
                 continue
+            last_event_ts = time.monotonic()
             if kind == "eof":
                 stderr_tail = "".join(self._stderr_buf[-20:]) if self._stderr_buf else "(empty)"
                 raise ClaudeCLIProtocolError(
@@ -818,10 +902,19 @@ class ClaudeCLIProvider(LLMProvider):
                 if not self._init_validated:
                     self._validate_init_event(payload)
             elif etype == "assistant":
-                content = (payload.get("message") or {}).get("content") or []
-                for block in content:
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
+                chunks, saw_tool_use = self._dispatch_assistant_blocks(
+                    payload, accumulate_text=True,
+                )
+                text_parts.extend(chunks)
+                if saw_tool_use:
+                    tool_in_flight = True
+                elif chunks:
+                    # Top-level text — model is emitting reply content,
+                    # no tool currently running.
+                    tool_in_flight = False
+            elif etype == "user":
+                if self._user_event_carries_tool_result(payload):
+                    tool_in_flight = False
             elif etype == "result":
                 result_evt = payload
                 break
@@ -939,11 +1032,15 @@ class ClaudeCLIProvider(LLMProvider):
         buffer = ""
         full_text_parts = []
         result_evt = None
+        last_event_ts = time.monotonic()
+        tool_in_flight = False
         while time.monotonic() < deadline:
             try:
                 kind, payload = self._out_q.get(timeout=0.5)
             except Empty:
+                self._check_heartbeat(last_event_ts, tool_in_flight)
                 continue
+            last_event_ts = time.monotonic()
             if kind == "eof":
                 stderr_tail = "".join(self._stderr_buf[-20:]) if self._stderr_buf else "(empty)"
                 raise ClaudeCLIProtocolError(
@@ -971,6 +1068,9 @@ class ClaudeCLIProvider(LLMProvider):
                 text = delta.get("text") or ""
                 if not text:
                     continue
+                # Top-level text delta — model is producing reply content,
+                # not running a tool. Re-arm the watchdog.
+                tool_in_flight = False
                 if t_first_token is None:
                     t_first_token = time.monotonic()
                 full_text_parts.append(text)
@@ -985,23 +1085,14 @@ class ClaudeCLIProvider(LLMProvider):
                 # they're inner Task-tool output, not the bot's reply.
                 if payload.get("parent_tool_use_id"):
                     continue
-                # Walk content blocks only to dispatch tool_use to the
-                # progress_callback (chat-side narration of inner tools).
-                # Text content is already in `full_text_parts` via the
-                # text_delta path above; we don't reconstruct it from the
-                # assistant event.
-                for block in (payload.get("message") or {}).get("content") or []:
-                    if block.get("type") == "tool_use" and self._progress_callback:
-                        try:
-                            self._progress_callback(
-                                block.get("name", ""),
-                                block.get("input") or {},
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                f"ClaudeCLI: progress_callback raised on tool_use "
-                                f"{block.get('name', '')!r}: {exc}"
-                            )
+                # Streaming reconstructs text from stream_event deltas — we
+                # don't accumulate from assistant blocks here, just dispatch
+                # tool_use to progress_callback and flip tool_in_flight.
+                _, saw_tool_use = self._dispatch_assistant_blocks(
+                    payload, accumulate_text=False,
+                )
+                if saw_tool_use:
+                    tool_in_flight = True
                 # An `assistant` event finalizes one sub-message of the turn.
                 # When the model calls a tool, the next text comes in a NEW
                 # assistant message (indices reset to 0). Without flushing
@@ -1013,6 +1104,10 @@ class ClaudeCLIProvider(LLMProvider):
                     flush_paragraphs(buffer, on_paragraph, force_final=True)
                     full_text_parts.append("\n\n")
                     buffer = ""
+                continue
+            if etype == "user":
+                if self._user_event_carries_tool_result(payload):
+                    tool_in_flight = False
                 continue
             if etype == "result":
                 result_evt = payload
