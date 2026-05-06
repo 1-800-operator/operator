@@ -95,6 +95,14 @@ class ChatRunner:
         # the recency window the handler enforces).
         self._latest_user_msg: tuple[str, str, float] | None = None
         self._approval_msg_ids_used: set[str] = set()
+        # Loop-state. Promoted to self.* (vs. _loop locals) so the
+        # _advance_intro_state / _check_participant_state / _process_messages
+        # helpers can read+mutate without 4-tuple parameter passing. Lifetime
+        # is one meeting (one ChatRunner instance per meeting).
+        self._participant_count: int = 0
+        self._saw_others: bool = False
+        self._alone_since: float | None = None
+        self._last_participant_check: float = 0.0
 
     def _wire_permissions(self):
         """Plug a chat-routed PreToolUse handler into the claude_cli provider.
@@ -189,7 +197,7 @@ class ChatRunner:
             join_timeout = config.LOBBY_WAIT_SECONDS + 60
             if not join_status.ready.wait(timeout=join_timeout):
                 log.error(f"ChatRunner: join timed out ({join_timeout}s)")
-                self._connector.leave()
+                self._safe_leave()
                 return
             if not join_status.success:
                 reason = join_status.failure_reason or "unknown"
@@ -201,7 +209,7 @@ class ChatRunner:
                     ui.warn("Another Operator session is already running. Use --force to stop it and start a new one.")
                 else:
                     ui.err(f"Join failed: {reason}")
-                self._connector.leave()
+                self._safe_leave()
                 return
             if join_status.session_recovered:
                 log.warning("ChatRunner: session recovered via cookie injection — "
@@ -254,24 +262,21 @@ class ChatRunner:
         """Signal the polling loop to exit."""
         self._stop_event.set()
 
-    def _loop(self):
-        """Main polling loop."""
-        # Seed participant count immediately so the intro gate doesn't
-        # wait on the first read_chat + count cycle (~2s on slow joins).
-        # Best-effort: any failure falls through to the regular polling
-        # path on the first iteration.
-        last_participant_check = 0
-        participant_count = 0
-        saw_others = False
+    def _safe_leave(self):
+        """Wrap connector.leave() — if it raises (e.g. Playwright already
+        torn down), don't compound a primary error with a stack trace from
+        the cleanup attempt. Used in error paths (join timeout, join failure,
+        auto-leave) where leave() is best-effort cleanup, not the main work."""
         try:
-            participant_count = self._connector.get_participant_count()
-            last_participant_check = time.time()
-            if participant_count > 1:
-                saw_others = True
-                log.info(f"ChatRunner: seed participant_count={participant_count} (saw_others=True)")
+            self._connector.leave()
         except Exception as e:
-            log.warning(f"ChatRunner: seed get_participant_count failed: {e}")
-        alone_since = None
+            log.warning(f"ChatRunner: connector.leave raised during cleanup: {e}")
+
+    def _loop(self):
+        """Main polling loop. Thin orchestrator — see _advance_intro_state,
+        _check_participant_state, and _process_messages for the per-iteration
+        work."""
+        self._seed_loop_state()
         while not self._stop_event.is_set():
             # Detect unexpected browser session death (crash, page loss, etc.)
             if not self._connector.is_connected():
@@ -279,61 +284,7 @@ class ChatRunner:
                 ui.err("Meeting connection lost — chat loop stopped.")
                 break
 
-            # Post the self-intro the first iteration after generation completes
-            # AND at least one human has been seen in the meeting — so the intro
-            # lands in front of someone, not into an empty room before they
-            # reach Meet's pre-join screen (the meet.new path: bot joins
-            # instantly, user takes 5–15s to get through pre-join + open chat,
-            # and Meet only shows messages received after you've opened chat).
-            # Drain anything buffered during the gap once it does post.
-            # "Hold for <bot>..." line — first chat post, gated on saw_others
-            # for the same reason the intro is: Meet only renders messages
-            # received after a participant opens chat, so posting before a
-            # human is in the room means nobody ever sees it. Stamp the post
-            # time so the intro gate below can enforce the connecting-beat
-            # floor. We also kick off intro generation here (rather than at
-            # run() start) so we can scrape participant names/count first
-            # and bake them into the LLM prompt.
-            if not self._quiet_mode and self._hold_posted_at is None and saw_others:
-                self._send(f"Hold for {config.AGENT_NAME}...")
-                self._hold_posted_at = time.time()
-                try:
-                    names = self._connector.get_participant_names()
-                except Exception as e:
-                    log.warning(f"ChatRunner: get_participant_names failed: {e}")
-                    names = []
-                try:
-                    count = self._connector.get_participant_count()
-                except Exception:
-                    count = 0
-                threading.Thread(
-                    target=self._generate_intro,
-                    kwargs={"participant_names": names, "participant_count": count},
-                    daemon=True,
-                ).start()
-
-            # Enforce a minimum gap after the "Hold for <bot>..." line so the
-            # "connecting you now" beat registers even if intro generation
-            # finishes faster than humans can read. Floor only — if the LLM
-            # is slow we never wait *longer* than it does.
-            hold_elapsed_ok = (
-                self._hold_posted_at is not None
-                and (time.time() - self._hold_posted_at) >= config.HOLD_DURATION_SECONDS
-            )
-            if not self._intro_posted and self._intro_ready.is_set() and saw_others and hold_elapsed_ok:
-                if self._intro_text:
-                    self._send(self._intro_text)
-                self._intro_posted = True
-                if self._pre_intro_buffer:
-                    log.info(f"ChatRunner: draining {len(self._pre_intro_buffer)} pre-intro msg(s)")
-                    buffered = self._pre_intro_buffer
-                    self._pre_intro_buffer = []
-                    for buf in buffered:
-                        if self._record is not None:
-                            self._record.append(
-                                sender=buf["sender"], text=buf["text"], kind=buf["kind"],
-                            )
-                        self._dispatch_user_message(buf["text"], buf["one_on_one"])
+            self._advance_intro_state()
 
             try:
                 messages = self._connector.read_chat()
@@ -347,108 +298,188 @@ class ChatRunner:
             if self._stop_event.is_set():
                 break
 
-            # Periodically refresh participant count
-            now = time.time()
-            if now - last_participant_check >= PARTICIPANT_CHECK_INTERVAL:
-                last_participant_check = now
-                try:
-                    new_count = self._connector.get_participant_count()
-                    if self._stop_event.is_set():
-                        break
-                    if new_count != participant_count:
-                        log.info(f"ChatRunner: participant count changed {participant_count} → {new_count}")
-                    participant_count = new_count
-                except Exception as e:
-                    log.warning(f"ChatRunner: get_participant_count failed: {e}")
-
-                if participant_count > 1:
-                    saw_others = True
-                    alone_since = None
-                elif saw_others and participant_count == 1:
-                    if alone_since is None:
-                        alone_since = now
-                        log.info("ChatRunner: alone in meeting — grace timer started")
-                    elif now - alone_since >= config.ALONE_EXIT_GRACE_SECONDS:
-                        log.info(
-                            f"ChatRunner: alone for {int(now - alone_since)}s — auto-leaving"
-                        )
-                        ui.ok("Everyone left — dropping from the meeting.")
-                        self._connector.leave()
-                        return
+            if self._check_participant_state():
+                # Auto-leave fired — connector.leave() already called.
+                return
+            if self._stop_event.is_set():
+                break
 
             # Quiet mode (slip) requires the trigger phrase regardless of
             # participant count — claude must be explicitly addressed.
             # Dial/deploy keep the 1-on-1 bypass since claude is a
             # separate participant and ambient chat IS for it.
-            one_on_one = (not self._quiet_mode) and (participant_count <= ONE_ON_ONE_THRESHOLD)
-
-            # Track which own-message texts matched this batch so we can
-            # discard AFTER the full batch — Meet creates multiple DOM
-            # elements per message (different IDs, same text), so we must
-            # keep the text in the set until all duplicates are filtered.
-            own_matched = set()
-
-            for msg in messages:
-                msg_id = msg.get("id", "")
-                text = msg.get("text", "").strip()
-                sender = msg.get("sender", "").strip()
-
-                # Skip already-processed messages
-                if msg_id and msg_id in self._seen_ids:
-                    continue
-                if msg_id:
-                    self._seen_ids.add(msg_id)
-
-                # Skip empty messages
-                if not text:
-                    continue
-
-                # Skip our own messages. Primary path is the ID-based dedup
-                # above (msg_id added to _seen_ids by `_send`); these two
-                # checks are fallbacks for adapters that can't return an ID,
-                # or when the post-send DOM read-back timed out. Text match
-                # compares stripped strings since Meet's DOM strips trailing
-                # whitespace on render — exact-equality comparison broke
-                # session-164's stuck-LLM watchdog (`...hang tight.\n\n` sent
-                # vs `...hang tight.` read back) and triggered a self-reply
-                # cascade.
-                if sender and sender.lower() == config.AGENT_NAME.lower():
-                    log.debug(f"ChatRunner: skipping own message (sender={sender!r})")
-                    continue
-                text_stripped = text.strip()
-                if not sender and text_stripped in self._own_messages:
-                    log.debug(f"ChatRunner: skipping own message (text match)")
-                    own_matched.add(text_stripped)
-                    continue
-
-                log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r} one_on_one={one_on_one}")
-                # Stash for the recent-yes auto-approval path. The handler
-                # reads this when its bridge fires; the time.monotonic()
-                # stamp is what enforces the recency window.
-                self._latest_user_msg = (msg_id or text, text, time.monotonic())
-
-                # Pre-intro user messages: buffer in memory and persist at
-                # drain time, AFTER the intro has been written to the record.
-                # If we persisted now, the JSONL would order user→assistant→…
-                # which leaves _tail_messages ending in role='assistant' on
-                # Q1 — claude_cli rejects that. Holding the record.append
-                # until drain forces the on-disk order to match the
-                # processing order: assistant(intro) before user(Q1).
-                if not self._intro_posted:
-                    self._pre_intro_buffer.append({
-                        "text": text, "one_on_one": one_on_one,
-                        "sender": sender, "kind": "chat",
-                    })
-                    continue
-
-                if self._record is not None:
-                    self._record.append(sender=sender, text=text, kind="chat")
-
-                self._dispatch_user_message(text, one_on_one)
-
-            self._own_messages -= own_matched
+            one_on_one = (not self._quiet_mode) and (self._participant_count <= ONE_ON_ONE_THRESHOLD)
+            self._process_messages(messages, one_on_one)
 
             self._stop_event.wait(POLL_INTERVAL)
+
+    def _seed_loop_state(self):
+        """Seed participant count immediately so the intro gate doesn't wait
+        on the first read_chat + count cycle (~2s on slow joins). Best-effort:
+        any failure falls through to the regular polling path on the first
+        iteration."""
+        try:
+            self._participant_count = self._connector.get_participant_count()
+            self._last_participant_check = time.time()
+            if self._participant_count > 1:
+                self._saw_others = True
+                log.info(f"ChatRunner: seed participant_count={self._participant_count} (saw_others=True)")
+        except Exception as e:
+            log.warning(f"ChatRunner: seed get_participant_count failed: {e}")
+
+    def _advance_intro_state(self):
+        """Drive the intro state machine: hold-message post, intro generation
+        kickoff, intro post, pre-intro buffer drain.
+
+        Posts "Hold for <bot>..." once at least one human has been seen — Meet
+        only renders messages received after a participant opens chat, so
+        posting before a human is in the room means nobody ever sees it. Then
+        kicks off intro generation in a background thread (so we can scrape
+        participant names/count first and bake them into the LLM prompt).
+        Once intro generation completes AND the connecting-beat floor has
+        elapsed AND a human is present, posts the intro and drains any
+        messages that arrived during the gap (writing them to the record at
+        drain time so on-disk order matches processing order: assistant(intro)
+        before user(Q1) — claude_cli rejects a tail ending in assistant).
+        """
+        if not self._quiet_mode and self._hold_posted_at is None and self._saw_others:
+            self._send(f"Hold for {config.AGENT_NAME}...")
+            self._hold_posted_at = time.time()
+            try:
+                names = self._connector.get_participant_names()
+            except Exception as e:
+                log.warning(f"ChatRunner: get_participant_names failed: {e}")
+                names = []
+            try:
+                count = self._connector.get_participant_count()
+            except Exception:
+                count = 0
+            threading.Thread(
+                target=self._generate_intro,
+                kwargs={"participant_names": names, "participant_count": count},
+                daemon=True,
+            ).start()
+
+        # Floor only — if the LLM is slow we never wait *longer* than it does.
+        hold_elapsed_ok = (
+            self._hold_posted_at is not None
+            and (time.time() - self._hold_posted_at) >= config.HOLD_DURATION_SECONDS
+        )
+        if not self._intro_posted and self._intro_ready.is_set() and self._saw_others and hold_elapsed_ok:
+            if self._intro_text:
+                self._send(self._intro_text)
+            self._intro_posted = True
+            if self._pre_intro_buffer:
+                log.info(f"ChatRunner: draining {len(self._pre_intro_buffer)} pre-intro msg(s)")
+                buffered = self._pre_intro_buffer
+                self._pre_intro_buffer = []
+                for buf in buffered:
+                    if self._record is not None:
+                        self._record.append(
+                            sender=buf["sender"], text=buf["text"], kind=buf["kind"],
+                        )
+                    self._dispatch_user_message(buf["text"], buf["one_on_one"])
+
+    def _check_participant_state(self) -> bool:
+        """Refresh participant count on a PARTICIPANT_CHECK_INTERVAL cadence
+        and run the alone-since auto-leave timer. Returns True iff auto-leave
+        fired (and the connector was already told to leave) — caller exits
+        the loop."""
+        now = time.time()
+        if now - self._last_participant_check < PARTICIPANT_CHECK_INTERVAL:
+            return False
+
+        self._last_participant_check = now
+        try:
+            new_count = self._connector.get_participant_count()
+            if self._stop_event.is_set():
+                return False
+            if new_count != self._participant_count:
+                log.info(f"ChatRunner: participant count changed {self._participant_count} → {new_count}")
+            self._participant_count = new_count
+        except Exception as e:
+            log.warning(f"ChatRunner: get_participant_count failed: {e}")
+
+        if self._participant_count > 1:
+            self._saw_others = True
+            self._alone_since = None
+        elif self._saw_others and self._participant_count == 1:
+            if self._alone_since is None:
+                self._alone_since = now
+                log.info("ChatRunner: alone in meeting — grace timer started")
+            elif now - self._alone_since >= config.ALONE_EXIT_GRACE_SECONDS:
+                log.info(
+                    f"ChatRunner: alone for {int(now - self._alone_since)}s — auto-leaving"
+                )
+                ui.ok("Everyone left — dropping from the meeting.")
+                self._safe_leave()
+                return True
+        return False
+
+    def _process_messages(self, messages, one_on_one: bool):
+        """Filter out own/seen/empty messages, persist new ones to the record
+        (or buffer pre-intro), and dispatch them to the LLM router."""
+        # Track which own-message texts matched this batch so we can discard
+        # AFTER the full batch — Meet creates multiple DOM elements per
+        # message (different IDs, same text), so we must keep the text in
+        # the set until all duplicates are filtered.
+        own_matched = set()
+
+        for msg in messages:
+            msg_id = msg.get("id", "")
+            text = msg.get("text", "").strip()
+            sender = msg.get("sender", "").strip()
+
+            if msg_id and msg_id in self._seen_ids:
+                continue
+            if msg_id:
+                self._seen_ids.add(msg_id)
+
+            if not text:
+                continue
+
+            # Skip our own messages. Primary path is the ID-based dedup
+            # above (msg_id added to _seen_ids by `_send`); these two checks
+            # are fallbacks for adapters that can't return an ID, or when
+            # the post-send DOM read-back timed out. Text match compares
+            # stripped strings since Meet's DOM strips trailing whitespace
+            # on render — exact-equality comparison broke session-164's
+            # stuck-LLM watchdog (`...hang tight.\n\n` sent vs `...hang
+            # tight.` read back) and triggered a self-reply cascade.
+            if sender and sender.lower() == config.AGENT_NAME.lower():
+                log.debug(f"ChatRunner: skipping own message (sender={sender!r})")
+                continue
+            if not sender and text in self._own_messages:
+                log.debug(f"ChatRunner: skipping own message (text match)")
+                own_matched.add(text)
+                continue
+
+            log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r} one_on_one={one_on_one}")
+            # Stash for the recent-yes auto-approval path. The handler reads
+            # this when its bridge fires; the time.monotonic() stamp is
+            # what enforces the recency window.
+            self._latest_user_msg = (msg_id or text, text, time.monotonic())
+
+            # Pre-intro user messages: buffer in memory and persist at drain
+            # time, AFTER the intro has been written to the record. If we
+            # persisted now, the JSONL would order user→assistant→… which
+            # leaves _tail_messages ending in role='assistant' on Q1 —
+            # claude_cli rejects that. Holding the record.append until drain
+            # forces the on-disk order to match the processing order:
+            # assistant(intro) before user(Q1).
+            if not self._intro_posted:
+                self._pre_intro_buffer.append({
+                    "text": text, "one_on_one": one_on_one,
+                    "sender": sender, "kind": "chat",
+                })
+                continue
+
+            if self._record is not None:
+                self._record.append(sender=sender, text=text, kind="chat")
+
+            self._dispatch_user_message(text, one_on_one)
+
+        self._own_messages -= own_matched
 
     def _dispatch_user_message(self, text: str, one_on_one: bool):
         """Trigger-check a chat message and route it to the LLM if addressed.
@@ -498,10 +529,14 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
+            # Pass only the exception class name to the narration prompt —
+            # never the str(e) body, which can carry SDK response payloads,
+            # tokens-bearing URLs, or upstream secrets. Full detail still
+            # lands in /tmp/operator.log via the log.error above.
             self._narrate_failure(
                 context=(
                     f"the meeting bot tried to answer the user's question but "
-                    f"the LLM call failed with: {type(e).__name__}: {e}."
+                    f"the LLM call failed with: {type(e).__name__}."
                 ),
                 fallback="Sorry — I couldn't reach my brain just now. Try again in a moment?",
             )
@@ -529,11 +564,12 @@ class ChatRunner:
             self._emit_turn_done()
         else:
             log.error(f"_dispatch_result: unknown result shape {result!r}")
+            # Don't pass the raw payload into the narration prompt — same
+            # reason as the LLM-failure path above. Full repr is in the log.
             self._narrate_failure(
                 context=(
-                    f"the previous turn produced a result the meeting bot "
-                    f"doesn't know how to render in chat. The raw payload was: "
-                    f"{result!r}."
+                    "the previous turn produced a result the meeting bot "
+                    "doesn't know how to render in chat (unknown shape)."
                 ),
                 fallback="Sorry — something went wrong on my end. Try again?",
             )
@@ -588,9 +624,6 @@ class ChatRunner:
 
         `kind` is persisted to the record but filtered by `pipeline/llm.py` when
         building the LLM prompt (only `chat` and `caption` are replayed).
-        Permission prompts pass `kind="confirmation"` so they're audited but
-        invisible to the model — prevents the model from mimicking the
-        harness's own confirmation wording back at the user.
 
         Own-message dedup: primary path is by message ID — when the connector
         returns the new `data-message-id` it captured post-send, we add it to
