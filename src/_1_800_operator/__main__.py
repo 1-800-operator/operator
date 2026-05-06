@@ -544,6 +544,7 @@ def _print_usage():
     print("  operator deploy <name> <url>    Send an agent into an existing meeting (Phase 14.19)")
     print("  operator slip <name> [url]      Attach an agent to your own Chrome session (Phase 14.19)")
     print("  operator login <name>           Sign into Google for dial/deploy (Phase 14.19.4)")
+    print("  operator doctor                 Diagnostic check — is the world ready? (Phase 14.19.5)")
     print("  operator try <name>             Terminal test-drive (no Meet)")
     print("  operator build                  Create a new agent (wizard)")
     print("  operator auth <mcp>             Authorize an OAuth MCP (Linear, etc.)")
@@ -757,6 +758,13 @@ def main():
             _print_usage()
             return 2
         return _run_login(argv[1])
+    if first == "doctor":
+        if len(argv) != 1:
+            print("Usage: operator doctor\n")
+            _print_usage()
+            return 2
+        from _1_800_operator.pipeline.doctor import run_doctor
+        return run_doctor()
     if first == "edit":
         return _run_edit(argv[1:])
     if first == "where":
