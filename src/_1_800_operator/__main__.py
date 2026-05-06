@@ -16,46 +16,6 @@ import sys
 import webbrowser
 from pathlib import Path
 
-_AGENTS_DIR = Path.home() / ".operator" / "agents"
-
-
-def _migrate_legacy_user_artifacts():
-    """One-shot relocation of `browser_profile/`, `auth_state.json`, and `.env`
-    from the dev-mode repo root (pre-Phase-14.5) into `~/.operator/`.
-
-    Pre-fix, three user-scoped artifacts were pinned at the repo root: the
-    Playwright persistent profile, the Google-session cookie export, and the
-    shared `.env`. Each used a different mechanism to get there (`_BASE`
-    walk-up for the first two, `_ROOT` walk-up in setup.py for `.env`); all
-    three broke for installed/site-packages use and collided across dev
-    checkouts. This shim picks up legacy copies on the user's machine so
-    Google login and API keys survive the move.
-
-    Idempotent: if the target already exists we leave the legacy copy in
-    place rather than overwriting — the user can reconcile manually.
-    Silent no-op on fresh installs or after the first successful run.
-    """
-    import shutil
-    home_dir = Path.home() / ".operator"
-    home_dir.mkdir(parents=True, exist_ok=True)
-
-    # Dev-mode repo root — src/operator/__main__.py → up 3 levels.
-    repo_root = Path(__file__).resolve().parent.parent.parent
-
-    for name in ("browser_profile", "auth_state.json", ".env"):
-        src = repo_root / name
-        dst = home_dir / name
-        if dst.exists() or not src.exists():
-            continue
-        try:
-            shutil.move(str(src), str(dst))
-            print(f"[operator] migrated {name} → {dst}", file=sys.stderr)
-        except OSError as e:
-            print(
-                f"[operator] WARN: could not migrate {src} → {dst}: {e}",
-                file=sys.stderr,
-            )
-
 
 # ── Prevent Ctrl+C from killing child processes ────────────────────
 # Playwright's Node.js driver and Chrome are child processes in our
@@ -132,218 +92,17 @@ def _kill_orphaned_children():
             pass
 
 
-# Short, single-clause hint per MCP startup-failure kind. Keep these
-# under ~30 chars so the roll-up line stays scannable when several
-# servers fail at once.
-_MCP_KIND_HINT = {
-    "missing_creds":   "missing {vars}",
-    "binary_missing":  "binary not found",
-    "startup_timeout": "didn't respond",
-    "handshake_crash": "crashed on startup",
-    "oauth_needed":    "run `operator auth {name}`",
-    "unknown":         "error",
-}
-
-
-def _emit_mcp_rollup(mcp, connector=None):
-    """Print one ▸ line summarizing per-server MCP connect status.
-
-    Silent when there are no MCP servers configured or the MCPClient
-    didn't run (Track A: claude_cli owns its own MCPs). On mixed
-    success, failed servers get a terse remediation hint pulled from
-    `_MCP_KIND_HINT` so the user knows the exact next command without
-    digging through /tmp/operator.log.
-
-    If `connector` is provided AND any servers failed, also drop a
-    single chat-side one-liner so meeting participants see the
-    degraded state without having to inspect the host terminal.
-    Successful-only loads stay terminal-only — chat doesn't need to
-    say "everything's fine."
-    """
-    from _1_800_operator import config
-    from _1_800_operator.pipeline import ui
-    if not mcp or not config.MCP_SERVERS:
-        return
-    failures = getattr(mcp, "startup_failures", {}) or {}
-    parts = []
-    for name in config.MCP_SERVERS:
-        info = failures.get(name)
-        if not info:
-            parts.append(f"{name} ✓")
-            continue
-        kind = info.get("kind", "unknown")
-        template = _MCP_KIND_HINT.get(kind, "error")
-        if kind == "missing_creds":
-            vars_list = info.get("vars") or []
-            vars_str = vars_list[0] if len(vars_list) == 1 else "credentials"
-            hint = template.format(vars=vars_str)
-        elif kind == "oauth_needed":
-            hint = template.format(name=name)
-        else:
-            hint = template
-        parts.append(f"{name} ✗ ({hint})")
-    ui.say("MCP: " + " · ".join(parts))
-
-    if connector is not None and failures:
-        failed_names = [n for n in failures]
-        suffix = "" if len(failed_names) == 1 else "s"
-        chat_msg = (
-            f"⚠ {len(failed_names)} MCP server{suffix} failed to start: "
-            f"{', '.join(failed_names)}. Tools from {'it' if len(failed_names) == 1 else 'them'} "
-            f"won't work this meeting — see host terminal or `tail /tmp/operator.log` for details."
-        )
-        try:
-            connector.send_chat(chat_msg)
-        except Exception as e:
-            import logging as _logging
-            _logging.getLogger("operator").warning(
-                f"could not surface MCP failure to chat: {e}"
-            )
-
-
-def _print_startup_banner(skills):
-    """Print the face + identity + loadout banner as the boot splash.
-
-    Must fire BEFORE MCP / browser startup logs so it sits at the top of the
-    terminal like a fighter-select splash, not buried mid-scroll. MCP server
-    names come from config (known without connecting); per-server ✓/✗ status
-    is left to the existing connect logs rather than duplicated here.
-
-        ▄▄▄▄▄▄   <AgentName>
-        █ ▲▲ █   <tagline>
-        █ ══ █   linear · github · 4 skills · claude-sonnet-4-5
-        ▀▀▀▀▀▀
-
-    Also triggers the first-run portrait hook: any bot without a committed
-    portrait.txt gets one minted from the deterministic glyph generator.
-    """
-    from _1_800_operator import config
-    import sys as _sys
-    import shutil as _shutil
-    from _1_800_operator.pipeline import face
-    from rich.cells import cell_len
-
-    bot_name = os.environ.get("OPERATOR_BOT", "")
-    portrait_path = _AGENTS_DIR / bot_name / "portrait.txt"
-
-    # First-run hook — contributor-added bot with no portrait gets one minted.
-    if bot_name and not portrait_path.exists():
-        if face.write_if_missing(bot_name, portrait_path):
-            import logging
-            logging.getLogger("operator").info(
-                f"minted fresh portrait: {portrait_path}"
-            )
-
-    face_text = face.load_or_render(bot_name, portrait_path=portrait_path)
-    face_lines = face_text.split("\n")
-
-    sep = " · "
-    parts = list(config.MCP_SERVERS.keys())
-    n_skills = len(skills) if skills else 0
-    if n_skills:
-        parts.append(f"{n_skills} skills")
-    parts.append(config.LLM_MODEL or f"{config.LLM_PROVIDER} (subscription)")
-    loadout = sep.join(parts)
-
-    gap = "   "
-    face_w = max((cell_len(fl) for fl in face_lines), default=0)
-    term_w = _shutil.get_terminal_size((80, 20)).columns
-    right_w = max(20, term_w - face_w - cell_len(gap))
-
-    def _wrap(text: str) -> list[str]:
-        if not text:
-            return [""]
-        if cell_len(text) <= right_w:
-            return [text]
-        out: list[str] = []
-        cur = ""
-        for word in text.split(" "):
-            candidate = f"{cur} {word}" if cur else word
-            if cell_len(candidate) <= right_w:
-                cur = candidate
-                continue
-            if cur:
-                out.append(cur)
-                cur = ""
-            while cell_len(word) > right_w:
-                out.append(word[:right_w])
-                word = word[right_w:]
-            cur = word
-        if cur:
-            out.append(cur)
-        return out
-
-    right: list[str] = []
-    for entry in (config.AGENT_NAME, config.AGENT_TAGLINE, loadout):
-        right.extend(_wrap(entry))
-
-    pad_face = " " * face_w
-    n_rows = max(len(face_lines), len(right))
-    print("", file=_sys.stderr)
-    for i in range(n_rows):
-        fl = face_lines[i] if i < len(face_lines) else pad_face
-        rt = right[i] if i < len(right) else ""
-        print(f"{fl}{gap}{rt}".rstrip(), file=_sys.stderr)
-    print("", file=_sys.stderr)
-
-
-def _available_bots():
-    if not _AGENTS_DIR.exists():
-        return []
-    return sorted(
-        p.name for p in _AGENTS_DIR.iterdir()
-        if p.is_dir() and (p / "config.yaml").exists()
-    )
-
-
-def _bot_tagline(name):
-    # Prefer the explicit agent.tagline in config.yaml; fall back to the first
-    # non-header line of README.md for older bots that pre-date the field.
-    cfg = _AGENTS_DIR / name / "config.yaml"
-    if cfg.exists():
-        try:
-            import yaml
-            data = yaml.safe_load(cfg.read_text()) or {}
-            tag = ((data.get("agent") or {}).get("tagline") or "").strip()
-            if tag:
-                return tag
-        except Exception:
-            pass
-    readme = _AGENTS_DIR / name / "README.md"
-    if not readme.exists():
-        return ""
-    lines = readme.read_text().splitlines()
-    seen_h1 = False
-    for line in lines:
-        stripped = line.strip()
-        if not seen_h1:
-            if stripped.startswith("# "):
-                seen_h1 = True
-            continue
-        if stripped and not stripped.startswith("#"):
-            return stripped
-    return ""
-
-
 def _print_usage():
     print("Usage:")
-    print("  operator slip <name> [url]      Attach an agent to your own Chrome session")
-    print("  operator dial <name> [url]      Dial an agent into a Meet as a separate participant")
-    print("  operator deploy <name> <url>    Send an agent into an existing meeting")
-    print("  operator login <name>           Sign into Google for dial/deploy")
+    print("  operator slip claude [url]      Attach claude to your own Chrome session")
+    print("  operator dial claude [url]      Dial claude into a Meet as a separate participant")
+    print("  operator deploy claude <url>    Send claude into an existing meeting")
+    print("  operator login claude           Sign into Google for dial/deploy")
     print("  operator doctor                 Diagnostic check — is the world ready?")
     print()
     print("Flags:")
     print("  --force                         Retry join even if a session is flagged stuck")
-    print("  --no-preflight                  Skip the MCP readiness check (for CI/scripted launches)")
     print("  --yolo                          Skip per-tool permission prompts (dial/deploy/slip)")
-    print()
-    bots = _available_bots()
-    if bots:
-        print("Available bots:")
-        for b in bots:
-            tag = _bot_tagline(b)
-            print(f"  {b:<12} {tag}")
 
 
 def _run_login(name):
@@ -359,8 +118,8 @@ def _run_login(name):
     and lives outside this command's reach. login is for the headless
     profile that dial/deploy share.
     """
-    if name not in _available_bots():
-        print(f"Unknown bot: {name!r}\n")
+    if name != "claude":
+        print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
         _print_usage()
         return 2
 
@@ -409,7 +168,6 @@ def main():
     # Only touches files this process creates; existing files keep their
     # current perms.
     os.umask(0o077)
-    _migrate_legacy_user_artifacts()
     argv = sys.argv[1:]
 
     if not argv or argv[0] in ("-h", "--help"):
@@ -439,8 +197,8 @@ def main():
             _print_usage()
             return 2
         name = argv[1]
-        if name not in _available_bots():
-            print(f"Unknown bot: {name!r}\n")
+        if name != "claude":
+            print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
             _print_usage()
             return 2
         rest, yolo = _consume_yolo(argv[2:])
@@ -459,8 +217,8 @@ def main():
             return 2
         name = argv[1]
         url = argv[2]
-        if name not in _available_bots():
-            print(f"Unknown bot: {name!r}\n")
+        if name != "claude":
+            print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
             _print_usage()
             return 2
         rest, yolo = _consume_yolo(argv[3:])
@@ -478,8 +236,8 @@ def main():
             _print_usage()
             return 2
         name = argv[1]
-        if name not in _available_bots():
-            print(f"Unknown bot: {name!r}\n")
+        if name != "claude":
+            print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
             _print_usage()
             return 2
         rest, yolo = _consume_yolo(argv[2:])
@@ -492,13 +250,10 @@ def main():
         _print_usage()
         return 2
 
-    # Phase 15.8: bare `operator <name>` is no longer accepted. A known bot
-    # name gets a pointed hint pointing at the new form; anything else falls
-    # through to the generic unknown-subcommand message.
-    if first in _available_bots():
+    if first == "claude":
         print(
-            f"Dial agents via `operator dial {first}`. "
-            f"Bare `operator {first}` is no longer supported.\n"
+            "Dial claude via `operator dial claude`. "
+            "Bare `operator claude` is no longer supported.\n"
         )
         return 2
     print(f"Unknown bot or subcommand: {first!r}\n")
@@ -530,9 +285,6 @@ def _run_slip(name, rest):
     skips the meet.new auto-open (slip always takes a URL), and drops
     the user-browser auto-open (slip Chrome IS where the meeting opens).
     Track A only — claude owns its MCPs; no MCPClient setup.
-
-    OPERATOR_BOT=claude is set early (temporary; 14.19.7 deletes the
-    config layer entirely).
     """
     if name != "claude":
         print(
@@ -568,11 +320,6 @@ def _run_slip(name, rest):
         )
         return 2
 
-    # Set OPERATOR_BOT before any config import — config.py exits 2 on import
-    # without it. Pipeline modules read it transitively. Phase 14.19.7
-    # collapses this when the config layer dies.
-    os.environ["OPERATOR_BOT"] = name
-
     # claude binary preflight — same gate _run_bot uses for the claude agent.
     # Fail loud and early; no browser dance, no config load if claude isn't
     # installed or logged in.
@@ -604,9 +351,7 @@ def _run_slip(name, rest):
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("anthropic").setLevel(logging.WARNING)
     log = logging.getLogger("operator")
-    log.info(f"TIMING claude_sync={_time.monotonic() - _t_sync:.2f}s")
 
-    from _1_800_operator import config
     from _1_800_operator.bridges import claude as claude_bridge
     from _1_800_operator.connectors.attach_adapter import AttachAdapter, SlipAttachError
     from _1_800_operator.pipeline import ui
@@ -614,28 +359,8 @@ def _run_slip(name, rest):
     from _1_800_operator.pipeline.llm import LLMClient
     from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
     from _1_800_operator.pipeline.providers import build_provider
-    from _1_800_operator.pipeline.skills import load_skills
-
-    # Track A guard — slip is claude-only and claude is the only track-A
-    # provider. If something exotic is wired in config, fail before the
-    # user's Chrome gets quit.
-    if config.LLM_PROVIDER != "claude_cli":
-        print(
-            f"slip mode requires the claude_cli LLM provider; "
-            f"config has {config.LLM_PROVIDER!r}. Re-import claude or check "
-            f"~/.operator/agents/claude/config.yaml.",
-            file=sys.stderr,
-        )
-        return 2
 
     t_start = _time.monotonic()
-
-    skills = load_skills(
-        config.SKILLS_ENABLED,
-        external_paths=config.SKILLS_EXTERNAL_PATHS,
-        shared_library_dir=config.SKILLS_SHARED_LIBRARY,
-    )
-    _print_startup_banner(skills)
 
     # Build meeting record up-front — URL is known, no meet.new resolution
     # gymnastics needed. The transcript MCP server (spawned by claude via
@@ -644,7 +369,6 @@ def _run_slip(name, rest):
     meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
 
     llm = LLMClient(build_provider())
-    llm.inject_skills(skills, config.SKILLS_PROGRESSIVE_DISCLOSURE)
     llm.set_record(meeting_record)
 
     # Active-meeting marker (parity with _run_macos — useful for any
@@ -671,8 +395,6 @@ def _run_slip(name, rest):
         llm,
         mcp_client=None,  # track A — claude owns its MCPs
         meeting_record=meeting_record,
-        skills=skills,
-        skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
         # slip is "speak when spoken to": no intro, no Hold-for-Claude
         # filler, no 1-on-1 trigger bypass. claude only responds when
         # explicitly @claude'd. dial/deploy leave this default.
@@ -715,14 +437,9 @@ def _run_slip(name, rest):
 def _run_bot(name, rest):
     url = None
     force = False
-    no_preflight = False
     for arg in rest:
         if arg == "--force":
             force = True
-        elif arg == "--no-preflight":
-            # 15.7.4.5 escape hatch — skips the readiness check for
-            # CI/scripted launches that can't answer interactive prompts.
-            no_preflight = True
         elif arg.startswith("-"):
             print(f"Unknown flag: {arg}")
             return 2
@@ -732,79 +449,22 @@ def _run_bot(name, rest):
             print(f"Unexpected argument: {arg}")
             return 2
 
-    import time as _time_init
-    import logging as _logging_init
-
-    # MUST be set before anything in this function imports `config` —
-    # transitively or directly. Pipeline modules (setup, claude_code_import,
-    # readiness, …) read OPERATOR_BOT at config-import time; if any of them
-    # ever grow a top-level `from _1_800_operator import config` and the env
-    # var isn't set yet, config.py exits 2 with "OPERATOR_BOT env var is not
-    # set". Setting it as the very first line of `_run_bot` makes the
-    # contract enforced by code position, not by comment discipline.
-    os.environ["OPERATOR_BOT"] = name
-
-    # Claude agent — Phase 15.9 hard-fail gate. The `claude` bundled agent's
-    # entire identity is "inherit your Claude Code setup." If Claude Code
-    # isn't installed or the user isn't logged in, there's nothing for the
-    # agent to be. Fail loudly before any config loads or browser spins up.
-    # Other agents bypass this check entirely.
-    if name == "claude":
-        from _1_800_operator.pipeline.claude_code_import import (
-            claude_code_installed_and_logged_in,
+    # Claude binary preflight — claude is operator v1's only brain; if the
+    # CLI isn't installed or the user isn't logged in, fail loudly before
+    # any browser spins up.
+    from _1_800_operator.pipeline.claude_code_import import (
+        claude_code_installed_and_logged_in,
+    )
+    ok, reason = claude_code_installed_and_logged_in()
+    if not ok:
+        print(
+            f"\nThe `claude` agent requires the Claude Code CLI.\n"
+            f"  {reason}\n"
+            f"\nInstall Claude Code (https://claude.ai/code) and run "
+            f"`claude login`, then re-run `operator dial claude`.\n",
+            file=sys.stderr,
         )
-        ok, reason = claude_code_installed_and_logged_in()
-        if not ok:
-            print(
-                f"\nThe `claude` agent requires the Claude Code CLI.\n"
-                f"  {reason}\n"
-                f"\nInstall Claude Code (https://claude.ai/code) and run "
-                f"`claude login`, then re-run `operator dial claude`.\n",
-                file=sys.stderr,
-            )
-            return 2
-    # Codex agent — same hard-fail posture as claude. The codex bundled
-    # agent's identity is "OpenAI Codex CLI as the meeting brain." If
-    # codex isn't installed or the user isn't logged in via ChatGPT
-    # subscription, there's nothing for the agent to be. The check also
-    # rejects API-key auth (subscription-only by design — defense layer 2
-    # of the billing guard; layer 1 is OPENAI_API_KEY="" in the agent's
-    # mcp_servers.codex.env block).
-    if name == "codex":
-        from _1_800_operator.pipeline.codex_import import (
-            codex_installed_and_logged_in,
-        )
-        ok, reason = codex_installed_and_logged_in()
-        if not ok:
-            print(
-                f"\nThe `codex` agent requires the OpenAI Codex CLI.\n"
-                f"  {reason}\n"
-                f"\nInstall Codex (`npm install -g @openai/codex`) and run "
-                f"`codex login`, then re-run `operator dial codex`.\n",
-                file=sys.stderr,
-            )
-            return 2
-
-    # 15.7.4.5 runtime pre-flight — catches hand-edit-config cases the
-    # wizard status screen doesn't. All-ok state is silent (zero visible
-    # cost on the happy path). Non-zero exit means the user opted out
-    # mid-prompt; skip browser spin-up entirely.
-    if not no_preflight:
-        _t_cfg = _time_init.monotonic()
-        from _1_800_operator import config
-        _logging_init.getLogger("operator").info(
-            f"TIMING config_import={_time_init.monotonic() - _t_cfg:.2f}s"
-        )
-        from _1_800_operator.pipeline.readiness import (
-            PREFLIGHT_OK,
-            preflight_mcp_readiness,
-        )
-        # Track A skips: claude owns its MCPs, our toggle-only stubs would fail
-        # the readiness check on the missing `command` key.
-        if config.LLM_PROVIDER != "claude_cli":
-            rc = preflight_mcp_readiness(config.MCP_SERVERS)
-            if rc != PREFLIGHT_OK:
-                return rc
+        return 2
 
     if sys.platform == "darwin":
         return _run_macos(url, force=force) or 0
@@ -822,7 +482,6 @@ def _run_macos(meeting_url=None, force=False):
 
     import logging
     import signal
-    import threading as _threading
     import time as _time
 
     logging.basicConfig(
@@ -848,21 +507,10 @@ def _run_macos(meeting_url=None, force=False):
 
     t_start = _time.monotonic()
 
-    # Skills load up-front so inject_skills lands before MCP hints/status in
-    # the system prompt, and so the banner can show skill count before MCP
-    # connects. Banner prints immediately after, as the boot splash.
-    from _1_800_operator.pipeline.skills import load_skills
-    skills = load_skills(
-        config.SKILLS_ENABLED,
-        external_paths=config.SKILLS_EXTERNAL_PATHS,
-        shared_library_dir=config.SKILLS_SHARED_LIBRARY,
-    )
-    _print_startup_banner(skills)
     ui.say("Launching Chrome…")
 
     connector = MacOSAdapter(force=force)
     llm = LLMClient(build_provider())
-    llm.inject_skills(skills, config.SKILLS_PROGRESSIVE_DISCLOSURE)
 
     # Captions → MeetingRecord wiring. The JS bridge (window.__onCaption) is
     # exposed by MacOSAdapter at browser startup whenever config.CAPTIONS_ENABLED
@@ -876,10 +524,6 @@ def _run_macos(meeting_url=None, force=False):
         slug = slug_from_url(url)
         record = MeetingRecord(slug=slug, meta={"meet_url": url})
         llm.set_record(record)
-        # Write the active meeting path to a marker file so MCP servers
-        # registered via fully-static config (e.g. codex) can locate the
-        # current meeting without per-spawn env-var interpolation. Cleanup
-        # happens in _shutdown.
         try:
             marker = Path.home() / ".operator" / ".current_meeting"
             marker.parent.mkdir(parents=True, exist_ok=True)
@@ -895,26 +539,6 @@ def _run_macos(meeting_url=None, force=False):
     transcript_finalizer = None
     if meeting_url:
         meeting_record, transcript_finalizer = _wire_meeting_record(meeting_url)
-
-    # Start MCP connection in background while browser joins
-    _mcp_result = {"client": None}
-    def _connect_mcp():
-        t_mcp = _time.monotonic()
-        from _1_800_operator.pipeline.mcp_client import MCPClient
-        client = MCPClient()
-        try:
-            tool_names = client.connect_all()
-            log.info(f"TIMING mcp_connect={_time.monotonic() - t_mcp:.1f}s ({len(tool_names)} tools)")
-            _mcp_result["client"] = client
-        except Exception as e:
-            log.error(f"MCP client startup failed: {e}")
-
-    # Track A: claude owns its own MCPs — our blocks are toggle-only stubs.
-    if config.MCP_SERVERS and config.LLM_PROVIDER != "claude_cli":
-        mcp_thread = _threading.Thread(target=_connect_mcp, daemon=True)
-        mcp_thread.start()
-    else:
-        mcp_thread = None
 
     connector.join(meeting_url)
 
@@ -937,27 +561,12 @@ def _run_macos(meeting_url=None, force=False):
             log.warning(f"could not auto-open meeting URL in browser: {e}")
         meeting_record, transcript_finalizer = _wire_meeting_record(meeting_url)
 
-    mcp = None
-    if mcp_thread:
-        mcp_thread.join()
-        mcp = _mcp_result["client"]
-        if mcp:
-            llm.inject_mcp_hints(config.MCP_SERVERS)
-            loaded = [n for n in config.MCP_SERVERS if n not in mcp.startup_failures]
-            llm.inject_mcp_status(loaded, mcp.startup_failures)
-            gh_login = mcp.resolve_github_user()
-            if gh_login:
-                llm.inject_github_user(gh_login)
-        _emit_mcp_rollup(mcp, connector=connector)
-
     log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")
     runner = ChatRunner(
         connector,
         llm,
-        mcp_client=mcp,
+        mcp_client=None,  # claude owns its own MCPs
         meeting_record=meeting_record,
-        skills=skills,
-        skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
     )
 
     _shutdown_called = False
@@ -986,8 +595,6 @@ def _run_macos(meeting_url=None, force=False):
                 marker.unlink()
         except OSError:
             pass
-        if mcp:
-            mcp.shutdown()
         connector.leave()
         _kill_orphaned_children()
 
@@ -998,7 +605,7 @@ def _run_macos(meeting_url=None, force=False):
         log.info(f"Starting Operator — joining {meeting_url}")
         runner.run(meeting_url)
         if not runner._stop_event.is_set():
-            ui.say(f"Restart with: operator dial {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
+            ui.say(f"Restart with: operator dial claude {meeting_url}")
     except KeyboardInterrupt:
         log.info("Interrupted — leaving meeting")
     finally:
@@ -1026,10 +633,9 @@ def _run_linux(meeting_url, force=False):
     if not meeting_url:
         meeting_url = os.environ.get("MEETING_URL")
     if not meeting_url:
-        bot = os.environ.get("OPERATOR_BOT", "<name>")
         print("A meeting URL is required on Linux:", file=sys.stderr)
-        print(f"   operator dial {bot} <meet-url>", file=sys.stderr)
-        print(f"   MEETING_URL=<url> operator dial {bot}", file=sys.stderr)
+        print("   operator dial claude <meet-url>", file=sys.stderr)
+        print("   MEETING_URL=<url> operator dial claude", file=sys.stderr)
         sys.exit(1)
 
     display = os.environ.get("DISPLAY")
@@ -1048,46 +654,16 @@ def _run_linux(meeting_url, force=False):
     from _1_800_operator.pipeline.providers import build_provider
     from _1_800_operator import config
 
-    from _1_800_operator.pipeline.skills import load_skills
-    skills = load_skills(
-        config.SKILLS_ENABLED,
-        external_paths=config.SKILLS_EXTERNAL_PATHS,
-        shared_library_dir=config.SKILLS_SHARED_LIBRARY,
-    )
-    _print_startup_banner(skills)
     ui.say("Launching Chromium…")
 
     log.info(f"Starting Operator (Linux) — joining {meeting_url}")
     connector = LinuxAdapter()
     llm = LLMClient(build_provider())
-    llm.inject_skills(skills, config.SKILLS_PROGRESSIVE_DISCLOSURE)
-
-    mcp = None
-    # Track A: claude owns its own MCPs — our blocks are toggle-only stubs.
-    if config.MCP_SERVERS and config.LLM_PROVIDER != "claude_cli":
-        from _1_800_operator.pipeline.mcp_client import MCPClient
-        mcp = MCPClient()
-        try:
-            tool_names = mcp.connect_all()
-            log.info(f"MCP tools discovered: {tool_names}")
-            llm.inject_mcp_hints(config.MCP_SERVERS)
-            loaded = [n for n in config.MCP_SERVERS if n not in mcp.startup_failures]
-            llm.inject_mcp_status(loaded, mcp.startup_failures)
-            gh_login = mcp.resolve_github_user()
-            if gh_login:
-                llm.inject_github_user(gh_login)
-        except Exception as e:
-            log.error(f"MCP client startup failed: {e}")
-            ui.err("MCP startup failed")
-            mcp = None
-        _emit_mcp_rollup(mcp, connector=connector)
 
     runner = ChatRunner(
         connector,
         llm,
-        mcp_client=mcp,
-        skills=skills,
-        skills_progressive=config.SKILLS_PROGRESSIVE_DISCLOSURE,
+        mcp_client=None,  # claude owns its own MCPs
     )
 
     _shutdown_called = False
@@ -1100,8 +676,6 @@ def _run_linux(meeting_url, force=False):
         if signum:
             log.info(f"Received signal {signum} — shutting down")
         runner.stop()
-        if mcp:
-            mcp.shutdown()
         connector.leave()
         _kill_orphaned_children()
 
@@ -1111,7 +685,7 @@ def _run_linux(meeting_url, force=False):
     try:
         runner.run(meeting_url)
         if not runner._stop_event.is_set():
-            ui.say(f"Restart with: operator dial {os.environ.get('OPERATOR_BOT', '<name>')} {meeting_url}")
+            ui.say(f"Restart with: operator dial claude {meeting_url}")
     except KeyboardInterrupt:
         log.info("Interrupted — leaving meeting")
     finally:
