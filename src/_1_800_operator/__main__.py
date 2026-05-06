@@ -543,6 +543,7 @@ def _print_usage():
     print("  operator dial <name> [url]      Dial an agent into a Meet (auto-opens one if no url)")
     print("  operator deploy <name> <url>    Send an agent into an existing meeting (Phase 14.19)")
     print("  operator slip <name> [url]      Attach an agent to your own Chrome session (Phase 14.19)")
+    print("  operator login <name>           Sign into Google for dial/deploy (Phase 14.19.4)")
     print("  operator try <name>             Terminal test-drive (no Meet)")
     print("  operator build                  Create a new agent (wizard)")
     print("  operator auth <mcp>             Authorize an OAuth MCP (Linear, etc.)")
@@ -647,6 +648,62 @@ def _run_setup():
     return _wizard_run([])
 
 
+def _run_login(name):
+    """Single-purpose Google sign-in for dial/deploy (Phase 14.19.4).
+
+    Wraps `_launch_signin_flow` from the wizard's step-2 code without any
+    of the wizard's prompt scaffolding. Idempotent — running twice
+    refreshes the session via Google's logout flow so the user lands on
+    the account picker instead of being silently re-recognized.
+
+    Slip mode launches its own dedicated Chrome under
+    `~/.operator/slip_profile/`, which is independent of `auth_state.json`
+    and lives outside this command's reach. login is for the headless
+    profile that dial/deploy share.
+    """
+    if name not in _available_bots():
+        print(f"Unknown bot: {name!r}\n")
+        _print_usage()
+        return 2
+
+    from _1_800_operator.pipeline.google_signin import (
+        _AUTH_STATE_FILE,
+        _BROWSER_PROFILE_DIR,
+        _GOOGLE_ACCOUNT_FILE,
+        _launch_signin_flow,
+        detect_google_session,
+    )
+
+    detected = detect_google_session(_AUTH_STATE_FILE, _GOOGLE_ACCOUNT_FILE)
+    sign_out_first = detected.detected
+    if detected.detected and detected.email:
+        print(f"Currently signed in as {detected.email}. Refreshing session…")
+    elif detected.detected:
+        print("Existing Google session detected. Refreshing…")
+    else:
+        print("No Google session yet. Opening sign-in window…")
+
+    try:
+        email = _launch_signin_flow(
+            _BROWSER_PROFILE_DIR,
+            _AUTH_STATE_FILE,
+            _GOOGLE_ACCOUNT_FILE,
+            sign_out_first=sign_out_first,
+        )
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        return 130
+    except Exception as e:
+        print(f"Sign-in failed: {e}")
+        return 1
+
+    if email:
+        print(f"✓ signed in as {email}")
+    else:
+        print("✓ Google session saved")
+    return 0
+
+
 # _run_auth and _find_oauth_mcp_config moved to operator.pipeline.auth in
 # Phase 15.7.4 so the wizard's inline "authorize now?" prompt and this CLI
 # dispatch hit the same code path. Re-exported here for backward compat.
@@ -694,6 +751,12 @@ def main():
             _print_usage()
             return 2
         return _run_auth(argv[1])
+    if first == "login":
+        if len(argv) != 2:
+            print("Usage: operator login <name>\n")
+            _print_usage()
+            return 2
+        return _run_login(argv[1])
     if first == "edit":
         return _run_edit(argv[1:])
     if first == "where":
