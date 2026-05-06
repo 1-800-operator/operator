@@ -25,7 +25,6 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-BYTES_PER_SAMPLE = 4  # Float32
 
 # VAD constants — carried verbatim from voice-preserved. Tuned against real
 # meeting audio; don't loosen without re-tuning. RMS=0.02 is the floor that
@@ -136,7 +135,7 @@ class AudioProcessor:
         log.info(f'AudioProcessor: whisper_done "{text}"')
         if not text:
             return ""
-        if text.strip().lower() in WHISPER_HALLUCINATIONS:
+        if text.lower() in WHISPER_HALLUCINATIONS:
             log.info("AudioProcessor: dropped (silence hallucination)")
             return ""
         if self._is_repetition_hallucination(text):
