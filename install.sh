@@ -165,7 +165,20 @@ if [ "${OS}" = "macos" ]; then
       mkdir -p "${BIN_DIR}"
       if swiftc "${SWIFT_SRC}" -O -o "${BIN_OUT}"; then
         chmod +x "${BIN_OUT}"
-        info "Built ${BIN_OUT}"
+        # Ad-hoc codesign with a stable bundle identifier. swiftc's
+        # default linker-signed binary has no stable identifier — the
+        # cdhash changes every rebuild, which silently invalidates any
+        # TCC grant the user has already given. With --identifier
+        # com.operator.audio-capture, TCC can key the grant to the
+        # name and persist it across rebuilds. Required for the
+        # responsibility-disclaim spawn path (AttachAdapter) to receive
+        # SCStream audio callbacks at all from IDE-launched terminals.
+        if codesign --force --sign - --identifier com.operator.audio-capture "${BIN_OUT}" 2>/dev/null; then
+          info "Built + codesigned ${BIN_OUT}"
+        else
+          warn "Built ${BIN_OUT} but codesign failed — slip-mode audio may not survive rebuilds."
+          warn "Manually: codesign --force --sign - --identifier com.operator.audio-capture ${BIN_OUT}"
+        fi
       else
         err "swiftc failed — slip will run chat-only."
       fi

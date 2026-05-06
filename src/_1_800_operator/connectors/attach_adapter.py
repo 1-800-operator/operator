@@ -800,14 +800,22 @@ class AttachAdapter(MeetingConnector):
         # operator's own logs so users have one place to look. Health line
         # ("10s health: [S]=… cb / [M]=… cb"), TCC fatals, and shutdown
         # totals all land here.
+        #
+        # Spawned via posix_spawn with `responsibility_spawnattrs_setdisclaim`
+        # (see _disclaimed_spawn.py). Without this, the helper inherits the
+        # parent IDE/terminal's TCC responsibility chain — Cursor's
+        # ToDesktop-wrapped Electron build silently denies SCStream audio
+        # even when the helper itself is granted Screen Recording. Disclaim
+        # makes the helper its own responsible process so TCC keys decisions
+        # against the helper's own code-signature identifier, regardless of
+        # who launched it. Validated against Cursor/Terminal.app spawn paths
+        # in 14.20.4.
         try:
+            from _1_800_operator.pipeline._disclaimed_spawn import spawn_disclaimed
             stderr_sink = open("/tmp/operator.log", "ab")
-            self._audio_helper_proc = subprocess.Popen(
+            self._audio_helper_proc = spawn_disclaimed(
                 [str(helper)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=stderr_sink,
-                bufsize=0,
+                stderr_fd=stderr_sink.fileno(),
             )
         except OSError as e:
             log.warning(f"AttachAdapter: spawning {helper} failed ({e}) — chat-only mode")

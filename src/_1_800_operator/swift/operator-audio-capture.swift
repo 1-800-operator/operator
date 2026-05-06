@@ -151,7 +151,16 @@ final class StreamDelegate: NSObject, SCStreamDelegate {
 
 final class SystemAudioOutput: NSObject, SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, let bb = CMSampleBufferGetDataBuffer(sb) else { return }
+        guard type == .audio else { return }
+        // Count the callback FIRST — SCK fires this at the configured rate
+        // regardless of whether audio is actually playing, and the empty-buffer
+        // case (no data buffer attached, or zero-length data) is normal during
+        // silence. The watchdog wants to distinguish "SCK never fired" (real
+        // TCC silent-failure) from "SCK fired but the system was quiet"; if
+        // we increment only on non-empty buffers, a quiet system kills the
+        // helper at 10s. Voice-preserved counted unconditionally; we match.
+        systemStats.callbacks += 1
+        guard let bb = CMSampleBufferGetDataBuffer(sb) else { return }
         let n = CMBlockBufferGetDataLength(bb)
         guard n > 0 else { return }
         var buf = [UInt8](repeating: 0, count: n)
@@ -165,7 +174,6 @@ final class SystemAudioOutput: NSObject, SCStreamOutput {
                 writeFrame(tag: TAG_SYSTEM, payload: base, length: n)
             }
         }
-        systemStats.callbacks += 1
         systemStats.bytes += n
         if systemStats.callbacks <= 3 {
             fputs("operator-audio-capture: [S] callback #\(systemStats.callbacks) — \(n) bytes\n", stderr)
@@ -189,7 +197,14 @@ SCShareableContent.getWithCompletionHandler { content, error in
 
     let cfg = SCStreamConfiguration()
     cfg.capturesAudio = true
-    cfg.excludesCurrentProcessAudio = true  // don't echo our own stderr/log noise
+    // Match voice-preserved's working config: false. With responsibility
+    // disclaim active (see _disclaimed_spawn.py), our process IS the
+    // current-process from SCK's POV; setting this to true filtered out
+    // audio in some intermittent SCK startup races (callbacks would
+    // never fire). Voice-preserved ran for hundreds of meetings with
+    // false and never echoed because the helper has no audio output of
+    // its own to be excluded.
+    cfg.excludesCurrentProcessAudio = false
     cfg.sampleRate = 16000
     cfg.channelCount = 1
     cfg.width = 2; cfg.height = 2
@@ -276,19 +291,45 @@ do {
     exit(6)
 }
 
-// MARK: - Watchdogs (silent-failure detection per stream)
-
-DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
-    if systemStats.callbacks == 0 {
-        fputs("operator-audio-capture: FATAL — system audio: 0 callbacks in 10s (TCC silent-failure)\n", stderr)
-        fputs("operator-audio-capture: re-grant Screen Recording for the *parent* app, then quit + relaunch it\n", stderr)
-        exit(4)
+// MARK: - Periodic stats + silent-failure detection
+//
+// Time-series visibility every 2s for the first 12s — surfaces SCK startup
+// patterns (some Macs fire [S] callbacks immediately, some take 4-6s, some
+// stay silent forever in tccd-cache-stale mode). Without periodic logs we
+// only saw the binary endpoints (start, FATAL, EOF), making intermittent
+// silent-failure indistinguishable from "system was just quiet."
+for delaySeconds in stride(from: 2, through: 12, by: 2) {
+    let d = delaySeconds
+    DispatchQueue.global().asyncAfter(deadline: .now() + Double(d)) {
+        fputs("operator-audio-capture: stats t=\(d)s [S]=\(systemStats.callbacks)cb/\(systemStats.bytes)B [M]=\(micStats.callbacks)cb/\(micStats.bytes)B\n", stderr)
     }
+}
+
+// Watchdog: only FATAL if mic is silent (real bug we always want to surface).
+// System-stream silence at 10s is recoverable from the Python side via
+// `tccutil reset ScreenCapture com.operator.audio-capture` + respawn (see
+// AttachAdapter._audio_reader_loop). Exit code 4 = system silent-failure;
+// the parent retries once. Voice-preserved's runner used exactly this
+// recipe (pipeline/runner.py:342). If the system stays silent after the
+// retry, parent falls back to mic-only — slip still works for the user's
+// own voice, system audio is "best effort."
+DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+    // Mic silent at 10s is unrecoverable — exit so parent fails fast.
     if micStats.callbacks == 0 {
         fputs("operator-audio-capture: FATAL — mic: 0 callbacks in 10s\n", stderr)
-        exit(4)
+        exit(5)
     }
-    fputs("operator-audio-capture: 10s health: [S]=\(systemStats.callbacks) cb / \(systemStats.bytes)B [M]=\(micStats.callbacks) cb / \(micStats.bytes)B\n", stderr)
+    // System silent at 10s is recoverable (tccd stale cache) BUT we don't
+    // tear down the helper — that would also kill mic, which is working.
+    // Just log loudly. The first stats line (t=2s) plus this 10s warning
+    // gives the parent enough to decide whether to attempt a tccutil
+    // reset + respawn out-of-band, or accept mic-only operation. If SCK
+    // later starts firing (it sometimes self-recovers in Meet contexts
+    // where remote audio is steady), [S] picks up live with no restart.
+    if systemStats.callbacks == 0 {
+        fputs("operator-audio-capture: WARN — system audio: 0 callbacks in 10s (likely tccd cache stale)\n", stderr)
+        fputs("operator-audio-capture: helper continues with mic-only; system stream may self-recover\n", stderr)
+    }
 }
 
 // MARK: - Lifecycle: stop on stdin EOF or SIGINT
