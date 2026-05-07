@@ -6,6 +6,7 @@ Wraps Playwright/Chrome meeting join into the MeetingConnector interface.
 import os
 import logging
 import queue
+import re
 import threading
 import time
 
@@ -41,7 +42,6 @@ class MacOSAdapter(MeetingConnector):
         self._browser_closed = threading.Event()
         self._browser_thread = None
         self._page = None
-        self._seen_message_ids = set()
         self._chat_queue = queue.Queue()  # (command, args, result_queue)
         self._observer_installed = False
         self._caption_callback = None  # fn(speaker, text, timestamp); set via set_caption_callback
@@ -194,10 +194,7 @@ class MacOSAdapter(MeetingConnector):
                 os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
                 _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
                 page.screenshot(path=_shot)
-                try:
-                    os.chmod(_shot, 0o600)
-                except OSError:
-                    pass
+                os.chmod(_shot, 0o600)
                 log.debug(f"MacOSAdapter: saved debug screenshot to {_shot}")
             except Exception:
                 pass
@@ -474,10 +471,7 @@ class MacOSAdapter(MeetingConnector):
         # mode= on makedirs makes creation atomic-private; chmod is the
         # belt for the case where the dir already exists with looser perms.
         os.makedirs(BROWSER_PROFILE, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(BROWSER_PROFILE, 0o700)
-        except OSError as e:
-            log.warning(f"MacOSAdapter: could not tighten perms on {config.relativize_home(BROWSER_PROFILE)}: {e}")
+        os.chmod(BROWSER_PROFILE, 0o700)
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch_persistent_context(
@@ -774,12 +768,11 @@ class MacOSAdapter(MeetingConnector):
                         # click the Admit button that appears in the tray.
                         # Keyboard path is a fallback (focus + ArrowDown +
                         # Enter) per the a11y hint.
-                        import re as _re
                         if time.time() - last_admit_check >= 2:
                             last_admit_check = time.time()
                             try:
                                 pill = page.get_by_text(
-                                    _re.compile(r"^Admit\s+\d+\s+(guest|people)", _re.I)
+                                    re.compile(r"^Admit\s+\d+\s+(guest|people)", re.I)
                                 ).first
                                 if pill.count() > 0 and pill.is_visible():
                                     try:
@@ -820,7 +813,7 @@ class MacOSAdapter(MeetingConnector):
                                             admit_diagnostic_saved = True
 
                                         admit_btn = page.get_by_role(
-                                            "button", name=_re.compile(r"^Admit$", _re.I)
+                                            "button", name=re.compile(r"^Admit$", re.I)
                                         ).first
                                         btn_count = admit_btn.count()
                                         btn_visible = btn_count > 0 and admit_btn.is_visible()
@@ -951,10 +944,13 @@ class MacOSAdapter(MeetingConnector):
             if not js.ready.is_set():
                 js.signal_failure(f"exception: {e}")
         finally:
+            # PID file may not exist if _write_operator_pid was never reached
+            # (early failure). Anything other than FileNotFoundError on a file
+            # we own would be unexpected and worth surfacing.
             pid_file = os.path.join(BROWSER_PROFILE, ".operator.pid")
             try:
                 os.remove(pid_file)
-            except OSError:
+            except FileNotFoundError:
                 pass
             if not self._browser_closed.is_set():
                 self._browser_closed.set()
