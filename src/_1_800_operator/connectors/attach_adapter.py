@@ -409,8 +409,10 @@ class AttachAdapter(MeetingConnector):
         #     then launch our own (handles leftover spikes, stale
         #     debugger sessions, crashed previous slip Chromes)
         #   - not alive → launch slip Chrome fresh
+        took_reuse_path = False
         if _cdp_endpoint_alive() and _cdp_belongs_to_slip():
             log.info(f"AttachAdapter: CDP at {CDP_URL} is slip Chrome — reusing")
+            took_reuse_path = True
         else:
             if _cdp_endpoint_alive():
                 # Some other Chrome is hogging the port. Evict it
@@ -430,13 +432,55 @@ class AttachAdapter(MeetingConnector):
         try:
             self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
         except Exception as e:
-            self._teardown_playwright()
-            js.signal_failure("cdp_attach_failed")
-            log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
-            raise SlipAttachError(
-                "Slip couldn't attach to its Chrome window. Try running "
-                "slip again — the connection sometimes settles on a retry."
-            )
+            # Reuse path failure → almost always a zombie slip Chrome:
+            # the process is alive and the CDP socket is open, but every
+            # window has been closed so there is no BrowserContext for
+            # Playwright to manage. The canonical symptom is
+            # `Browser.setDownloadBehavior … Browser context management
+            # is not supported`. On macOS this happens whenever the user
+            # closes the last slip window after a previous session
+            # detached — Chrome stays alive in the menu bar with zero
+            # contexts. Self-heal by evicting the zombie Chrome and
+            # relaunching once. We only retry on the reuse path: a
+            # connect failure immediately after a fresh launch is a
+            # real problem (port held by something un-killable, OS-level
+            # issue) that we should surface rather than paper over.
+            if took_reuse_path:
+                log.warning(
+                    f"AttachAdapter: reused slip Chrome rejected connect_over_cdp "
+                    f"({e}); evicting zombie Chrome and relaunching"
+                )
+                self._teardown_playwright()
+                _evict_other_chrome_on_cdp_port()
+                time.sleep(0.5)
+                self._chrome_proc = _launch_slip_chrome(meeting_url)
+                try:
+                    _wait_for_cdp_ready()
+                except SlipAttachError:
+                    js.signal_failure("cdp_not_ready")
+                    raise
+                self._playwright = sync_playwright().start()
+                try:
+                    self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+                except Exception as e2:
+                    self._teardown_playwright()
+                    js.signal_failure("cdp_attach_failed")
+                    log.error(
+                        f"AttachAdapter: connect_over_cdp failed after relaunch: {e2}"
+                    )
+                    raise SlipAttachError(
+                        "Slip couldn't attach to its Chrome window. Try running "
+                        "slip again — the connection sometimes settles on a retry."
+                    )
+                log.info("AttachAdapter: attached after zombie-Chrome recovery")
+            else:
+                self._teardown_playwright()
+                js.signal_failure("cdp_attach_failed")
+                log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
+                raise SlipAttachError(
+                    "Slip couldn't attach to its Chrome window. Try running "
+                    "slip again — the connection sometimes settles on a retry."
+                )
 
         self._page = self._find_or_open_meet_page(meeting_url)
         if self._page is None:
@@ -608,16 +652,29 @@ class AttachAdapter(MeetingConnector):
     def _wait_for_meeting_entry(self, page):
         """Block until the user has entered the meeting.
 
-        Detects entry via the 'Leave call' button — only present in-meeting,
-        never in the green room. Same selector macos_adapter uses for its
-        `already_in_meeting` short-circuit (~line 743). Polls every 1s,
-        matching the cadence in macos_adapter._wait_for_admission.
+        Detects entry by requiring BOTH the 'Leave call' button AND the
+        'Chat with everyone' button to be visible. The reason for the
+        two-signal AND: Meet renders the in-call control bar (including
+        Leave call) the moment a user clicks 'Ask to join', even while
+        the page is still on the 'Please wait until a meeting host
+        brings you into the call' lobby screen. A 'Leave call'-only
+        check therefore false-positives during the lobby wait — bot
+        declares 'Joined' while the host hasn't admitted yet, then the
+        chat-runner spins forever trying to open a chat panel that
+        doesn't exist in the lobby DOM. The 'Chat with everyone' button
+        is the discriminator: it does NOT render in the green-room
+        pre-join state, and it does NOT render in the lobby waiting
+        state — only in the actual in-call DOM. Confirmed via DOM dumps
+        of all three states (session 205 repro). Bonus: chat_runner is
+        about to open chat anyway, so waiting for the chat button is in
+        the spirit of the detector.
 
-        No timeout — lobby admission can take many minutes (host on another
-        call, large meetings with multiple admits, etc.). User-paced waits
-        shouldn't have a clock; the user can Ctrl+C anytime if they want
-        to abort. The only fatal signal is Chrome being closed, which we
-        detect via is_connected.
+        Polls every 1s, matching the cadence in macos_adapter._wait_for
+        _admission. No timeout — lobby admission can take many minutes
+        (host on another call, large meetings with multiple admits,
+        etc.). User-paced waits shouldn't have a clock; the user can
+        Ctrl+C anytime if they want to abort. The only fatal signal is
+        Chrome being closed, which we detect via is_connected.
 
         Returns True on entry, False if Chrome was closed mid-wait.
         Progress logged to /tmp/operator.log every 30s.
@@ -630,7 +687,14 @@ class AttachAdapter(MeetingConnector):
         while True:
             try:
                 leave_btn = page.get_by_role("button", name="Leave call")
-                if leave_btn.count() > 0 and leave_btn.first.is_visible():
+                chat_btn = page.get_by_role("button", name="Chat with everyone")
+                leave_visible = (
+                    leave_btn.count() > 0 and leave_btn.first.is_visible()
+                )
+                chat_visible = (
+                    chat_btn.count() > 0 and chat_btn.first.is_visible()
+                )
+                if leave_visible and chat_visible:
                     log.info("AttachAdapter: meeting entry detected")
                     print("Joined — claude is listening.\n", file=sys.stderr, flush=True)
                     return True

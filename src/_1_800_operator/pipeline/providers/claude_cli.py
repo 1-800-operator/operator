@@ -135,18 +135,6 @@ _PRE_TOOL_VOICE_RULE = (
     "detail verbatim in the question — exact command, path, recipient, "
     "or summary — so the user can audit before approving.\n"
     "\n"
-    "CHAINED TURNS — most common failure mode, read carefully. A "
-    "narration on an earlier turn does NOT carry forward. If you call "
-    "five tools across five agentic turns to satisfy one user request, "
-    "that is five separate text blocks, one immediately preceding each "
-    "tool_use. The user sees each turn independently; they cannot tell "
-    "what the second, third, fourth, fifth tool calls are for from a "
-    "narration that scrolled past several seconds ago. Do not collapse "
-    "narration to once-per-task; do not let a long investigation run "
-    "silent between an opening line and a closing summary. If you have "
-    "nothing new to say, you have nothing new to do — re-think before "
-    "calling another tool unnarrated.\n"
-    "\n"
     "VOICE: phrase narrations and questions in whatever voice your "
     "system_prompt established. Match the persona the user set up — "
     "do NOT default to specific wording like 'Want me to...' or "
@@ -158,8 +146,7 @@ _PRE_TOOL_VOICE_RULE = (
     "user's response — react conversationally and do not retry without "
     "explicit approval. In multi-tool turns ask one question per write "
     "tool (one question, one approval, one tool); reads chain freely "
-    "but each tool_use still gets its own preceding text block — never "
-    "one narration covering several."
+    "with one narration each."
 )
 
 
@@ -189,14 +176,7 @@ _PRE_TOOL_VOICE_RULE_YOLO_OVERRIDE = (
     "Continue to include the literal critical detail (exact command, "
     "path, recipient, summary) in narrations of high-blast-radius "
     "operations, so the user can spot a problem before the operation "
-    "completes — even though they no longer have a gate to reject at.\n"
-    "\n"
-    "The CHAINED TURNS rule from above stands in full under YOLO. With "
-    "no permission gate to enforce per-turn ceremony, the temptation to "
-    "skip narration on the second, third, fourth tool call is stronger "
-    "— resist it. Narration is the only signal the user has that work "
-    "is still happening; without it a multi-tool run looks like the bot "
-    "froze between the opening line and the final summary."
+    "completes — even though they no longer have a gate to reject at."
 )
 
 

@@ -1,8 +1,6 @@
 # ── Cross-platform dependencies (Phase 14.2: pinned for reproducible installs) ─
 
-python-dotenv==1.2.2   # loads API keys from the .env file into the app
-openai==2.29.0         # OpenAI SDK — kept pending second-provider product call
-anthropic==0.94.0      # Anthropic SDK — kept pending second-provider product call
+python-dotenv==1.2.2   # loads .env into operator's process env (third-party MCP creds, not LLM auth)
 playwright==1.58.0     # controls headless/headed Chrome for joining Google Meet
 mcp==1.27.0            # Model Context Protocol — used by bundled transcript MCP server
 pyyaml==6.0.3          # YAML — used by tests; harmless at runtime

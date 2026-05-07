@@ -5,8 +5,10 @@ Usage:
     runner = ChatRunner(connector, llm)
     runner.run(meeting_url)   # blocks until stop() is called
 """
+import collections
 import logging
 import re
+import subprocess
 import threading
 import time
 
@@ -25,6 +27,33 @@ ONE_ON_ONE_THRESHOLD = 2  # participant count at or below = 1-on-1 mode (skip tr
 # messages, (b) staggered posts give the user's eye a chance to register
 # each paragraph as a distinct message rather than a burst.
 STREAM_PARAGRAPH_MIN_INTERVAL = 0.25
+
+# Heartbeat — meeting-chat reassurance during long silent stretches in a
+# turn. When inner-claude is grinding through tool calls without emitting
+# user-facing text for HEARTBEAT_SILENCE_SECONDS, ChatRunner spawns a
+# one-shot side-channel `claude -p` invocation that authors a single
+# status sentence (model voice, given the user's question + recent tool
+# names as context). That sentence lands in chat with kind="heartbeat"
+# so it's filtered out of the LLM's prompt tail (won't pollute the inner
+# bot's context). Tunable knobs:
+#   - HEARTBEAT_SILENCE_SECONDS: silence threshold before a heartbeat
+#     fires. 30s splits the user's expressed 20-30s preference at the
+#     top — gives chained reads room to land their own narrations
+#     before we step in. Mid-task interruptions aren't free (token cost
+#     + ~5-8s spawn+gen latency) so we err on the looser side.
+#   - HEARTBEAT_TICK_SECONDS: how often the heartbeat thread wakes to
+#     check the silence clock. 2s is fine-grained enough to fire close
+#     to the threshold without burning CPU.
+#   - HEARTBEAT_CALL_TIMEOUT_SECONDS: side-channel `claude -p` ceiling.
+#     20s covers cold-start spawn + a one-sentence reply; if it slips
+#     past, the heartbeat is best-effort and we drop it silently.
+#   - HEARTBEAT_RECENT_TOOL_LIMIT: how many recent tool_use names we
+#     show the side-channel model. 5 is enough for "what are you
+#     doing" without padding the prompt.
+HEARTBEAT_SILENCE_SECONDS = 30
+HEARTBEAT_TICK_SECONDS = 2.0
+HEARTBEAT_CALL_TIMEOUT_SECONDS = 20
+HEARTBEAT_RECENT_TOOL_LIMIT = 5
 
 
 class ChatRunner:
@@ -103,6 +132,24 @@ class ChatRunner:
         self._saw_others: bool = False
         self._alone_since: float | None = None
         self._last_participant_check: float = 0.0
+        # Heartbeat: tracks recent tool_use events from the inner claude
+        # subprocess so the side-channel "what are you doing" call has
+        # something concrete to summarize. Populated by the progress
+        # callback wired in _wire_progress_tracker. Cleared at turn
+        # start in _handle_message. Bounded so the deque doesn't grow
+        # without limit on tool-heavy turns; tail is what we read.
+        self._recent_tool_uses: collections.deque = collections.deque(
+            maxlen=HEARTBEAT_RECENT_TOOL_LIMIT * 2
+        )
+        # Per-turn user message — fed to the heartbeat side-channel call
+        # as context so the model can author a status line tied to what
+        # the user actually asked. None outside a turn (heartbeat thread
+        # only runs during _handle_message).
+        self._heartbeat_user_msg: str | None = None
+        # Stamp of the last heartbeat post (monotonic). Re-arms the
+        # silence clock so back-to-back heartbeats don't fire faster
+        # than the threshold. Reset to 0.0 at turn start.
+        self._last_heartbeat_post_ts: float = 0.0
 
     def _wire_permissions(self):
         """Plug a chat-routed PreToolUse handler into the claude_cli provider.
@@ -167,6 +214,24 @@ class ChatRunner:
             always_ask=[],
         )
         provider.set_permission_handler(handler)
+        # Wire the tool-use tracker for heartbeats. The provider already
+        # fires progress_callback per tool_use block during streaming;
+        # we just need to record name+input into the bounded deque so
+        # the heartbeat side-channel call has context.
+        provider.set_progress_callback(self._record_tool_use)
+
+    def _record_tool_use(self, tool_name: str, tool_input: dict):
+        """Progress callback hooked into ClaudeCLIProvider — appends each
+        tool_use to the recent-tools deque so the heartbeat thread has
+        context to summarize. Runs on the provider's pump thread; the
+        deque's append is atomic in CPython, no extra lock needed."""
+        try:
+            self._recent_tool_uses.append({
+                "name": tool_name or "<unknown>",
+                "input": tool_input or {},
+            })
+        except Exception as e:
+            log.warning(f"ChatRunner: _record_tool_use failed: {e}")
 
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
@@ -403,17 +468,50 @@ class ChatRunner:
         if self._participant_count > 1:
             self._saw_others = True
             self._alone_since = None
-        elif self._saw_others and self._participant_count == 1:
+        elif self._participant_count == 0 or (
+            self._saw_others and self._participant_count == 1
+        ):
+            # Two cases share the auto-leave grace timer:
+            #   - count == 1 after _saw_others=True: the original "everyone
+            #     left, just me here" path.
+            #   - count == 0 (regardless of _saw_others): the bot is no
+            #     longer on the participant list at all — Meet booted the
+            #     tab back to its landing page (lobby idle timeout, host
+            #     declined admission and the request expired, network drop
+            #     re-routed the tab, etc.). Without this branch the chat
+            #     loop polls forever after a bounce because _saw_others
+            #     stayed False (bot was alone in the lobby the whole time)
+            #     and the original branch only fires when count==1. The
+            #     grace window absorbs transient 0s (Meet briefly drops
+            #     the participant panel during reconnect/state changes).
             if self._alone_since is None:
                 self._alone_since = now
-                log.info("ChatRunner: alone in meeting — grace timer started")
+                if self._participant_count == 0:
+                    log.info(
+                        "ChatRunner: participant count is 0 — booted from meeting? "
+                        "grace timer started"
+                    )
+                else:
+                    log.info("ChatRunner: alone in meeting — grace timer started")
             elif now - self._alone_since >= config.ALONE_EXIT_GRACE_SECONDS:
-                log.info(
-                    f"ChatRunner: alone for {int(now - self._alone_since)}s — auto-leaving"
-                )
-                ui.ok("Everyone left — dropping from the meeting.")
+                elapsed = int(now - self._alone_since)
+                if self._participant_count == 0:
+                    log.info(
+                        f"ChatRunner: participant count 0 for {elapsed}s — "
+                        "auto-leaving (likely booted from meeting)"
+                    )
+                    ui.warn("Lost the meeting — dropping out.")
+                else:
+                    log.info(
+                        f"ChatRunner: alone for {elapsed}s — auto-leaving"
+                    )
+                    ui.ok("Everyone left — dropping from the meeting.")
                 self._safe_leave()
                 return True
+        else:
+            # count == 1 and _saw_others == False (slip-mode lobby wait,
+            # 1-on-1 mode pre-arrival). Not a leave condition.
+            self._alone_since = None
         return False
 
     def _process_messages(self, messages, one_on_one: bool):
@@ -523,25 +621,44 @@ class ChatRunner:
         """Process a single chat message via LLM."""
         self._turn_count += 1
         self._turn_start_ts = time.time()
+        # Heartbeat setup: clear per-turn state so previous turn's tool
+        # history and stale post stamp don't leak into this turn's
+        # silence detection. Spawn the heartbeat thread; it'll wake every
+        # HEARTBEAT_TICK_SECONDS to check the silence clock and fire a
+        # side-channel call when the threshold trips. Stop event is set
+        # in finally so the thread exits when the LLM call returns
+        # (success or failure).
+        self._recent_tool_uses.clear()
+        self._heartbeat_user_msg = text
+        self._last_heartbeat_post_ts = 0.0
+        hb_stop = threading.Event()
+        hb_thread = threading.Thread(
+            target=self._heartbeat_loop, args=(hb_stop,), daemon=True
+        )
+        hb_thread.start()
         try:
-            result = self._llm.ask(
-                text, on_paragraph=self._streaming_callback(),
-            )
-        except Exception as e:
-            log.error(f"ChatRunner: LLM call failed: {e}")
-            # Pass only the exception class name to the narration prompt —
-            # never the str(e) body, which can carry SDK response payloads,
-            # tokens-bearing URLs, or upstream secrets. Full detail still
-            # lands in /tmp/operator.log via the log.error above.
-            self._narrate_failure(
-                context=(
-                    f"the meeting bot tried to answer the user's question but "
-                    f"the LLM call failed with: {type(e).__name__}."
-                ),
-                fallback="Sorry — I couldn't reach my brain just now. Try again in a moment?",
-            )
-            return
-        self._dispatch_result(result)
+            try:
+                result = self._llm.ask(
+                    text, on_paragraph=self._streaming_callback(),
+                )
+            except Exception as e:
+                log.error(f"ChatRunner: LLM call failed: {e}")
+                # Pass only the exception class name to the narration prompt —
+                # never the str(e) body, which can carry SDK response payloads,
+                # tokens-bearing URLs, or upstream secrets. Full detail still
+                # lands in /tmp/operator.log via the log.error above.
+                self._narrate_failure(
+                    context=(
+                        f"the meeting bot tried to answer the user's question but "
+                        f"the LLM call failed with: {type(e).__name__}."
+                    ),
+                    fallback="Sorry — I couldn't reach my brain just now. Try again in a moment?",
+                )
+                return
+            self._dispatch_result(result)
+        finally:
+            hb_stop.set()
+            self._heartbeat_user_msg = None
 
     def _dispatch_result(self, result):
         """Route an LLM result.
@@ -616,6 +733,233 @@ class ChatRunner:
             self._send(text)
             last[0] = time.monotonic()
         return on_paragraph
+
+    def _heartbeat_loop(self, stop_event: threading.Event):
+        """Daemon thread spawned per turn. Watches the gap between the
+        last user-facing chat post and now; when it crosses
+        HEARTBEAT_SILENCE_SECONDS, fires a side-channel `claude -p` call
+        to author a one-sentence status update and posts it to chat.
+
+        Why a side-channel call instead of a hardcoded heartbeat string:
+        the meeting context has different optics than 1:1 with claude-
+        code (other participants may see these messages), so a model-
+        authored sentence reads better than templated framework voice.
+        Cost is one extra `claude -p` invocation per heartbeat (~5-8s
+        cold-start latency, small token footprint). The cost is bounded
+        by the threshold — at most one heartbeat per HEARTBEAT_SILENCE_
+        SECONDS of continuous silence.
+
+        Race handling: while the side-channel call is in flight (~5-8s),
+        the inner-claude may finally emit text and bump _last_send_time.
+        Re-check the silence clock after the call returns; if it's been
+        bumped, drop the heartbeat result rather than double-posting.
+        """
+        while not stop_event.wait(timeout=HEARTBEAT_TICK_SECONDS):
+            now = time.monotonic()
+            # Silence clock is measured from the most recent of:
+            #   - last user-facing chat post (model paragraph or earlier
+            #     heartbeat — both bump _last_send_time via _send)
+            #   - turn start (so the first heartbeat fires
+            #     HEARTBEAT_SILENCE_SECONDS after the user's question
+            #     lands, not relative to a pre-turn timestamp)
+            #   - last heartbeat post (re-arms the clock so we don't
+            #     fire a second heartbeat 0s after the first one if the
+            #     model is still silent)
+            anchor = max(
+                self._last_send_time,
+                self._turn_start_ts or 0.0,
+                self._last_heartbeat_post_ts,
+            )
+            # _last_send_time is wall-clock (time.time) per its existing
+            # contract; we compare to time.time() not monotonic. The
+            # threshold is wide enough that wall-clock vs monotonic
+            # drift doesn't matter at our cadence.
+            elapsed = time.time() - anchor
+            if elapsed < HEARTBEAT_SILENCE_SECONDS:
+                continue
+            user_msg = self._heartbeat_user_msg
+            if not user_msg:
+                # Turn ended between the wake and the read — the finally
+                # in _handle_message clears _heartbeat_user_msg before
+                # setting stop_event. Bail.
+                continue
+            recent_tools = list(self._recent_tool_uses)
+            log.info(
+                f"ChatRunner: heartbeat threshold tripped "
+                f"(silent {int(elapsed)}s, {len(recent_tools)} recent tools)"
+            )
+            text = self._request_heartbeat_text(user_msg, recent_tools)
+            if not text:
+                # Side-channel call failed or timed out. Don't re-arm
+                # immediately — let the next tick check again. The
+                # silence clock is still ticking from the same anchor,
+                # so we won't spin. If the call keeps failing across
+                # multiple ticks, that's just heartbeats being best-
+                # effort; the inner turn is unaffected.
+                continue
+            # Race re-check: did the inner claude emit text while we
+            # were waiting on the side-channel call? If so, skip.
+            anchor_post_call = max(
+                self._last_send_time,
+                self._turn_start_ts or 0.0,
+                self._last_heartbeat_post_ts,
+            )
+            if time.time() - anchor_post_call < HEARTBEAT_SILENCE_SECONDS:
+                log.info(
+                    "ChatRunner: heartbeat skipped — real reply landed "
+                    "during side-channel call"
+                )
+                continue
+            try:
+                self._send(text, kind="heartbeat")
+                # _send updates _last_send_time, but we also stamp the
+                # heartbeat-specific post time so the silence-clock
+                # anchor distinguishes "model spoke" from "we filled
+                # silence." Both re-arm the threshold equally; the
+                # separate stamp is purely diagnostic.
+                self._last_heartbeat_post_ts = time.time()
+                log.info(f"ChatRunner: heartbeat posted: {text!r}")
+            except Exception as e:
+                log.warning(f"ChatRunner: heartbeat _send failed: {e}")
+
+    def _request_heartbeat_text(
+        self, user_message: str, recent_tools: list[dict]
+    ) -> str | None:
+        """One-shot side-channel call to author a status sentence.
+
+        Spawns a fresh `claude -p` (no MCPs, no permission bridge, no
+        tools — pure prompt → reply) with the user's question and
+        recent tool names as context. Returns the model's one-sentence
+        reply, or None on any failure (timeout, non-zero exit, empty
+        output). Best-effort; failures are logged and swallowed so the
+        in-flight inner turn is never disrupted.
+
+        Why a fresh subprocess.run instead of reusing the inner-claude
+        provider: the inner provider is mid-turn (handling the user's
+        question via the meeting chat path) and can't process a second
+        message concurrently — `claude -p` in stream-json mode is
+        single-threaded per session. A separate one-shot is the
+        simplest way to get a model-authored sentence without
+        disturbing the in-flight turn or maintaining a second long-
+        lived subprocess.
+        """
+        tools_summary = self._summarize_recent_tools(recent_tools)
+        prompt = (
+            "You're a meeting copilot named Claude embedded in a Google Meet "
+            "chat. Other meeting participants may be watching. You are "
+            "currently mid-task — the user just asked the question below "
+            "and you've been working on it for ~30 seconds without posting "
+            "a status update.\n\n"
+            f"User's question:\n  {user_message}\n\n"
+            f"Recent tool calls so far:\n{tools_summary}\n\n"
+            "Write ONE short status sentence telling the user what you're "
+            "currently doing or about to do — like an aside whispered to a "
+            "teammate while you work. Constraints: no greeting, no preface, "
+            "no emoji, no quoting the question back, no closing punctuation "
+            "beyond a period or ellipsis. Match a warm, terse, useful "
+            "meeting-copilot voice. Output ONLY the sentence — nothing else."
+        )
+        # Mirror claude_cli.py:437 — strip ANTHROPIC_API_KEY from the
+        # subprocess env so claude falls through to the subscription/
+        # OAuth credential (which has the user's Max plan capacity).
+        # `~/.operator/.env` typically carries an ANTHROPIC_API_KEY left
+        # over from earlier provider experiments; in S206 testing that
+        # key had zero credit balance and the heartbeat call failed
+        # silently with `Credit balance is too low` on STDOUT (not
+        # stderr — easy to miss). The inner-claude spawn already does
+        # this; the heartbeat must too.
+        import os as _os
+        env = {k: v for k, v in _os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--output-format", "text"],
+                capture_output=True,
+                text=True,
+                timeout=HEARTBEAT_CALL_TIMEOUT_SECONDS,
+                env=env,
+                # Don't inherit a Chrome/Playwright pipe parent's
+                # signal handling — heartbeat call must not be killed
+                # by the meeting bot's own SIGINT handler. start_new_
+                # session is already the default via the shim in
+                # __main__.py:_detached_popen_init, but be explicit.
+                start_new_session=True,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning(
+                f"ChatRunner: heartbeat side-channel call timed out "
+                f"after {HEARTBEAT_CALL_TIMEOUT_SECONDS}s"
+            )
+            return None
+        except Exception as e:
+            log.warning(f"ChatRunner: heartbeat side-channel call raised: {e}")
+            return None
+        if result.returncode != 0:
+            # Include both stdout and stderr — claude writes some user-
+            # facing errors to stdout (e.g. "Credit balance is too
+            # low") and an empty stderr would obscure the cause.
+            log.warning(
+                f"ChatRunner: heartbeat side-channel exited "
+                f"{result.returncode} stdout={result.stdout[:200]!r} "
+                f"stderr={result.stderr[:200]!r}"
+            )
+            return None
+        text = (result.stdout or "").strip()
+        if not text:
+            log.warning("ChatRunner: heartbeat side-channel returned empty")
+            return None
+        # Trim hard ceilings: if the model exceeded "one sentence" and
+        # gave us a paragraph, take the first sentence-ish chunk so the
+        # heartbeat stays terse. Permissive split — we're not parsing
+        # English perfectly, just clipping.
+        text = text.split("\n", 1)[0].strip()
+        if len(text) > 280:
+            text = text[:280].rsplit(" ", 1)[0] + "…"
+        return text
+
+    def _summarize_recent_tools(self, recent_tools: list[dict]) -> str:
+        """Format the tool deque for the heartbeat prompt. Returns a
+        bullet list with name + a short args summary, capped to the
+        most recent HEARTBEAT_RECENT_TOOL_LIMIT entries. Empty list →
+        a `(none yet)` sentinel so the prompt parses naturally."""
+        if not recent_tools:
+            return "  (none yet)"
+        tail = recent_tools[-HEARTBEAT_RECENT_TOOL_LIMIT:]
+        lines = []
+        for entry in tail:
+            name = entry.get("name") or "<unknown>"
+            args = entry.get("input") or {}
+            # Pick the most informative single arg — usually file_path,
+            # path, command, pattern, or query. Anything else: just
+            # show the arg keys so the model has SOMETHING to say
+            # without us dumping the whole input dict (which can be
+            # large for Edits, Writes, Bash with long commands).
+            # "What" args before "where" args. Rationale: for Read/
+            # Edit/Write the most informative arg IS file_path (no
+            # separate "what" — the file path is what the tool
+            # operates on). But for Grep/Glob the pattern is more
+            # informative than path; for Bash the command beats any
+            # path arg. Order resolves both: Grep gets "pattern"
+            # before "path"; Read still gets "file_path"; Bash gets
+            # "command". `path` lives last as the generic fallback.
+            preferred_keys = (
+                "file_path", "command", "pattern", "query",
+                "url", "prompt", "path",
+            )
+            summary = ""
+            for key in preferred_keys:
+                if key in args:
+                    val = args[key]
+                    if isinstance(val, str):
+                        # Cap individual arg length so a giant Bash
+                        # command doesn't blow the prompt budget.
+                        summary = val if len(val) < 100 else val[:100] + "…"
+                    else:
+                        summary = str(val)[:100]
+                    break
+            if not summary and args:
+                summary = "(" + ", ".join(args.keys())[:80] + ")"
+            lines.append(f"  - {name}{(': ' + summary) if summary else ''}")
+        return "\n".join(lines)
 
     def _send(self, text, kind: str = "chat"):
         """Send a chat message, append it to the meeting record, and track it as our own.

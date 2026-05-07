@@ -27,9 +27,15 @@ classifiers = [
 
 dependencies = [
     # Pinned for reproducible installs (mirrors requirements.txt).
+    # Operator does not consume any LLM API keys directly — the inner
+    # model subprocess is `claude -p`, which uses the user's Claude
+    # Max OAuth credential (no openai/anthropic Python SDKs needed).
+    # The openai==2.29.0 and anthropic==0.94.0 deps were dropped in
+    # session 205 after the "second LLM provider in v1?" product call
+    # resolved to "no". If we ever revisit a multi-provider design,
+    # the deps come back at the same time the pluggable provider
+    # interface does.
     "python-dotenv==1.2.2",
-    "openai==2.29.0",
-    "anthropic==0.94.0",
     "playwright==1.58.0",
     "mcp==1.27.0",
     "pyyaml==6.0.3",
