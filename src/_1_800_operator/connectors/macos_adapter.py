@@ -40,6 +40,11 @@ class MacOSAdapter(MeetingConnector):
         self._force = force
         self._leave_event = threading.Event()
         self._browser_closed = threading.Event()
+        # Set while the browser thread is holding a live, open page; cleared on
+        # close-detection or teardown. is_connected() ANDs this with not-closed
+        # so callers see a sub-second signal when the page dies, instead of
+        # waiting up to 30s for the active health probe to catch it.
+        self._browser_alive = threading.Event()
         self._browser_thread = None
         self._page = None
         self._chat_queue = queue.Queue()  # (command, args, result_queue)
@@ -65,6 +70,7 @@ class MacOSAdapter(MeetingConnector):
 
         self._leave_event.clear()
         self._browser_closed.clear()
+        self._browser_alive.clear()
         self.join_status = JoinStatus()
         self._resolved_url = None
         self._url_resolved.clear()
@@ -132,8 +138,14 @@ class MacOSAdapter(MeetingConnector):
             return []
 
     def is_connected(self):
-        """Return True if the browser session is still alive."""
-        return not self._browser_closed.is_set()
+        """Return True if the browser thread is holding a live, open page.
+
+        Cross-thread safe: only reads Event flags. The actual page probes
+        (page.is_closed(), page.url) run on the browser thread that owns the
+        Playwright objects — Playwright's sync API is single-thread, so we
+        can't probe from outside _browser_session.
+        """
+        return self._browser_alive.is_set() and not self._browser_closed.is_set()
 
     def set_caption_callback(self, fn):
         """Register fn(speaker, text, timestamp) for caption DOM updates.
@@ -711,6 +723,7 @@ class MacOSAdapter(MeetingConnector):
 
                     log.info("MacOSAdapter: joined meeting successfully")
                     js.signal_success(recovered=recovered)
+                    self._browser_alive.set()
 
                     # Event-driven: wait for in-meeting UI instead of sleeping 3s
                     t_in_meeting = time.monotonic()
@@ -757,6 +770,16 @@ class MacOSAdapter(MeetingConnector):
                     while not self._leave_event.is_set() and time.time() < deadline:
                         self._process_chat_queue(page)
                         page.wait_for_timeout(500)
+
+                        # Per-tick page-close probe. page.is_closed() reads
+                        # cached state (no CDP round-trip) so it's cheap to
+                        # call every 500ms. Catches the cleanly-closed case
+                        # immediately; frozen-WebSocket zombies still wait
+                        # for the active probe at the 10s health check below.
+                        if page.is_closed():
+                            self._browser_alive.clear()
+                            log.warning("MacOSAdapter: page closed mid-meeting — exiting")
+                            break
 
                         # Admission poll every 2s. Meet renders a top-right
                         # "Admit N guest(s)" element — accessibility text says
@@ -887,11 +910,17 @@ class MacOSAdapter(MeetingConnector):
                             except Exception:
                                 pass  # page.is_closed() / inaccessible caught by the 30s check below
 
-                        # Health check every 30s — page liveness and URL drift.
-                        if time.time() - last_health >= 30:
+                        # Active health probe every 10s — catches frozen-WebSocket
+                        # zombies that page.is_closed() can't detect (Mac sleep
+                        # / network blip leaves the cached close state False
+                        # while the underlying transport is dead). page.url
+                        # touches the CDP transport and raises on an
+                        # inaccessible page.
+                        if time.time() - last_health >= 10:
                             last_health = time.time()
                             try:
                                 if page.is_closed():
+                                    self._browser_alive.clear()
                                     log.warning("MacOSAdapter: health check — page closed unexpectedly, exiting")
                                     print("\n⚠️  Operator: browser page closed unexpectedly — exiting.")
                                     break
@@ -899,6 +928,7 @@ class MacOSAdapter(MeetingConnector):
                                 if "meet.google.com" not in current_url:
                                     log.warning(f"MacOSAdapter: health check — unexpected URL: {current_url}")
                             except Exception:
+                                self._browser_alive.clear()
                                 log.warning("MacOSAdapter: health check — page not accessible, exiting")
                                 print("\n⚠️  Operator: browser became inaccessible — exiting.")
                                 break
@@ -937,6 +967,7 @@ class MacOSAdapter(MeetingConnector):
                                 result_q.put(None)
                         except queue.Empty:
                             break
+                    self._browser_alive.clear()
                     self._browser_closed.set()
 
         except Exception as e:
@@ -952,5 +983,6 @@ class MacOSAdapter(MeetingConnector):
                 os.remove(pid_file)
             except FileNotFoundError:
                 pass
+            self._browser_alive.clear()
             if not self._browser_closed.is_set():
                 self._browser_closed.set()
