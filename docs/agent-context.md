@@ -17,6 +17,62 @@
 
 ## Current Status
 
+**Session 202 (May 6, 2026) — Pre-launch audit Tier 2 closed (9/9 cells complete) + both deferred follow-ups closed (path canonicalization, CLAUDE.md whole-section refresh). Six audit-cell commits + two follow-up commits + one docs-sweep commit landed; ~−380 LOC src, ~−43 LOC tests. Apple Dev cert still pending; 14.20.5 still gated on it. Parallel S203 session is well into Tier 3 (5 cells already landed — oauth_cache, chrome_preflight, ui, claude_code_import, google_signin).**
+
+**Six audit-cell commits land this session, all using the plain-language / 🟡🟢 / disposition-emoji finding format:**
+
+1. **`446dfde` — bridges/claude.py.** Purged dead post-14.19.7 stubs `spawn_argv()` + `transcript_mcp_spec()` — both predicted to replace inline impls in `claude_cli.py` post-Phase-14.19.7, but the phase shipped without that refactor and the stubs never got callers. Deleted unused `REPLY_PREFIX_DIAL` + `REPLY_PREFIX_DEPLOY` (only `_SLIP` is wired). Trimmed obsolete "codex/gemini bridges Phase 14.20+" docstring sentence (14.20 is the audio-helper phase, not bridges). −56 LOC.
+
+2. **`36f37c7` — config.py.** Deleted four definitely-dead constants from the pre-14.19.7 era — `TOOL_TIMEOUT_SECONDS` + `DEFAULT_TOOL_TIMEOUTS` (operator no longer runs the tool loop, claude_cli does internally), `TOOL_RESULT_MAX_CHARS` (Phase 9.11 truncation guard with no callers), `LLM_STUCK_THRESHOLD_SECONDS` (streaming watchdog for deleted OpenAI/Anthropic providers). Trimmed obsolete "Tool-call timeout precedence" docstring prologue. −26 LOC.
+
+3. **`0c2ad02` — permission_chat_handler.py.** Two large dead-code regions purged. (1) `_disabled_mcp_for_cli_tool()` + its call site (54 LOC) — guarded against `config.DISABLED_MCP_SERVERS` which doesn't exist post-14.19.7; defensive `getattr(config, ..., None) or {}` always resolved to `{}` so the function always returned None and the guard never fired. (2) Whole confirmation-prompt formatter chain (`_format_confirmation`, `_format_terse`, `_format_verbose`, `_show_imperative`, `_human_size`, `_IMPERATIVE_*`, `ARG_RENDER_*`) ~150 LOC + two tests stubbing `config.VOICE` — per the 14.19.8 comment already in `_round_trip`, the LLM authors the prompt in pre-tool narration and this handler no longer renders templated cards; zero src/ callers. Net −209 LOC src + −43 LOC tests. Also hoisted `is_yes` import to top (PEP 8), dropped stale `noqa: F401`, fixed module + class docstrings (stale `config.PERMISSIONS_*` and `runner._send` refs).
+
+4. **`d6d4044` — transcript_server.py.** Two doc fixes (no behavior change): (1) `list_speakers` docstring claimed speaker names are "case-sensitive substrings" but `_apply_speaker_filter` lowercases both needle and sender — flipped to "case-insensitive" to match. (2) Module docstring's marker-file rationale referenced the deleted codex agent; refreshed to point at the real current case (statically-registered MCPs like ones the user added via `claude mcp add` that don't get per-meeting env interpolation).
+
+5. **`bbae03f` — __main__.py.** Six dead `logging.getLogger("openai"/"anthropic").setLevel(...)` calls across `_run_slip`/`_run_macos`/`_run_linux` — both libraries deleted in 14.19.7's provider purge, zero `import openai`/`import anthropic` anywhere in src/. Plus a redundant inner `if name != "claude"` guard at top of `_run_slip` — dispatcher in main() already filters at argv parse, function is module-private with one caller, the inner check never fires. −13 LOC.
+
+6. **`4e1082d` — connectors/base.py.** One readability fix: added a class-level docstring with a fingerpost to the three implementers (MacOSAdapter for dial, AttachAdapter for slip, LinuxAdapter for headless) and the two-tier method split (required lifecycle/chat raise NotImplementedError vs safe-default returns for optional features like captions and participant scraping). Skipped `abc.ABC` migration — current pattern is fine because nothing instantiates the base directly.
+
+**Three cells closed CLEAN (no commit):**
+
+- **`permission_bridge.py`** — defensive shim contract intentionally catches every failure mode and converts to a JSON deny so claude's hook chain stays predictable; broad `except Exception` is the spec, not slop. Pipe perms verified via `claude_cli.py:509-510`'s `os.mkfifo(0o600)`. Trust-the-OS doesn't apply to a protocol shim.
+- **`chat_dom_js.py`** — five JS strings injected via `page.evaluate()` from both adapters, all imported at expected call sites, no XSS surface (text-only DOM reads, no `eval`/`innerHTML`), all functions have appropriate fallbacks.
+- **`captions_js.py`** — sole src/ caller is `macos_adapter.py` (slip captions go through audio-helper Whisper, not DOM scraping), text-only extraction same as chat_dom_js, broad `except` at Playwright-interaction boundaries is appropriate.
+
+**Two follow-up commits closing both deferred items:**
+
+7. **`da6dcb8` — path canonicalization (Task #11).** Picked up the cross-file follow-up flagged from cell B's config.py audit. The pre-14.19.7 "avoid importing config (OPERATOR_BOT requirement)" rationale was itself stale — config.py no longer asserts OPERATOR_BOT, the wizard that ran before any bot was chosen is gone, the duplication safety reason no longer holds. Dropped `_BROWSER_PROFILE_DIR` / `_AUTH_STATE_FILE` / `_GOOGLE_ACCOUNT_FILE` module-private constants in `google_signin.py`; functions now default to `Path(config.X)`. Replaced inline `Path.home() / ".operator" / ".env"` in `readiness.py` with `config.ENV_FILE`. Dropped the underscore imports in `__main__.py:_run_login` since defaults resolve via config. **Bonus**: deleted dead `run_signin_step` (70 LOC wizard entry point referencing `operator build` and "your bot config is saved" — pure dead post-14.19.7) with its `from rich.prompt import Prompt`, plus stale `config._resolve_env_vars` docstring pointer fix in readiness.py. Net −91 LOC.
+
+8. **`814b2b8` — CLAUDE.md whole-section refresh (Task #10).** Picked up the cross-file follow-up flagged from cell B. Original S200 flag was just the `llm.provider` line, but the entire Configuration / Tool Confirmation / Imported MCP Servers sections were describing wizard-era machinery deleted in 14.19.7. Fixed `@operator` → `@claude` trigger phrase in opener; dropped multi-bot framing post-codex-deletion; added missing connectors/files (attach_adapter, bridges, transcript_server, permission_chat_handler/bridge) to the Architecture overview; rewrote Configuration around bridges/config.py/.env reality (no per-bot YAML, no OPERATOR_BOT, no wizard); rewrote Tool Confirmation around 14.19.8 architecture (LLM authors prompt in pre-tool narration, handler does always_ask vs auto_approve glob match + recent-yes 30s window, --yolo flatten); deleted the stale "Imported MCP Servers" section entirely (`_sync_claude_imports` doesn't exist post-14.19.7). Net +3 LOC but heavy churn (75 ins / 72 del).
+
+**Plus `0164218` — S202 docs sweep** committing pre-launch-audit.md status updates as the cells landed.
+
+**Tier-2 progress:** 9/9 cells done (`__main__` ✅, `config` ✅, `permission_chat_handler` ✅, `permission_bridge` ✅ clean, `chat_dom_js` ✅ clean, `captions_js` ✅ clean, `bridges/claude` ✅, `transcript_server` ✅, `connectors/base` ✅). **Tier 2 closed.** Both deferred S200/S202 follow-ups closed (CLAUDE.md sweep + path canonicalization). **Parallel S203 session is well into Tier 3** with 5 cells already landed (`62a9da8` oauth_cache, `b458e58` chrome_preflight, `5fe1198` ui, `8f1f167` claude_code_import, `9d4fe40` google_signin). Remaining Tier 3: `install_preflight` (175), `doctor` (282), `readiness` (360 — partially touched by S203's import refinement + my path canonicalization), `_disclaimed_spawn` (269), `linux_adapter` (701, secondary platform), the install.sh + pyproject.toml + requirements.txt bundle, and the audio-helper Swift binary.
+
+**Cross-cutting findings still flagged for follow-up cells (deliberately deferred, not blocking S202; logged in `docs/pre-launch-audit.md`):**
+
+- **Caption text logged at INFO level in transcript.py + audio.py + captions_js.py** (three sites flagged across S200 + S202 — needs cross-file logging-policy review for PII risk in `/tmp/operator.log`).
+- **Magic-string `kind` values** across five files (no central enum, typo on `session_start` comparison silently breaks LLM session scoping). Carries forward from S200.
+- **Vestigial `_tail_messages` / `_build_messages` chain in `llm.py`** — provably dead per S201 claude_cli cell, gated on the "is a second provider in v1 scope?" product call.
+- **No tests for the heartbeat watchdog from S199.** Still a nice-to-have.
+
+**`/ultrareview` deferred until slip captions ship** (memory `project_ultrareview_gated_on_slip_captions.md`). For interim security reads, suggest static tools (Bandit/Semgrep) or focused manual agent passes instead.
+
+**Apple Dev cert path: no change.** Still in flight, no movement this session. 14.20.5 (productized .app + notarization) remains gated on approval.
+
+**Tests:** 20/20 green throughout (down from 21 — parallel S203 deleted `test_claude_code_import.py` in `8f1f167` when its target file was audited).
+
+**Exact next step (next session):** continue Tier 3 sweep with the remaining cells — `install_preflight` (175), `doctor` (282), `_disclaimed_spawn` (269), `linux_adapter` (701, secondary platform), then the `install.sh` + `pyproject.toml` + `requirements.txt` bundle. After Tier 3 → standalone workflow passes (install dry-run, dep pinning, runbook). **Apple Dev cert + slip captions + the `llm.py` provider-scope decision** are the three open product gates outside the audit work. **Coordination note**: the parallel S203 session has been actively grabbing Tier 3 cells — `git status` and `git log -10` before starting any cell to avoid stepping on a freshly-landed audit.
+
+**Open questions / blockers:**
+- **Apple Dev cert** still in flight. Carries forward from S198. Blocks 14.20.5 only.
+- **`llm.py` vestigial history-replay machinery** — provably unused, awaiting product call on second-provider scope.
+- **No tests for the heartbeat watchdog from S199** — still nice-to-have.
+
+---
+
+## Prior Status (preserved)
+
 **Session 201 (May 6, 2026) — Pre-launch audit Tier 1 closed (11/11 cells complete). Connector trio audited (session.py, attach_adapter.py, macos_adapter.py) plus the deferred claude_cli cell resolved when its two carry-forward findings turned out to be already addressed by other cells. Four commits, ~13 findings landed. Apple Dev cert still pending; 14.20.5 still gated on it.**
 
 **Four commits land this session, all using the plain-language / 🟡🟢 / disposition-emoji finding format:**
@@ -2091,6 +2147,8 @@ Session 81: Reliability fix outside the phase plan — camera-toggle failure on 
 ---
 
 ## Hard-Won Knowledge (read before touching relevant code)
+
+- **Mass-deletion phases leave behind passive consumers that look like live code** (session 202). Auditing Tier 2 cells turned up the same pattern over and over: Phase 14.19.7 deleted big chunks of infrastructure (the wizard, OpenAI/Anthropic providers, OPERATOR_BOT routing, `mcp_client.py`, codex agent, per-bot YAMLs) — and *every* deletion left a trail of passive consumers that were always-defensive code: `getattr(config, "DISABLED_MCP_SERVERS", None) or {}` in `permission_chat_handler.py` always resolved to `{}` and the guard never fired; `logging.getLogger("openai").setLevel(WARNING)` in `__main__.py` × 3 sites had no logger to silence; `_format_confirmation` and friends in `permission_chat_handler.py` had `voice = getattr(config, "VOICE", "plain")` reading a deleted config field, so the code path was unreachable; `_disabled_mcp_for_cli_tool` walked a server-naming map that was always empty. None showed up in tests because their job was always to defend against absence, and absence was now permanent. **Lesson**: after any large-scope deletion phase, the next audit pass should hunt for `getattr(config, "X", default)` patterns + `try: ... except DeletedException` patterns + `if some_condition_that_used_to_be_true` patterns — they're the orphan footprint of the deletion. A grep for the *deleted* names against the surviving code surface is faster than auditing surviving callers one-by-one. The S202 cells purged ~−380 LOC of this footprint across 6 commits in one session; there's almost certainly more in Tier 3.
 
 - **PID-reuse races on macOS make stale `.pid` files dangerous to act on** (session 201). When auditing `connectors/session.py:_chrome_kill_and_clear`, realized the `--force` path reads a saved PID from `.operator.pid`, then SIGTERMs that PID directly. Fine when the PID is current — but if a previous operator run crashed without cleaning up, the PID file sticks around. macOS recycles PIDs aggressively (default range cycles in ~99,999), so by the time a user runs `--force` later that day, the PID may now belong to a totally unrelated process: their browser, IDE, terminal session. Operator would silently SIGTERM/SIGKILL it. The fix that landed in commit `d992052`: shell out to `ps -p PID -o comm=` before signalling, and skip the kill if the comm string doesn't contain "python" or "operator". macOS-specific because Linux operator is headless / no persistent profile so the path doesn't fire there. Generalizable rule for any code path that signals a PID read from a stored file: **never trust a stored PID unconditionally — verify it still refers to your own process before signalling.** `ps -p PID -o comm=` is the cheapest available check; `psutil.Process(pid).create_time()` matched against the recorded start time is the more robust one when you have psutil. Live-fetched PIDs from `lsof -t -iTCP:<port>` are safer than stored ones (the live source is fresh by definition), which is why `_evict_other_chrome_on_cdp_port` in `attach_adapter.py` doesn't need this guard.
 
