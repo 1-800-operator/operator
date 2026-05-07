@@ -49,9 +49,14 @@ def chromium_installed() -> bool:
         return False
     return any(child.name.startswith("chromium-") for child in root.iterdir())
 
-# Slip's audio helper. install.sh compiles to ~/.operator/bin/; dev runs
-# the swiftc-built binary in-tree. Production location wins when both exist.
-_AUDIO_HELPER_INSTALLED = Path.home() / ".operator" / "bin" / "operator-audio-capture"
+# Slip's audio helper. Production is the signed+notarized .app produced by
+# scripts/build_signed_helper.sh (only this path can capture system audio).
+# Dev fallback is the raw swiftc-built binary in-tree (mic-only). Production
+# wins when both exist; mirrors attach_adapter.py:_AUDIO_HELPER_INSTALLED.
+_AUDIO_HELPER_INSTALLED = (
+    Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
+    / "Contents" / "MacOS" / "operator-audio-capture"
+)
 _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
 
 

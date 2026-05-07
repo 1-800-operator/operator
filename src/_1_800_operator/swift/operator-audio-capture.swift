@@ -149,6 +149,27 @@ final class StreamDelegate: NSObject, SCStreamDelegate {
     }
 }
 
+// Target output format: matches the mic path — Float32 mono 16kHz. Whisper
+// downstream expects this, and homogenizing both streams keeps Python's
+// AudioProcessor format-agnostic.
+let sysTargetFormat: AVAudioFormat = {
+    guard let f = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                sampleRate: 16000,
+                                channels: 1,
+                                interleaved: false) else {
+        fputs("operator-audio-capture: FATAL — could not build sys target format\n", stderr)
+        exit(7)
+    }
+    return f
+}()
+
+// Lazily-initialized converter. SCK delivers 48kHz stereo Float32 (per cfg
+// above), but we don't hardcode the source format — we discover it from the
+// first sample buffer and build the converter to match. That way config
+// drift on the SCK side doesn't silently produce wrong-shape audio.
+var sysConverter: AVAudioConverter?
+var sysSourceFormat: AVAudioFormat?
+
 final class SystemAudioOutput: NSObject, SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
@@ -158,25 +179,99 @@ final class SystemAudioOutput: NSObject, SCStreamOutput {
         // silence. The watchdog wants to distinguish "SCK never fired" (real
         // TCC silent-failure) from "SCK fired but the system was quiet"; if
         // we increment only on non-empty buffers, a quiet system kills the
-        // helper at 10s. Voice-preserved counted unconditionally; we match.
+        // helper at 10s.
         systemStats.callbacks += 1
-        guard let bb = CMSampleBufferGetDataBuffer(sb) else { return }
-        let n = CMBlockBufferGetDataLength(bb)
-        guard n > 0 else { return }
-        var buf = [UInt8](repeating: 0, count: n)
-        let copyOK = buf.withUnsafeMutableBytes { raw -> Bool in
-            guard let base = raw.baseAddress else { return false }
-            return CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: n, destination: base) == kCMBlockBufferNoErr
+
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sb),
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return
         }
-        guard copyOK else { return }
-        buf.withUnsafeBytes { raw in
-            if let base = raw.baseAddress {
-                writeFrame(tag: TAG_SYSTEM, payload: base, length: n)
+
+        // Lazy converter init on first callback. SCK's delivered format may
+        // differ slightly from what we configured (channel layout, interleaved
+        // vs not). Build the converter from the actual source format we see.
+        if sysConverter == nil {
+            var asbd = asbdPtr.pointee
+            guard let srcFormat = AVAudioFormat(streamDescription: &asbd) else {
+                fputs("operator-audio-capture: SCK could not derive AVAudioFormat from CMSampleBuffer\n", stderr)
+                return
             }
+            sysSourceFormat = srcFormat
+            guard let conv = AVAudioConverter(from: srcFormat, to: sysTargetFormat) else {
+                fputs("operator-audio-capture: SCK no converter from \(srcFormat) to \(sysTargetFormat)\n", stderr)
+                return
+            }
+            sysConverter = conv
+            fputs("operator-audio-capture: [S] source format \(srcFormat.sampleRate)Hz \(srcFormat.channelCount)ch → resampling to 16kHz mono\n", stderr)
         }
-        systemStats.bytes += n
+        guard let converter = sysConverter, let srcFormat = sysSourceFormat else { return }
+
+        // Wrap CMSampleBuffer's audio in an AVAudioPCMBuffer (no copy).
+        var bufferListSize = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sb,
+            bufferListSizeNeededOut: &bufferListSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: nil
+        )
+        if status != noErr || bufferListSize == 0 { return }
+
+        let listPtr = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: 16)
+        defer { listPtr.deallocate() }
+        let bufferList = listPtr.assumingMemoryBound(to: AudioBufferList.self)
+        var blockBuffer: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sb,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: bufferList,
+            bufferListSize: bufferListSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        if status != noErr { return }
+
+        guard let inputPCM = AVAudioPCMBuffer(
+            pcmFormat: srcFormat,
+            bufferListNoCopy: bufferList,
+            deallocator: nil
+        ) else { return }
+        // CMSampleBuffer's frameLength matches the buffer's sample count; AVAudioPCMBuffer
+        // doesn't always infer this from bufferListNoCopy, so set it explicitly.
+        inputPCM.frameLength = AVAudioFrameCount(CMSampleBufferGetNumSamples(sb))
+
+        // Convert to 16k mono.
+        let ratio = sysTargetFormat.sampleRate / srcFormat.sampleRate
+        let outCapacity = AVAudioFrameCount(Double(inputPCM.frameLength) * ratio + 16)
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: sysTargetFormat, frameCapacity: outCapacity) else { return }
+
+        var convError: NSError?
+        var supplied = false
+        let convStatus = converter.convert(to: outBuf, error: &convError) { _, outStatus in
+            if supplied {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
+            outStatus.pointee = .haveData
+            return inputPCM
+        }
+        if convStatus == .error {
+            fputs("operator-audio-capture: [S] convert error: \(convError?.localizedDescription ?? "?")\n", stderr)
+            return
+        }
+        let frames = Int(outBuf.frameLength)
+        guard frames > 0, let chans = outBuf.floatChannelData else { return }
+        let bytes = frames * MemoryLayout<Float32>.size
+        writeFrame(tag: TAG_SYSTEM, payload: UnsafeRawPointer(chans[0]), length: bytes)
+        systemStats.bytes += bytes
         if systemStats.callbacks <= 3 {
-            fputs("operator-audio-capture: [S] callback #\(systemStats.callbacks) — \(n) bytes\n", stderr)
+            fputs("operator-audio-capture: [S] callback #\(systemStats.callbacks) — \(bytes) bytes (post-resample)\n", stderr)
         }
     }
 }
@@ -184,6 +279,19 @@ final class SystemAudioOutput: NSObject, SCStreamOutput {
 let sysDelegate = StreamDelegate()
 let sysOutput = SystemAudioOutput()
 var sysStarted = false
+// Strong reference at module scope. Without this, ARC deallocates the
+// SCStream when the SCShareableContent.getWithCompletionHandler closure
+// returns — startCapture's completion handler still fires (so we log
+// "SCK capturing"), but the stream is gone before any audio callbacks
+// land. macOS 14 internally retained the stream during capture; macOS 15
+// doesn't, so a local `let stream` inside the closure compiles fine but
+// silently produces zero callbacks. Keeping the reference here matches
+// the Azayaka pattern (stream held as a class member).
+//
+// Full debug trail: docs/agent-context.md — Hard-Won Knowledge entry
+// "macOS 15 SCStream silently drops audio callbacks unless the stream
+// object is held in a strong reference …" (session 206).
+var sysStream: SCStream?
 
 SCShareableContent.getWithCompletionHandler { content, error in
     if let error = error {
@@ -205,13 +313,21 @@ SCShareableContent.getWithCompletionHandler { content, error in
     // false and never echoed because the helper has no audio output of
     // its own to be excluded.
     cfg.excludesCurrentProcessAudio = false
-    cfg.sampleRate = 16000
-    cfg.channelCount = 1
+    // macOS 15 (Sequoia) SCStream silently denies audio callbacks when
+    // sampleRate/channelCount don't match the system's preferred audio
+    // format. Apple's docs note 48000/2 as the working config; the Azayaka
+    // open-source recorder (active on macOS 15) uses the same. Voice-preserved
+    // ran 16000/1 successfully on macOS 14 (Sonoma) but that path is dead on
+    // 15. We resample to 16k mono Float32 client-side before forwarding bytes.
+    cfg.sampleRate = 48000
+    cfg.channelCount = 2
+    cfg.queueDepth = 5
     cfg.width = 2; cfg.height = 2
     cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let stream = SCStream(filter: filter, configuration: cfg, delegate: sysDelegate)
+    sysStream = stream  // pin module-scope reference; see comment at sysStream declaration
     do {
         try stream.addStreamOutput(sysOutput, type: .audio,
                                    sampleHandlerQueue: DispatchQueue(label: "operator.audio.system"))
@@ -307,7 +423,7 @@ for delaySeconds in stride(from: 2, through: 12, by: 2) {
 
 // Watchdog: only FATAL if mic is silent (real bug we always want to surface).
 // System-stream silence at 10s is recoverable from the Python side via
-// `tccutil reset ScreenCapture com.operator.audio-capture` + respawn (see
+// `tccutil reset ScreenCapture com.1-800-operator.audio-capture` + respawn (see
 // AttachAdapter._audio_reader_loop). Exit code 4 = system silent-failure;
 // the parent retries once. Voice-preserved's runner used exactly this
 // recipe (pipeline/runner.py:342). If the system stays silent after the

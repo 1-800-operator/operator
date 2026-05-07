@@ -138,50 +138,63 @@ fi
 
 # -- 8. macOS audio helper (operator-audio-capture) -------------------------
 
-# Compiles the slip-mode dual-stream audio capture helper. The Swift source
-# ships in the wheel under _1_800_operator/swift/; this step turns it into
-# a per-machine binary at ~/.operator/bin/operator-audio-capture so TCC has
-# a stable cdhash to authorize. Mac-only — Linux skips silently.
+# Slip mode's dual-stream audio capture (mic + system) is delivered by a
+# Swift helper that needs Apple-Dev signing + notarization to be allowed by
+# macOS TCC for SCStream callbacks. There are two paths:
 #
-# Soft-fail: if swiftc is missing, slip mode falls back to chat-only (no
-# transcript). The helper is also rebuilt by re-running this script.
+#   (a) Production: the wheel ships a pre-built, signed, notarized .app at
+#       _1_800_operator/swift/operator-audio-capture.app. We copy it into
+#       ~/.operator/bin/ (Granola-style — user never compiles or signs).
+#
+#   (b) From-source dev: the wheel doesn't ship the .app (e.g. you're
+#       installing from a git checkout that hasn't been release-built yet).
+#       We fall back to swiftc + ad-hoc-signed raw binary. THIS PATH CANNOT
+#       DO SYSTEM AUDIO — SCStream callbacks are silently denied for ad-hoc
+#       binaries on macOS 14+. Mic still works. To get system audio in dev,
+#       run `scripts/build_signed_helper.sh` from a checkout (requires the
+#       team's Developer-ID cert).
+#
+# Linux skips silently — slip is mac-only.
 
 if [ "${OS}" = "macos" ]; then
-  bold "Building operator-audio-capture (slip-mode audio helper)..."
-  if ! command -v swiftc >/dev/null 2>&1; then
-    warn "swiftc not found — skipping audio helper build."
-    warn "Slip mode will run chat-only without it."
-    warn "Install Xcode Command Line Tools with: xcode-select --install"
-    warn "Then re-run this installer."
+  bold "Installing operator-audio-capture (slip-mode audio helper)..."
+  TOOL_DIR="$(uv tool dir)/1-800-operator"
+  PY_IN_TOOL="${TOOL_DIR}/bin/python"
+  BIN_DIR="${HOME}/.operator/bin"
+  mkdir -p "${BIN_DIR}"
+
+  if [ ! -x "${PY_IN_TOOL}" ]; then
+    err "Could not find tool venv python at ${PY_IN_TOOL} — skipping audio helper."
   else
-    TOOL_DIR="$(uv tool dir)/1-800-operator"
-    PY_IN_TOOL="${TOOL_DIR}/bin/python"
-    if [ ! -x "${PY_IN_TOOL}" ]; then
-      err "Could not find tool venv python at ${PY_IN_TOOL} — skipping audio helper."
-    else
-      SWIFT_SRC="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "swift" / "operator-audio-capture.swift")')"
-      BIN_DIR="${HOME}/.operator/bin"
-      BIN_OUT="${BIN_DIR}/operator-audio-capture"
-      mkdir -p "${BIN_DIR}"
+    PKG_SWIFT_DIR="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "swift")')"
+    PREBUILT_APP="${PKG_SWIFT_DIR}/operator-audio-capture.app"
+    INSTALLED_APP="${BIN_DIR}/operator-audio-capture.app"
+
+    if [ -d "${PREBUILT_APP}" ]; then
+      # Path (a): production-shipped .app. Copy and we're done.
+      rm -rf "${INSTALLED_APP}"
+      cp -R "${PREBUILT_APP}" "${INSTALLED_APP}"
+      info "Installed signed helper: ${INSTALLED_APP}"
+    elif command -v swiftc >/dev/null 2>&1; then
+      # Path (b): dev fallback. Mic-only; system audio will be denied by TCC.
+      SWIFT_SRC="${PKG_SWIFT_DIR}/operator-audio-capture.swift"
+      BIN_OUT="${PKG_SWIFT_DIR}/operator-audio-capture"
       if swiftc "${SWIFT_SRC}" -O -o "${BIN_OUT}"; then
         chmod +x "${BIN_OUT}"
-        # Ad-hoc codesign with a stable bundle identifier. swiftc's
-        # default linker-signed binary has no stable identifier — the
-        # cdhash changes every rebuild, which silently invalidates any
-        # TCC grant the user has already given. With --identifier
-        # com.operator.audio-capture, TCC can key the grant to the
-        # name and persist it across rebuilds. Required for the
-        # responsibility-disclaim spawn path (AttachAdapter) to receive
-        # SCStream audio callbacks at all from IDE-launched terminals.
-        if codesign --force --sign - --identifier com.operator.audio-capture "${BIN_OUT}" 2>/dev/null; then
-          info "Built + codesigned ${BIN_OUT}"
-        else
-          warn "Built ${BIN_OUT} but codesign failed — slip-mode audio may not survive rebuilds."
-          warn "Manually: codesign --force --sign - --identifier com.operator.audio-capture ${BIN_OUT}"
-        fi
+        # Ad-hoc sign with stable identifier so TCC grants survive rebuilds.
+        codesign --force --sign - --identifier com.1-800-operator.audio-capture "${BIN_OUT}" 2>/dev/null || true
+        info "Built dev helper: ${BIN_OUT}"
+        warn "Dev fallback: this build CANNOT capture system audio (ad-hoc signing)."
+        warn "Mic capture still works. For system audio, run scripts/build_signed_helper.sh"
+        warn "from a checkout (requires the team's Developer-ID cert) or wait for the next"
+        warn "release wheel which will ship a notarized helper."
       else
         err "swiftc failed — slip will run chat-only."
       fi
+    else
+      warn "No prebuilt helper in wheel and swiftc not found — slip will run chat-only."
+      warn "Install Xcode Command Line Tools (xcode-select --install) and re-run,"
+      warn "or wait for the next release wheel which ships a prebuilt helper."
     fi
   fi
   echo

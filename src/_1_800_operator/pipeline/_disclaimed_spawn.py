@@ -12,7 +12,7 @@ itself has been granted Screen Recording.
 Apple's fix: posix_spawn() with `responsibility_spawnattrs_setdisclaim(&attrs, 1)`
 makes the spawned child its own responsible process — TCC then keys
 decisions against the child's own code-signature identifier
-(`com.operator.audio-capture`), regardless of who launched it.
+(`com.1-800-operator.audio-capture`), regardless of who launched it.
 
 The API is private (no public headers), but it's a stable symbol in
 libSystem and is what BackgroundMusic, Yabai, and similar tools use to

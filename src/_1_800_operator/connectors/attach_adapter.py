@@ -82,10 +82,17 @@ SLIP_PROFILE_DIR = os.path.expanduser("~/.operator/slip_profile")
 # points at a real problem (port collision, Chrome crash, OS issue).
 CDP_READY_TIMEOUT_SECONDS = 30
 
-# operator-audio-capture (14.20.2) lives at one of two paths. Production
-# wins when both exist; mirrors doctor.py:_AUDIO_HELPER_INSTALLED. Dev path
-# is the swiftc-built artifact in-tree (debug spike + manual rebuilds).
-_AUDIO_HELPER_INSTALLED = Path.home() / ".operator" / "bin" / "operator-audio-capture"
+# operator-audio-capture lives at one of two paths. Production is the
+# signed+notarized .app produced by scripts/build_signed_helper.sh — only
+# this path can capture system audio (SCStream callbacks are silently
+# denied for ad-hoc-signed binaries on macOS 14+). Dev fallback is the
+# raw swiftc-built artifact in-tree, used for mic-only iteration when no
+# Developer-ID cert is available. Production wins when both exist; mirrors
+# doctor.py:_AUDIO_HELPER_INSTALLED.
+_AUDIO_HELPER_INSTALLED = (
+    Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
+    / "Contents" / "MacOS" / "operator-audio-capture"
+)
 _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
 
 # Frame format from the helper: [1B tag 'S'|'M'][4B BE u32 length][N bytes Float32 16kHz mono PCM].
