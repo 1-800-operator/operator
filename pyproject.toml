@@ -57,11 +57,6 @@ path = "src/_1_800_operator/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/_1_800_operator"]
-# Hatchling's default already bundles non-.py files that live inside the
-# declared package dir, so agents/**/*.{yaml,md,txt,env.example} ship
-# automatically. `force-include` was tried and caused duplicate zip entries.
-# Verify after any future build-backend change: `python -m zipfile -l
-# dist/1_800_operator-*.whl | grep agents/` must list pm, engineer, designer.
 
 [tool.hatch.build.targets.sdist]
 include = [
