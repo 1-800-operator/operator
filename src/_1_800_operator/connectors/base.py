@@ -1,4 +1,18 @@
 class MeetingConnector:
+    """Abstract meeting-platform interface — what ChatRunner needs from a connector.
+
+    Implemented by MacOSAdapter (dial mode — fresh persistent-context Chrome),
+    AttachAdapter (slip mode — CDP-attach to dedicated slip Chrome), and
+    LinuxAdapter (headless Chromium). ChatRunner is platform-agnostic and
+    consumes only this surface; everything Meet-specific lives in the
+    adapters and `connectors/{captions,chat_dom}_js.py`.
+
+    Two tiers of methods: lifecycle + chat (`join`, `send_chat`, `read_chat`,
+    `leave`) raise NotImplementedError on the base — adapters MUST
+    implement; participant + caption + connectivity getters return safe
+    defaults so adapters can no-op when the platform doesn't expose them.
+    """
+
     def __init__(self):
         self.join_status = None  # Set by join(); see session.JoinStatus
 
