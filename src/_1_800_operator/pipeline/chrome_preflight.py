@@ -1,12 +1,18 @@
 """Pre-launch check for Google Chrome on macOS.
 
-Both the wizard sign-in step (`pipeline/google_signin.py`) and the macOS
-adapter (`connectors/macos_adapter.py`) hard-code the system Chrome binary
-because Chrome profiles aren't compatible across binaries (Chrome-for-
-Testing vs real Chrome — session 159 hard-won knowledge). If the user
-doesn't have Chrome installed, both paths fail deep inside Playwright with
-an opaque error. This module surfaces that as a single human line at the
-top of any command that would otherwise hit it.
+Two paths hard-depend on real Chrome being installed: the wizard sign-in
+step (`pipeline/google_signin.py`) launches it via Playwright with
+`executable_path` to seed the persistent profile, and slip mode
+(`connectors/attach_adapter.py`) attaches to the user's running Chrome
+over CDP. Both fail deep inside Playwright with an opaque error if the
+binary is missing — this module surfaces that as a single human line.
+
+The dial-path adapter (`connectors/macos_adapter.py`) uses Playwright's
+bundled Chromium (session 163) and reads the wizard's persistent profile
+from `~/.operator/browser_profile/` regardless of which binary created
+it. The require-Chrome call from `MacOSAdapter.join()` is defense in
+depth in case any future code path constructs the adapter without going
+through `__main__._run_macos`.
 
 Linux uses bundled Chromium via `connectors/linux_adapter.py`, so the check
 is a no-op there. The terminal `try` connector doesn't touch a browser at
