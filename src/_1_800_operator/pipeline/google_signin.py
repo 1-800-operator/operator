@@ -29,6 +29,7 @@ from pathlib import Path
 from rich.console import Console
 
 from _1_800_operator import config
+from _1_800_operator.pipeline.chrome_preflight import CHROME_PATH
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -191,16 +192,15 @@ def _launch_signin_flow(
     # scheme), or if Chrome's monthly update bumps a profile-DB schema
     # Chromium-for-Testing can't yet read, sign-in will silently fail at
     # `operator dial` time with no clear error. Fix when reproducible:
-    # pass `executable_path=str(CHROME_PATH)` in the adapter so both ends
-    # use the same binary. Deferred pre-launch — no observed failures.
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    # pass executable_path=str(CHROME_PATH) in the adapter so both ends
+    # use the same binary. Deferred pre-launch; no observed failures.
 
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
             headless=False,
-            executable_path=chrome_path,
+            executable_path=str(CHROME_PATH),
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
