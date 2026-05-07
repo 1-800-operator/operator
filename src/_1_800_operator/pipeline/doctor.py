@@ -6,10 +6,10 @@ command for failures. No interactive prompts, no fixups — purely
 read-only diagnostics. Exits 0 if everything is green, 1 if any check
 fails (so CI / scripts can gate on it).
 
-Composition: each check is a tiny pure function returning
-`CheckResult(name, status, fix)`. `run_doctor()` calls them in order
-and renders. Easy to extend — Phase 14.20 will add a Screen &
-System Audio Recording check when slip caption capture ships.
+Composition: each check is a tiny pure function returning a
+`CheckResult(name, ok, detail, fix)`. `run_doctor()` calls them in
+order and renders. macOS-only TCC checks (Screen Recording + Microphone
+for slip's audio helper, Phase 14.20.4) skip on other platforms.
 """
 from __future__ import annotations
 
@@ -97,7 +97,6 @@ def _check_chromium() -> CheckResult:
             "installed",
             "",
         )
-    import sys
     return CheckResult(
         name="Playwright Chromium",
         ok=False,
