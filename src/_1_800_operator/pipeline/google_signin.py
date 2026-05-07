@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -129,27 +130,20 @@ def _capture_email(page) -> str | None:
 
 def _write_artifacts(context, page, account_file: Path, auth_state_path: Path) -> str | None:
     """After SID cookie is detected: capture email, persist both artifacts."""
-    import os as _os
-
     email = _capture_email(page)
     auth_state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         context.storage_state(path=str(auth_state_path))
         # auth_state.json carries .google.com session cookies (SID,
-        # __Secure-1PSID, …). Lock it down so it isn't world-readable.
-        try:
-            _os.chmod(auth_state_path, 0o600)
-        except OSError as e:
-            log.warning(f"google_signin: chmod 0o600 on auth_state failed: {e}")
+        # __Secure-1PSID, …). Lock it down so it isn't world-readable —
+        # belt over umask 0o077 so existing-file overwrites stay tight.
+        os.chmod(auth_state_path, 0o600)
     except Exception as e:
         log.warning(f"google_signin: storage_state write failed: {e}")
     if email:
         try:
             account_file.write_text(json.dumps({"email": email}), encoding="utf-8")
-            try:
-                _os.chmod(account_file, 0o600)
-            except OSError as e:
-                log.warning(f"google_signin: chmod 0o600 on account_file failed: {e}")
+            os.chmod(account_file, 0o600)
         except OSError as e:
             log.warning(f"google_signin: account file write failed: {e}")
     return email
@@ -186,14 +180,14 @@ def _launch_signin_flow(
     from _1_800_operator.pipeline.chrome_preflight import require_chrome_or_exit
     require_chrome_or_exit()
 
-    # NB (session 178, T1.11): wizard sign-in uses real Google Chrome
-    # explicitly. Runtime adapter (`macos_adapter.py:_browser_session`)
-    # currently launches Playwright's bundled Chromium-for-Testing against
-    # the SAME `~/.operator/browser_profile/` dir without `executable_path`.
-    # The two binaries share most profile format, so Google Meet's session
-    # cookies (SAPISID, __Secure-1PSID, etc. — not keychain-encrypted)
-    # round-trip fine today. Risk for the future: if Google ever moves the
-    # auth cookies into the keychain-encrypted slot (Chrome's "v10"/"v11"
+    # NB (session 178, T1.11): this flow uses real Google Chrome explicitly.
+    # Runtime adapter (`macos_adapter.py:_browser_session`) currently
+    # launches Playwright's bundled Chromium-for-Testing against the SAME
+    # `~/.operator/browser_profile/` dir without `executable_path`. The two
+    # binaries share most profile format, so Google Meet's session cookies
+    # (SAPISID, __Secure-1PSID, etc. — not keychain-encrypted) round-trip
+    # fine today. Risk for the future: if Google ever moves the auth
+    # cookies into the keychain-encrypted slot (Chrome's "v10"/"v11"
     # scheme), or if Chrome's monthly update bumps a profile-DB schema
     # Chromium-for-Testing can't yet read, sign-in will silently fail at
     # `operator dial` time with no clear error. Fix when reproducible:
