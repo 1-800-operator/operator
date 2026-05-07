@@ -26,8 +26,6 @@ which doesn't expose the disclaim attr.
 from __future__ import annotations
 
 import ctypes
-import errno
-import io
 import os
 import signal
 import subprocess
@@ -113,9 +111,9 @@ class DisclaimedProcess:
     """Minimal subprocess.Popen-shaped wrapper for a disclaim-spawned child.
 
     Implements only the subset AttachAdapter touches: .pid, .stdin, .stdout,
-    .poll(), .wait(timeout=), .terminate(), .kill(), context-mgr exit.
-    Stderr is inherited from a caller-supplied fd (matching how Popen treats
-    a passed-in file object) — we don't pipe it.
+    .poll(), .wait(timeout=), .terminate(), .kill(). Stderr is inherited
+    from a caller-supplied fd (matching how Popen treats a passed-in file
+    object) — we don't pipe it.
     """
 
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
@@ -205,7 +203,13 @@ def spawn_disclaimed(
     # Pipes for stdin / stdout. parent_*: ends parent keeps. child_*: ends
     # child keeps (closed in parent after spawn).
     stdin_r, stdin_w = os.pipe()  # child reads stdin_r; parent writes stdin_w
-    stdout_r, stdout_w = os.pipe()  # child writes stdout_w; parent reads stdout_r
+    try:
+        stdout_r, stdout_w = os.pipe()  # child writes stdout_w; parent reads stdout_r
+    except OSError:
+        # Don't leak the first pipe if the second os.pipe() hits the fd limit.
+        os.close(stdin_r)
+        os.close(stdin_w)
+        raise
 
     file_actions = ctypes.c_void_p()
     attrs = ctypes.c_void_p()
