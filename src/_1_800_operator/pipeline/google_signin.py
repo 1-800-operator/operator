@@ -1,8 +1,7 @@
-"""Phase 14.10 wizard step — Google sign-in.
+"""Google sign-in flow — backs `operator login claude`.
 
-The bot needs a logged-in Chrome profile to join Meet. This step is the last
-wizard screen before the bot reveal: detect an existing shared session and
-offer continue / re-auth, or run the first-time sign-in flow.
+The bot needs a logged-in Chrome profile to join Meet. Detect an existing
+session and offer continue / re-auth, or run the first-time sign-in flow.
 
 Two artifacts are written on a successful sign-in:
 
@@ -11,7 +10,7 @@ Two artifacts are written on a successful sign-in:
                                     linux_adapter._auth_state_file).
   ~/.operator/google_account.json
                                   — small {"email": "..."} cache so future
-                                    wizard runs can show "✓ signed in as X"
+                                    runs can show "✓ signed in as X"
                                     without re-scraping a Google page.
 
 The persistent profile at ~/.operator/browser_profile/ is the source of
@@ -27,19 +26,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
-from rich.prompt import Prompt
+
+from _1_800_operator import config
 
 log = logging.getLogger(__name__)
 console = Console()
 
-# Inlined to avoid importing operator.config — config.py asserts
-# OPERATOR_BOT at module load, but the wizard runs before any bot is
-# chosen. If these paths change, update config.BROWSER_PROFILE_DIR /
-# AUTH_STATE_FILE / GOOGLE_ACCOUNT_FILE in lockstep (the path-resolution
-# regression test enforces three-way agreement).
-_BROWSER_PROFILE_DIR = Path.home() / ".operator" / "browser_profile"
-_AUTH_STATE_FILE     = Path.home() / ".operator" / "auth_state.json"
-_GOOGLE_ACCOUNT_FILE = Path.home() / ".operator" / "google_account.json"
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _SIGNIN_POLL_INTERVAL_S = 1.0
@@ -53,9 +45,9 @@ class DetectResult:
 
 
 def _auth_state_has_sid(path: Path) -> bool:
-    """Inline of session.validate_auth_state — kept here so this module
-    doesn't import _1_800_operator.connectors.session, which transitively imports
-    operator.config (gated on OPERATOR_BOT, unset during wizard run)."""
+    """Inline of session.validate_auth_state — duplicated to avoid pulling
+    in the connectors stack (Playwright, Chrome lifecycle) just to check a
+    cookie file."""
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
@@ -76,8 +68,8 @@ def _read_account_email(path: Path) -> str | None:
 
 
 def detect_google_session(
-    auth_state_path: Path = _AUTH_STATE_FILE,
-    account_file: Path = _GOOGLE_ACCOUNT_FILE,
+    auth_state_path: Path = Path(config.AUTH_STATE_FILE),
+    account_file: Path = Path(config.GOOGLE_ACCOUNT_FILE),
 ) -> DetectResult:
     """Pure helper: does ~/.operator/auth_state.json carry a valid SID cookie?
 
@@ -174,9 +166,9 @@ def _has_google_sid(context) -> bool:
 
 
 def _launch_signin_flow(
-    profile_dir: Path,
-    auth_state_path: Path,
-    account_file: Path,
+    profile_dir: Path = Path(config.BROWSER_PROFILE_DIR),
+    auth_state_path: Path = Path(config.AUTH_STATE_FILE),
+    account_file: Path = Path(config.GOOGLE_ACCOUNT_FILE),
     *,
     sign_out_first: bool = False,
 ) -> str | None:
@@ -261,74 +253,3 @@ def _launch_signin_flow(
                 pass
 
 
-def run_signin_step(
-    profile_dir: Path = _BROWSER_PROFILE_DIR,
-    auth_state_path: Path = _AUTH_STATE_FILE,
-    account_file: Path = _GOOGLE_ACCOUNT_FILE,
-    *,
-    step_num: int = 7,
-) -> None:
-    """Wizard entry point. Detect → continue / re-auth, or run first-time signin."""
-    console.print(f"\n[bold]{step_num}. Google sign-in[/bold]")
-    console.print(
-        "  [dim]Your bot uses a shared Google session to join Meet. "
-        "This is shared across all operator bots on this machine.[/dim]"
-    )
-
-    detected = detect_google_session(auth_state_path, account_file)
-
-    if detected.detected:
-        if detected.email:
-            console.print(f"  ✓ signed in as [bold]{detected.email}[/bold]")
-        else:
-            console.print("  ✓ Google session detected")
-        choice = Prompt.ask(
-            "  Sign in with a different account?",
-            choices=["y", "n"],
-            default="n",
-        ).strip().lower()
-        if choice != "y":
-            return
-        try:
-            email = _launch_signin_flow(
-                profile_dir, auth_state_path, account_file, sign_out_first=True,
-            )
-        except Exception as e:
-            console.print(f"  [yellow]⚠ re-auth failed: {e}[/yellow]")
-            console.print("  [dim]Keeping the previous session. You can re-run build to retry.[/dim]")
-            return
-        if email:
-            console.print(f"  ✓ signed in as [bold]{email}[/bold]")
-        else:
-            console.print("  ✓ Google session updated")
-        return
-
-    # No session detected — first-time signin.
-    console.print(
-        "  [yellow]⚠ Without sign-in, your bot can't join meetings.[/yellow] "
-        "You'll need to sign in via the browser the first time you run it."
-    )
-    skip = Prompt.ask(
-        "  Sign in now?",
-        choices=["y", "n"],
-        default="y",
-    ).strip().lower()
-    if skip == "n":
-        console.print(
-            "  [dim]Skipped — your bot will prompt for sign-in on first run.[/dim]"
-        )
-        return
-
-    try:
-        email = _launch_signin_flow(profile_dir, auth_state_path, account_file)
-    except Exception as e:
-        console.print(f"  [yellow]⚠ sign-in failed: {e}[/yellow]")
-        console.print(
-            "  [dim]Your bot config is saved. Re-run [bold]operator build[/bold] "
-            "to retry sign-in, or sign in via the browser on first run.[/dim]"
-        )
-        return
-    if email:
-        console.print(f"  ✓ signed in as [bold]{email}[/bold]")
-    else:
-        console.print("  ✓ Google session saved")

@@ -33,15 +33,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from _1_800_operator import config
 from _1_800_operator.pipeline.oauth_cache import oauth_cache_exists
 
 # Ensure ~/.operator/.env is in os.environ before we inspect it.
-# Idempotent and override=False, so runtime pre-flight (where config.py
-# already called this) is a no-op, and wizard calls (which import
-# readiness before any config import) see the same secrets the runtime
-# would. Path must match config.ENV_FILE — duplicated here to avoid
-# importing config (which requires OPERATOR_BOT to be set).
-load_dotenv(Path.home() / ".operator" / ".env", override=False)
+# Idempotent and override=False, so a second load_dotenv (e.g. config.py
+# already called this at import) is a no-op.
+load_dotenv(config.ENV_FILE, override=False)
 
 _ENV_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
@@ -55,8 +53,6 @@ def _missing_env_vars(env_dict: dict | None) -> list[str]:
     """Return env var names referenced as ${VAR} in `env_dict` that are
     absent or empty in os.environ.
 
-    Mirrors config._resolve_env_vars's missingness logic so the wizard
-    gets the same answer without having to run the full config loader.
     Both the raw-YAML shape (values like "${GITHUB_TOKEN}") and the
     already-resolved shape (plain strings, `missing_vars` populated)
     are handled — if the server block carries a pre-computed

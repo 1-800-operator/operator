@@ -124,14 +124,11 @@ def _run_login(name):
         return 2
 
     from _1_800_operator.pipeline.google_signin import (
-        _AUTH_STATE_FILE,
-        _BROWSER_PROFILE_DIR,
-        _GOOGLE_ACCOUNT_FILE,
         _launch_signin_flow,
         detect_google_session,
     )
 
-    detected = detect_google_session(_AUTH_STATE_FILE, _GOOGLE_ACCOUNT_FILE)
+    detected = detect_google_session()
     sign_out_first = detected.detected
     if detected.detected and detected.email:
         print(f"Currently signed in as {detected.email}. Refreshing session…")
@@ -141,12 +138,7 @@ def _run_login(name):
         print("No Google session yet. Opening sign-in window…")
 
     try:
-        email = _launch_signin_flow(
-            _BROWSER_PROFILE_DIR,
-            _AUTH_STATE_FILE,
-            _GOOGLE_ACCOUNT_FILE,
-            sign_out_first=sign_out_first,
-        )
+        email = _launch_signin_flow(sign_out_first=sign_out_first)
     except KeyboardInterrupt:
         print("\nAborted.")
         return 130
