@@ -271,6 +271,11 @@ class ClaudeCLIProvider(LLMProvider):
         self._perm_resp_pipe = None
         self._perm_pump_thread = None
         self._perm_stop = threading.Event()
+        # Standalone tempdir created by _maybe_write_mcp_config when no
+        # permission bridge is in play (no permission handler set). Its
+        # lifecycle is independent of _perm_tempdir; cleaned up alongside
+        # the bridge in _teardown_permission_bridge.
+        self._mcp_only_tempdir = None
         # Meeting record path. When set (captions enabled + meeting URL
         # known), _spawn registers a bundled transcript MCP server via
         # --mcp-config so inner-claude can fetch spoken-caption history
@@ -471,11 +476,9 @@ class ClaudeCLIProvider(LLMProvider):
         if self._perm_tempdir is not None:
             target_dir = self._perm_tempdir
         else:
+            # Track the standalone tempdir so _teardown_permission_bridge
+            # can rm it — it has no permission-bridge state to piggyback on.
             target_dir = Path(tempfile.mkdtemp(prefix="operator-claude-mcp-"))
-            # Cache so we can clean up alongside the permission-bridge
-            # tempdir when the subprocess dies. _teardown_permission_bridge
-            # already rms perm_tempdir; we extend it to also rm any mcp-only
-            # dir we created.
             self._mcp_only_tempdir = target_dir
         config_path = target_dir / "mcp.json"
         config_path.write_text(json.dumps({
@@ -596,7 +599,22 @@ class ClaudeCLIProvider(LLMProvider):
         log.info("ClaudeCLI permission pump exited")
 
     def _teardown_permission_bridge(self):
-        """Stop the pump thread and remove the tempdir + pipes."""
+        """Stop the pump thread and remove the tempdir + pipes.
+
+        Also cleans up any standalone mcp-only tempdir created by
+        _maybe_write_mcp_config when no permission bridge is in play —
+        that path is independent of the bridge's own state and must run
+        even when _perm_tempdir was never created.
+        """
+        # mcp-only tempdir cleanup runs first so it's not skipped by the
+        # bridge-not-set early return below. Created by
+        # _maybe_write_mcp_config when permission_handler is None but
+        # captions/transcript MCP are wired.
+        if self._mcp_only_tempdir is not None:
+            if self._mcp_only_tempdir.exists():
+                shutil.rmtree(self._mcp_only_tempdir, ignore_errors=True)
+            self._mcp_only_tempdir = None
+
         if self._perm_tempdir is None:
             return
         self._perm_stop.set()
@@ -618,24 +636,11 @@ class ClaudeCLIProvider(LLMProvider):
         if self._perm_pump_thread is not None:
             self._perm_pump_thread.join(timeout=5)
             self._perm_pump_thread = None
-        try:
-            if self._perm_tempdir.exists():
-                shutil.rmtree(self._perm_tempdir, ignore_errors=True)
-        except Exception:
-            pass
+        if self._perm_tempdir.exists():
+            shutil.rmtree(self._perm_tempdir, ignore_errors=True)
         self._perm_tempdir = None
         self._perm_req_pipe = None
         self._perm_resp_pipe = None
-        # If _maybe_write_mcp_config created a standalone tempdir (no
-        # permission bridge present), drop it here too.
-        mcp_only = getattr(self, "_mcp_only_tempdir", None)
-        if mcp_only is not None:
-            try:
-                if mcp_only.exists():
-                    shutil.rmtree(mcp_only, ignore_errors=True)
-            except Exception:
-                pass
-            self._mcp_only_tempdir = None
 
     # --- restart / resume ---------------------------------------------
 
