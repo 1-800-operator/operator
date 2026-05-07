@@ -8,6 +8,7 @@ interface. Requires Playwright's Chromium browser installed via
 import logging
 import os
 import queue
+import re
 import threading
 import time
 
@@ -131,10 +132,7 @@ class LinuxAdapter(MeetingConnector):
                 os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
                 _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
                 page.screenshot(path=_shot)
-                try:
-                    os.chmod(_shot, 0o600)
-                except OSError:
-                    pass
+                os.chmod(_shot, 0o600)
                 log.debug(f"LinuxAdapter: saved debug screenshot to {_shot}")
             except Exception:
                 pass
@@ -355,10 +353,7 @@ class LinuxAdapter(MeetingConnector):
         # mode= on makedirs makes creation atomic-private; chmod is the
         # belt for the case where the dir already exists with looser perms.
         os.makedirs(self._user_data_dir, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self._user_data_dir, 0o700)
-        except OSError as e:
-            log.warning(f"LinuxAdapter: could not tighten perms on {config.relativize_home(self._user_data_dir)}: {e}")
+        os.chmod(self._user_data_dir, 0o700)
         js = self.join_status
         browser = None
         try:
@@ -556,12 +551,11 @@ class LinuxAdapter(MeetingConnector):
                         # click the Admit button that appears in the tray.
                         # Keyboard path is a fallback (focus + ArrowDown +
                         # Enter) per the a11y hint.
-                        import re as _re
                         if time.time() - last_admit_check >= 2:
                             last_admit_check = time.time()
                             try:
                                 pill = page.get_by_text(
-                                    _re.compile(r"^Admit\s+\d+\s+(guest|people)", _re.I)
+                                    re.compile(r"^Admit\s+\d+\s+(guest|people)", re.I)
                                 ).first
                                 if pill.count() > 0 and pill.is_visible():
                                     try:
@@ -575,7 +569,7 @@ class LinuxAdapter(MeetingConnector):
                                         admit_diagnostic_saved = True
 
                                     admit_btn = page.get_by_role(
-                                        "button", name=_re.compile(r"^Admit$", _re.I)
+                                        "button", name=re.compile(r"^Admit$", re.I)
                                     ).first
                                     clicked = False
                                     if admit_btn.count() > 0 and admit_btn.is_visible():
