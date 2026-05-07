@@ -1,5 +1,5 @@
-"""mcp-remote OAuth token-cache helpers — shared by 15.7.3 startup gate
-(mcp_client) and 15.7.4 readiness reports (readiness, wizard).
+"""mcp-remote OAuth token-cache helpers — used by readiness reports
+(readiness, wizard status screen).
 
 Pure: no dependency on operator.config, so importable from the wizard
 (which runs before OPERATOR_BOT is set) and from the runtime (which
@@ -14,27 +14,31 @@ from pathlib import Path
 
 
 def mcp_remote_cache_dir() -> Path | None:
-    """Return the lexicographically-latest ~/.mcp-auth/mcp-remote-<version>/ dir.
+    """Return the most-recently-modified ~/.mcp-auth/mcp-remote-<version>/ dir.
 
-    mcp-remote bumps the version suffix on each release; picking the
-    largest match means a user who has upgraded locally doesn't start
-    hitting a stale lower-version cache. Returns None when ~/.mcp-auth
+    Mtime, not lexicographic sort — as strings, `mcp-remote-0.1.10` <
+    `mcp-remote-0.1.9` (a digit-boundary inversion), so a user with both
+    an older and a newer cache could silently route to the older one.
+    The currently-installed mcp-remote writes to its own version dir at
+    runtime, so its mtime is freshest. Returns None when ~/.mcp-auth
     doesn't exist or holds no mcp-remote-* subdir.
     """
     base = Path.home() / ".mcp-auth"
     if not base.exists():
         return None
-    candidates = sorted(d for d in base.glob("mcp-remote-*") if d.is_dir())
-    return candidates[-1] if candidates else None
+    candidates = [d for d in base.glob("mcp-remote-*") if d.is_dir()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: d.stat().st_mtime)
 
 
 def oauth_cache_exists(auth_url: str) -> bool:
     """True iff mcp-remote has a token cache file for auth_url.
 
     Existence ≠ validity — a revoked/expired token still has a file on
-    disk. Runtime sniff (`_looks_like_auth_error` in mcp_client) catches
-    the revoked case; this check is only about preventing mcp-remote
-    from hanging at meeting join waiting for a browser OAuth popup.
+    disk. The runtime catches the revoked case at meeting join; this
+    check is only about preventing mcp-remote from hanging waiting for
+    a browser OAuth popup.
     """
     if not auth_url:
         return False
