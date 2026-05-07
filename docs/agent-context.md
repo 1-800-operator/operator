@@ -17,7 +17,30 @@
 
 ## Current Status
 
-**Session 205 second pass (May 7, 2026) — five live-slip reliability fixes + side-channel meeting-chat heartbeat + dep & .env cleanup. All live-verified.** Parallel to the earlier S205 endurance-audit session, this pass surfaced and fixed bugs from a real slip-mode live meeting. **Branch is 8 commits ahead of `origin/main`** (5 from the parallel S205 pass + 0 from this session — all of this session's work is staged in working tree, ready to land in one end-session commit). 20/20 tests green throughout, including a new `tests/test_heartbeat.py` (7 tests).
+**Session 206 (May 7, 2026) — phantom-feature orphans deleted, ImportError landmine eliminated, S204+S205 work pushed to origin/main.** Short surgical session. Pushed S204+S205's 9 accumulated commits to `origin/main` first (`74c48c6..36edefd`), then took the install_preflight + readiness phantom-feature product call carried since S203. User picked **delete** over wire-up. Reasons: the wizard architecture these served was deliberately removed in 14.19.7 (`feedback_user_owns_their_config`, `project_chat_first_pivot`); `report_mcp_readiness` operates on a `mcp_servers: dict` config that operator no longer has (inner-claude inherits MCPs from `~/.claude/`); `oauth_cache_exists` checks claude-code's mcp-auth cache, which is claude-code's territory; wiring up `operator setup` would un-do the chat-first pivot.
+
+**Single commit this session: `51b69f3`.** Inlined `_probe_claude_code` into `claude_code_import.py` (collapsed the 1:1 wrapper layer — `claude_code_import` was a 25-line wrapper around `_probe_claude_code` that lived in `readiness.py`). Moved `chromium_installed` + `_playwright_browsers_root` into `doctor.py` (its only caller). Deleted `pipeline/readiness.py` (348 LOC), `pipeline/oauth_cache.py` (49 LOC), `pipeline/install_preflight.py` (175 LOC), and the three vacuous test files (`test_1574_readiness.py` 398 LOC, `test_install_preflight.py` 161 LOC, `test_15745_preflight.py` 322 LOC). **Net change: −1407 LOC** (1489 deletions, 82 insertions across 3 file mods + 6 deletions). The latent ImportError landmine at `readiness.py:247` (`from _1_800_operator.pipeline.auth import run_auth` — `pipeline/auth.py` doesn't exist) is eliminated by virtue of the file being gone. **17/17 remaining tests pass** (was 20; the 3 deleted only tested dead code), `operator doctor` runs clean end-to-end, `operator slip claude` reaches its arg-validation gate which proves the preflight chain still wires through `claude_code_import.claude_code_installed_and_logged_in()` → `_probe_claude_code()` correctly.
+
+**Three S203-carryover product calls now closed by the same delete:** install_preflight orphan, readiness preflight orphan, ImportError landmine. The revisit/wontfix log entry in `pre-launch-audit.md` for these can be flipped to closed (left unflipped this session — would need a separate doc-edit pass).
+
+**Decision-tree narrative for the delete call** (in case future agents re-open this question): the orphans served `report_mcp_readiness(mcp_servers: dict, ...)` — but post-14.19.7 operator has no per-bot config holding `mcp_servers`. Inner-claude inherits MCPs from the user's `~/.claude.json` and `claude mcp list`. The orphan's docstring promised the runtime preflight "Runs inside `_run_bot()` after `OPERATOR_BOT` is set" — `OPERATOR_BOT` was deleted in 14.19.7 along with `mcp_servers` config. The orphan was vestigial scaffolding for a wizard architecture that no longer exists. Three live helpers (`_probe_claude_code`, `chromium_installed`, `chrome_installed`) survive their parent files because they're real preflight primitives consumed by `__main__.py` and `doctor.py`.
+
+**Endurance audit explicitly considered next, ruled out.** S199–S205 already covered the buckets (A3/A4/C1 fixed; B1 already shipped in S199; C2/C3/C5 dispositioned out of operator scope). Re-running cold reads on the same hot path would mostly rediscover the same dispositions. The "remaining 🟢 catalog items" framing in S205's handoff was aspirational — the original 20-row catalog was scratchpad-only, never persisted. Real fresh endurance bugs need a real long meeting, not another doc read.
+
+**Apple Dev cert still in flight from S198** — no movement, still gates 14.20.5 only.
+
+**Exact next step (session 207):** push `51b69f3` to `origin/main`. Then either Pass 7 dep pinning audit (natural follow-up — today's orphan removal + S205's openai/anthropic deletion already trimmed pyproject.toml; Pass 7 would walk the full dep tree for tight pins + transitive surprise), Pass 8 runbook draft (one-page "what to do when it breaks" — OAuth re-auth, Google session expiry, Screen Recording prompt, common error modes; the dispositioned C3/C4 items already feed into it), or Pass 1 install dry-run (highest leverage per audit doc but needs a fresh-Mac environment to truly exercise; could do a static read of `install.sh` + the install paths now and defer the live dry-run). `/ultrareview` + `/security-review` (Passes 5+6) remain gated on slip captions per memory.
+
+**Open questions / blockers:**
+- **Apple Dev cert** still in flight from S198. Blocks 14.20.5 only.
+- **API key rotation pending** from S205 second-pass — user reminded to revoke ANTHROPIC + OPENAI keys at console; not blocking.
+- **`pre-launch-audit.md` revisit/wontfix log** has the install_preflight + readiness orphan entry stale — closeable by a doc-only sweep next session.
+
+---
+
+## Prior Status (preserved)
+
+**Session 205 second pass (May 7, 2026) — five live-slip reliability fixes + side-channel meeting-chat heartbeat + dep & .env cleanup. All live-verified.** Parallel to the earlier S205 endurance-audit session, this pass surfaced and fixed bugs from a real slip-mode live meeting. **Branch was 8 commits ahead of `origin/main`** at end-session; S206 pushed all of them. 20/20 tests green throughout, including a new `tests/test_heartbeat.py` (7 tests).
 
 **Five live-driven fixes shipped this session (working tree, ready to commit):**
 
@@ -51,10 +74,6 @@
 - **Apple Dev cert** still in flight from S198. Blocks 14.20.5 only.
 - **install_preflight + readiness orphans** product call — see open carryovers in prior status.
 - **API key rotation pending** — user reminded to revoke ANTHROPIC + OPENAI keys at console; not blocking.
-
----
-
-## Prior Status (preserved)
 
 **Session 205 first pass (May 7, 2026, parallel session) — endurance audit continuation (A3 + C1 fixed, C2/C3/C5 dispositioned), Tier 3 audit doc reconciled, two queued small cleanups landed.** Four atomic-per-axis commits this session: `58adf88` (Tier 3 audit doc reconciliation), `3d5cc1d` (A3 + C1 endurance fixes + CHAINED TURNS prompt rule + roadmap deferred entry), `49ce78e` (`llm.py` dead `wrap_spoken`/`SAFETY_RULES` chain purge), `e827677` (`google_signin.py` chrome_path dedup via `chrome_preflight.CHROME_PATH`). 19/19 tests green throughout. The CHAINED TURNS rule that landed in `3d5cc1d` was REVERTED by this second pass in favor of the side-channel heartbeat — see Current Status. Apple Dev cert still in flight from S198, no movement.
 
