@@ -19,6 +19,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -58,6 +59,10 @@ class MeetingRecord:
         self.slug = slug
         self._lock = threading.Lock()
         self._memory: list[dict] = []
+        # In-memory chat tail — serves tail_chat() without re-reading the
+        # JSONL on every LLM turn. Captions and meta entries are NOT mirrored
+        # here; that's deliberate, see tail_chat() docstring.
+        self._chat_tail: deque[dict] = deque(maxlen=200)
         if slug is None:
             self.path = None
             log.info("MeetingRecord opened in-memory (no slug)")
@@ -120,6 +125,8 @@ class MeetingRecord:
                 line = json.dumps(entry, ensure_ascii=False)
                 with self.path.open("a", encoding="utf-8") as f:
                     f.write(line + "\n")
+            if kind == "chat":
+                self._chat_tail.append(entry)
         return entry
 
     def tail(self, n: int) -> list[dict]:
@@ -155,3 +162,18 @@ class MeetingRecord:
                 start_idx = i + 1
                 break
         return parsed[start_idx:][-n:]
+
+    def tail_chat(self, n: int) -> list[dict]:
+        """Return the last n chat entries, oldest first. In-memory; no disk read.
+
+        The hot path for LLM context: every chat turn calls this. Backed by
+        a deque populated in append(), so it's O(n) with no I/O — the JSONL
+        on disk can grow to MBs over a long meeting without affecting per-turn
+        latency. Captions and other kinds are not mirrored here; consumers
+        that want them should use tail() (file-backed, generic) or query the
+        bundled transcript MCP server.
+        """
+        if n <= 0:
+            return []
+        with self._lock:
+            return list(self._chat_tail)[-n:]

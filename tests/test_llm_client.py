@@ -83,7 +83,11 @@ def test_ask_no_tools_calls_provider_once():
 # ---------------------------------------------------------------------------
 
 def test_tail_messages_shape():
-    """Agent sender → assistant; user → 'first: text'; caption → <spoken> block."""
+    """Agent sender → assistant; user chat → 'first: text'; captions dropped.
+
+    Captions reach inner-claude via the bundled transcript MCP server, not
+    through the prompt tail. The 40-slot context budget goes 100% to chat.
+    """
     client, _, record = make_client(ProviderResponse(text=""))
     agent = config.AGENT_NAME
     record.append("Alice Smith", "hello")
@@ -104,15 +108,17 @@ def test_tail_messages_shape():
     assert alice_msgs[0]["content"] == "Alice: hello"
     assert alice_msgs[1]["content"] == "Alice: and another"
 
-    # Caption wrapped in <spoken> block
-    bob_caption = [m for m in msgs if '<spoken speaker="Bob">' in m["content"]]
-    assert len(bob_caption) == 1
-    assert bob_caption[0]["content"].endswith("</spoken>")
+    # Captions are skipped entirely — no <spoken> block reaches the prompt
+    spoken_msgs = [m for m in msgs if "<spoken" in m.get("content", "")]
+    assert len(spoken_msgs) == 0
 
-    # Bob's chat message renders normally
+    # Bob's chat message still renders normally
     bob_chat = [m for m in msgs if m["role"] == "user"
                 and m["content"].startswith("Bob: direct msg")]
     assert len(bob_chat) == 1
+
+    # Total: 2 alice chat + 1 agent + 1 bob chat = 4. Caption is dropped.
+    assert len(msgs) == 4
     print("PASS  test_tail_messages_shape")
 
 

@@ -84,23 +84,28 @@ class LLMClient:
                 log.warning(f"LLM: provider rejected meeting record path: {e}")
 
     def _tail_messages(self) -> list[dict]:
-        """Build neutral-shape messages from the meeting record tail."""
-        entries = self._record.tail(config.HISTORY_MESSAGES)
+        """Build neutral-shape messages from the meeting record tail.
+
+        Chat-only. Captions are accessible to inner-claude on demand via
+        the bundled transcript MCP server, so they don't go in the prompt.
+        Chat carries a UI continuity expectation captions don't — users
+        assume the bot saw earlier chat messages, but won't assume it heard
+        ambient room talk unless they reference it explicitly.
+
+        Served from MeetingRecord's in-memory chat deque, not the JSONL —
+        so an hour-long meeting with thousands of caption lines on disk
+        doesn't pay any per-turn read/parse cost.
+        """
+        entries = self._record.tail_chat(config.HISTORY_MESSAGES)
         agent = (config.AGENT_NAME or "").lower()
         messages: list[dict] = []
         for e in entries:
-            kind = e.get("kind", "chat")
-            if kind not in ("chat", "caption"):
-                continue
             sender = (e.get("sender") or "").strip()
             text = e.get("text", "")
             if sender.lower() == agent:
                 messages.append({"role": "assistant", "content": text})
                 continue
             first = sender.split()[0] if sender else ""
-            if kind == "caption":
-                messages.append({"role": "user", "content": wrap_spoken(first, text)})
-                continue
             content = f"{first}: {text}" if first else text
             messages.append({"role": "user", "content": content})
         return messages
