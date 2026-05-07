@@ -1,19 +1,17 @@
 # ── Cross-platform dependencies (Phase 14.2: pinned for reproducible installs) ─
 
 python-dotenv==1.2.2   # loads API keys from the .env file into the app
-openai==2.29.0         # GPT-4.1-mini for LLM responses and completeness checks
-anthropic==0.94.0      # Claude (Sonnet/Opus) as an alternate LLM backend
+openai==2.29.0         # OpenAI SDK — kept pending second-provider product call
+anthropic==0.94.0      # Anthropic SDK — kept pending second-provider product call
 playwright==1.58.0     # controls headless/headed Chrome for joining Google Meet
-mcp==1.27.0            # Model Context Protocol client for tool-use integration
-pyyaml==6.0.3          # plain YAML reads/writes; ruamel.yaml is for round-trip work
-rich==14.3.3           # TUI used by `operator setup` wizard
-readchar==4.2.2        # cross-platform key reads for the wizard's arrow-key pickers
+mcp==1.27.0            # Model Context Protocol — used by bundled transcript MCP server
+pyyaml==6.0.3          # YAML — used by tests; harmless at runtime
+rich==14.3.3           # terminal UI — used by google_signin's prompts and status output
 
 # ── Audio pipeline (Phase 14.20.4) ────────────────────────────────────────────
 # Local Whisper STT for slip mode. Mac-only at runtime; Linux dial doesn't import.
 mlx-whisper==0.4.3
 numpy==2.4.3
-soundfile==0.13.1
 
 # ── Security floors for transitive deps (pip-audit, session 138) ──────────────
 # Left as `>=` (not `==`) so future CVE patches land on `pip install -U` without

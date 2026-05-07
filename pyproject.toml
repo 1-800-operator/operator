@@ -32,15 +32,12 @@ dependencies = [
     "anthropic==0.94.0",
     "playwright==1.58.0",
     "mcp==1.27.0",
-    "ruamel.yaml>=0.18.0",
     "pyyaml==6.0.3",
     "rich==14.3.3",
-    "readchar==4.2.2",
     # Audio pipeline (Phase 14.20.4) — slip mode's local STT path. Mac-only at
     # runtime (mlx-whisper requires Apple Silicon); Linux dial doesn't import.
     "mlx-whisper==0.4.3",
     "numpy==2.4.3",
-    "soundfile==0.13.1",
     # Security floors for transitive deps (pip-audit, session 138) — left as
     # `>=` so future CVE patches land on `pip install -U` without edits here.
     "cryptography>=46.0.7",    # via mcp → pyjwt[crypto]
