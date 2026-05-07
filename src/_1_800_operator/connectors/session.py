@@ -9,11 +9,33 @@ including --force takeover), and on-failure debug artifact dumps.
 import json
 import logging
 import os
+import re
 import threading
+from urllib.parse import urlparse
 
 from _1_800_operator import config
 
 log = logging.getLogger(__name__)
+
+# Meet room codes look like `abc-defg-hij` — three lowercase letter groups
+# separated by hyphens. Used to distinguish a real meeting URL from the
+# `/new` interstitial (which may carry query strings like `?authuser=0&hs=178`).
+_MEET_ROOM_RE = re.compile(r"^/[a-z]{3,}-[a-z]{3,}-[a-z]{3,}/?$")
+
+
+def _is_real_meet_room(url: str) -> bool:
+    """True iff `url` is a meet.google.com room URL like /abc-defg-hij.
+
+    Rejects /new, /landing, /lookup, missing path, and non-meet hosts.
+    Shared by macos_adapter (tab-discovery) and attach_adapter (URL preflight).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if "meet.google.com" not in (parsed.netloc or ""):
+        return False
+    return bool(_MEET_ROOM_RE.match(parsed.path or ""))
 
 
 class JoinStatus:

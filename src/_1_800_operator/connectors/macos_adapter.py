@@ -6,28 +6,11 @@ Wraps Playwright/Chrome meeting join into the MeetingConnector interface.
 import os
 import logging
 import queue
-import re
 import threading
 import time
-from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 from _1_800_operator import config
-
-# Meet room codes look like `abc-defg-hij` — three lowercase letter groups
-# separated by hyphens. Used to distinguish a real meeting URL from the
-# `/new` interstitial (which may carry query strings like `?authuser=0&hs=178`).
-_MEET_ROOM_RE = re.compile(r"^/[a-z]{3,}-[a-z]{3,}-[a-z]{3,}/?$")
-
-
-def _is_real_meet_room(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return False
-    if "meet.google.com" not in (parsed.netloc or ""):
-        return False
-    return bool(_MEET_ROOM_RE.match(parsed.path or ""))
 
 from .base import MeetingConnector
 from .captions_js import CAPTION_OBSERVER_JS, enable_captions, filter_caption
@@ -38,7 +21,7 @@ from .chat_dom_js import (
     OBSERVER_ATTACHED_CHECK_JS,
     SNAPSHOT_MESSAGE_IDS_JS,
 )
-from .session import JoinStatus, detect_page_state, validate_auth_state, inject_cookies, save_debug, _chrome_lock_is_live, _chrome_kill_and_clear, _write_operator_pid
+from .session import JoinStatus, detect_page_state, validate_auth_state, inject_cookies, save_debug, _chrome_lock_is_live, _chrome_kill_and_clear, _write_operator_pid, _is_real_meet_room
 
 log = logging.getLogger(__name__)
 

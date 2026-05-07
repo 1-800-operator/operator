@@ -64,12 +64,7 @@ from .chat_dom_js import (
     OBSERVER_ATTACHED_CHECK_JS,
     SNAPSHOT_MESSAGE_IDS_JS,
 )
-from .session import JoinStatus, save_debug
-# Reuse the strict Meet-room URL check from macos_adapter (matches the
-# `abc-defg-hij` room-code pattern, rejects /landing, /lookup, /new, etc).
-# Cross-adapter import of a private helper is a temporary smell — if a
-# third adapter ever needs this, promote _is_real_meet_room to session.py.
-from .macos_adapter import _is_real_meet_room
+from .session import JoinStatus, save_debug, _is_real_meet_room
 
 
 log = logging.getLogger(__name__)
@@ -233,7 +228,11 @@ def _cdp_belongs_to_slip() -> bool:
                 ["ps", "-o", "command=", "-p", str(pid)],
                 capture_output=True, text=True, timeout=2,
             )
-            if SLIP_PROFILE_DIR in ps_r.stdout:
+            # Match the exact `--user-data-dir=PATH` flag we pass in
+            # _launch_slip_chrome — a plain `PATH in stdout` substring match
+            # would false-positive if the user has a sibling profile dir
+            # (e.g. ~/.operator/slip_profile_backup) whose path contains ours.
+            if f"--user-data-dir={SLIP_PROFILE_DIR}" in ps_r.stdout:
                 return True
         return False
     except Exception as e:
@@ -284,7 +283,11 @@ def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
             f"Could not find Google Chrome at {CHROME_BINARY_MACOS!r}. "
             "Install Chrome from https://www.google.com/chrome/ and re-run."
         )
+    # mode= on makedirs only fires at creation; chmod is the belt for the
+    # case where the dir already exists with looser perms. The slip profile
+    # holds Google session cookies — owner-only matters on shared hosts.
     os.makedirs(SLIP_PROFILE_DIR, exist_ok=True, mode=0o700)
+    os.chmod(SLIP_PROFILE_DIR, 0o700)
     args = [
         "open", "-na", "Google Chrome", "--args",
         f"--remote-debugging-port={CDP_PORT}",
@@ -669,10 +672,7 @@ class AttachAdapter(MeetingConnector):
                 os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
                 _shot = os.path.join(config.DEBUG_DIR, "chat_btn_not_found.png")
                 page.screenshot(path=_shot)
-                try:
-                    os.chmod(_shot, 0o600)
-                except OSError:
-                    pass
+                os.chmod(_shot, 0o600)
                 log.debug(f"AttachAdapter: saved debug screenshot to {_shot}")
             except Exception:
                 pass
@@ -812,11 +812,14 @@ class AttachAdapter(MeetingConnector):
         # in 14.20.4.
         try:
             from _1_800_operator.pipeline._disclaimed_spawn import spawn_disclaimed
-            stderr_sink = open("/tmp/operator.log", "ab")
-            self._audio_helper_proc = spawn_disclaimed(
-                [str(helper)],
-                stderr_fd=stderr_sink.fileno(),
-            )
+            # spawn_disclaimed dup2's our fd into the child; close the parent
+            # handle right after so we don't keep an extra fd to the log
+            # open for the lifetime of the connector.
+            with open("/tmp/operator.log", "ab") as stderr_sink:
+                self._audio_helper_proc = spawn_disclaimed(
+                    [str(helper)],
+                    stderr_fd=stderr_sink.fileno(),
+                )
         except OSError as e:
             log.warning(f"AttachAdapter: spawning {helper} failed ({e}) — chat-only mode")
             self._audio_processors.clear()
