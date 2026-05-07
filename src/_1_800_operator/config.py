@@ -42,43 +42,17 @@ CAPTIONS_ENABLED = True
 
 # ── INTERNAL TUNING ───────────────────────────────────────────────────────
 # Tuned-once internals — edit here to change runtime behavior globally.
-#
-# Tool-call timeout precedence (highest wins):
-#   1. DEFAULT_TOOL_TIMEOUTS[<server_name>] — ship-level default per MCP,
-#      sized to that server's typical worst-case task.
-#   2. TOOL_TIMEOUT_SECONDS — global fallback for any server whose name
-#      isn't in the map.
 ALONE_EXIT_GRACE_SECONDS    = 60     # once we've seen a peer and they leave, exit after this many seconds
 HOLD_DURATION_SECONDS       = 2.0    # min gap between "Hold for <bot>..." and the LLM-generated intro, so users register the "connecting you now" beat even when intro generation finishes fast
 LOBBY_WAIT_SECONDS          = 600    # max wait in Meet waiting room for host to admit us
 CAPTION_SILENCE_SECONDS     = 0.7    # dead-air gap before a buffered caption chunk commits to history
 MAX_TOKENS                  = 2000   # runaway guard on LLM output; "be brief" system-prompt does the real shaping
-TOOL_RESULT_MAX_CHARS       = 50000  # truncate a single tool result above this length before feeding to the LLM
-TOOL_TIMEOUT_SECONDS        = 60     # global per-tool-call ceiling; per-server default beats this
-LLM_STUCK_THRESHOLD_SECONDS = 45     # streaming-LLM watchdog: post a one-shot "taking longer than usual" notice if no token has arrived by this point
 
 BROWSER_PROFILE_DIR = str(Path.home() / ".operator" / "browser_profile")     # persistent Chrome profile (cookies, Google login)
 AUTH_STATE_FILE     = str(Path.home() / ".operator" / "auth_state.json")     # Playwright storageState JSON for quick re-auth
 GOOGLE_ACCOUNT_FILE = str(Path.home() / ".operator" / "google_account.json") # cached {"email": "..."} for the doctor's "✓ signed in as X" detect
 ENV_FILE            = str(Path.home() / ".operator" / ".env")                # shared .env for API keys
 DEBUG_DIR           = str(Path.home() / ".operator" / "debug")               # screenshots + HTML dumps from save_debug() and adapter failure paths
-
-# Ship-level default per-server timeouts. Generous enough to cover real work,
-# tight enough that a truly hung call fails in bounded time.
-DEFAULT_TOOL_TIMEOUTS = {
-    "claude-code": 600,   # multi-minute coding delegations via `claude -p`
-    "playwright":  300,   # browser automation runs
-    "figma":        90,   # design-asset fetches
-    "github":       60,   # large repo/code searches
-    "salesforce":   60,   # heavier org queries
-    "notion":       45,   # page/database fetches
-    "linear":       30,
-    "sentry":       30,
-    "slack":        30,
-    "calendar":     30,
-    "gmail":        30,
-    "drive":        30,
-}
 
 
 def relativize_home(p):
