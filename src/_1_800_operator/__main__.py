@@ -285,15 +285,10 @@ def _run_slip(name, rest):
     skips the meet.new auto-open (slip always takes a URL), and drops
     the user-browser auto-open (slip Chrome IS where the meeting opens).
     Track A only — claude owns its MCPs; no MCPClient setup.
-    """
-    if name != "claude":
-        print(
-            f"slip mode is claude-only in v0.0.1; got {name!r}. "
-            f"Use `operator dial {name}` or `operator deploy {name} <url>` instead.",
-            file=sys.stderr,
-        )
-        return 2
 
+    Caller must have already filtered for `name == "claude"` (the main
+    dispatcher does this at argv parse time).
+    """
     url = None
     for arg in rest:
         if arg.startswith("-"):
@@ -348,8 +343,6 @@ def _run_slip(name, rest):
     )
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
     log = logging.getLogger("operator")
 
     from _1_800_operator.bridges import claude as claude_bridge
@@ -506,8 +499,6 @@ def _run_macos(meeting_url=None, force=False):
     # Detailed diagnostics live in /tmp/operator.log only.
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
 
     log = logging.getLogger("operator")
 
@@ -638,8 +629,6 @@ def _run_linux(meeting_url, force=False):
     )
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
     log = logging.getLogger("operator")
 
     if not meeting_url:
