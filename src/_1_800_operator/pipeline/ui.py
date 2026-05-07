@@ -26,8 +26,6 @@ _COLORS = {
     "red":   "\033[31m",
     "green": "\033[32m",
     "yellow":"\033[33m",
-    "blue":  "\033[34m",
-    "cyan":  "\033[36m",
 }
 
 
@@ -56,13 +54,3 @@ def err(msg: str, hint_log: bool = True) -> None:
     """Error line. Appends the log-file pointer by default."""
     suffix = f"  {_c('dim', '— see /tmp/operator.log')}" if hint_log else ""
     print(f"{_c('red', '✗')} {msg}{suffix}", file=sys.stderr, flush=True)
-
-
-def chat_in(sender: str, text: str) -> None:
-    """Inbound chat message — rendered as 'sender: text'."""
-    print(f"{_c('cyan', '→')} {_c('cyan', sender)}: {text}", file=sys.stderr, flush=True)
-
-
-def chat_out(text: str) -> None:
-    """Outbound reply from the bot."""
-    print(f"{_c('blue', '←')} {text}", file=sys.stderr, flush=True)
