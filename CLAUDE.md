@@ -4,40 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-Operator is a chat-based AI meeting participant. It joins Google Meet, opens the chat panel, watches for messages addressed to it (via the `@operator` trigger phrase, or any message in a 1-on-1), queries an LLM with tool access via MCP (Linear, GitHub), and posts the reply back into meeting chat.
+Operator is a chat-based AI meeting participant. It joins (or attaches to) Google Meet, opens the chat panel, watches for messages addressed to it (via the `@claude` trigger phrase, or any message in a 1-on-1), forwards the user message to a long-lived `claude -p` subprocess that owns its own tool loop, and posts the streamed reply back into meeting chat. v1 ships claude as the only agent; the inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy.
 
 ## Commands
 
 ### Run
 
+Three meeting modes:
+
 ```bash
-operator dial claude https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
-operator dial claude                                       # auto-open meet.new
-operator                                                   # usage + agent list
+operator slip   claude <meet-url>     # CDP-attach to a dedicated slip Chrome ("decide before joining")
+operator dial   claude [meet-url]     # join as a separate participant (auto-opens meet.new if no URL)
+operator deploy claude <meet-url>     # join as a separate participant into an existing meeting (URL required)
 ```
 
-`dial` is the canonical subcommand (1-800-Operator phone metaphor). `run` is
-kept as a hidden alias for muscle memory + external links — same dispatch,
-not advertised in `--help`; safe to drop on a future major bump.
+Two utility commands:
 
-Replace `claude` with any bot under `~/.operator/agents/`. v1 ships two
-presets — `claude` and `codex` (both inherit MCPs/skills from the
-respective CLI) — plus a `custom` from-scratch path. Every dial selects an
-agent explicitly; there is no ambient root `config.yaml`. The `operator`
-wrapper handles venv activation; with the venv active you can also call
-`python -m _1_800_operator dial <name> [url]` directly.
+```bash
+operator login  claude                # open Chrome and sign into Google for dial/deploy
+operator doctor                       # diagnostic: claude CLI + auth, Chrome, Playwright, git, auth_state.json
+```
 
-The `claude` and `codex` presets each hard-depend on their CLI being
-installed and logged in. `operator dial claude` exits 2 with a clear stderr message if
-`claude` isn't on PATH or `claude auth status --json` reports not logged in.
-On first run it auto-imports the user's Claude Code MCP servers (both from
-`~/.claude.json#mcpServers` and `claude mcp list` — the latter is how
-claude.ai-hosted connectors like Gmail/Drive/Linear reach us) and skills
-(`~/.claude/skills/`). Hosted MCPs get auto-wrapped via `mcp-remote@0.1.38`
-(same bridge as bundled Linear/Sentry) and auth flows through the existing
-15.7.3 `operator auth <name>` path. Idempotent — marker
-`_claude_import_done: true` in `~/.operator/agents/claude/config.yaml`
-short-circuits re-import on subsequent boots.
+Bare `operator` prints usage. `dial` is canonical (1-800-Operator phone metaphor); `run` is kept as a hidden alias for muscle memory + external links — same dispatch, not advertised in `--help`.
+
+The `claude` "agent" is hardcoded into `bridges/claude.py` (trigger phrase, slip reply prefix). There is no per-bot YAML, no `~/.operator/agents/`, and no setup wizard — all of that machinery was deleted in Phase 14.19.7. v1 ships claude only; codex / gemini bridges would be sibling modules under `bridges/` if added.
+
+`operator dial claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The `--yolo` flag (dial/deploy/slip) appends `--dangerously-skip-permissions` to the inner-claude spawn so per-tool prompts are skipped.
 
 ### Logs & Diagnostics
 
@@ -53,18 +45,15 @@ Tests are standalone scripts — no pytest runner. Run them individually:
 
 ```bash
 source venv/bin/activate
-python tests/test_chat_hardening.py         # history cap, trigger gating, sender filter
-python tests/test_913_tool_history_collapse.py
-python tests/test_915_reconnection.py       # disconnect + grace-period exit
-python tests/test_guardrails.py             # binary/null-byte blocking
-python tests/test_claude_cli_provider.py    # claude_cli subprocess + permission bridge
-python tests/test_permission_chat_handler.py # PreToolUse → chat round-trip
-python tests/test_mcp_shutdown.py
-python tests/test_llm_client.py             # LLMClient ask/tool_call/streaming
-python tests/test_transcript_mcp.py         # captions → MCP search
+python tests/test_chat_hardening.py            # history cap, trigger gating, sender filter
+python tests/test_915_reconnection.py          # disconnect + grace-period exit
+python tests/test_claude_cli_provider.py       # claude_cli subprocess + permission bridge
+python tests/test_permission_chat_handler.py   # PreToolUse → chat round-trip + recent-yes auto-approve
+python tests/test_llm_client.py                # LLMClient ask/streaming
+python tests/test_transcript_mcp.py            # captions → MCP search
 ```
 
-Or run all 21 at once: `for f in tests/test_*.py; do python "$f" || echo "FAIL: $f"; done`
+Or run all 20 at once: `for f in tests/test_*.py; do python "$f" || echo "FAIL: $f"; done`
 
 ## Architecture
 
@@ -72,70 +61,84 @@ Or run all 21 at once: `for f in tests/test_*.py; do python "$f" || echo "FAIL: 
 
 ```
 Entry
-  __main__.py                 — CLI entry; preflights, builds connector + LLM + MCP, runs ChatRunner
+  __main__.py                 — CLI dispatch (slip/dial/deploy/login/doctor); preflights;
+                                 builds connector + LLM, runs ChatRunner
 
 Connectors (platform-specific — implement MeetingConnector)
   connectors/base.py          — abstract: join(), send_chat(), read_chat(),
-                                 get_participant_count(), is_connected(), leave()
-  connectors/macos_adapter.py — Playwright + persistent Chrome profile
-  connectors/linux_adapter.py — Playwright + headless Chromium
-  connectors/session.py       — JoinStatus state + browser session bookkeeping
+                                 get_participant_count/names(), is_connected(),
+                                 set_caption_callback(), leave()
+  connectors/macos_adapter.py — dial mode: Playwright + persistent Chrome profile
+  connectors/attach_adapter.py — slip mode: CDP-attach to dedicated slip Chrome
+  connectors/linux_adapter.py — Linux dial: Playwright + headless Chromium
+  connectors/session.py       — JoinStatus state, single-instance guard, save_debug
+  connectors/{captions,chat_dom}_js.py — Meet DOM payloads injected via page.evaluate
 
 Pipeline (platform-agnostic)
   pipeline/chat_runner.py     — polling loop; trigger detection, 1-on-1 mode,
-                                 tool-confirmation flow, participant-based auto-leave
+                                 PreToolUse permission wiring, participant-based auto-leave
   pipeline/meeting_record.py  — append-only JSONL per meeting at ~/.operator/history/<slug>.jsonl;
-                                 single source of truth for chat history (meta header + tail(n))
-  pipeline/llm.py             — LLMClient: builds prompt from MeetingRecord tail + in-memory
-                                 scratchpad (tool calls/results), MCP status/hints injection
-  pipeline/providers/         — neutral LLMProvider interface + OpenAI + Anthropic backends
-  pipeline/guardrails.py      — validate tool results (binary/null-byte rejection)
+                                 single source of truth for chat + caption history (meta header + tail(n))
+  pipeline/llm.py             — LLMClient: feeds latest user_text + meeting-record tail to provider
+  pipeline/providers/         — LLMProvider abstract + ClaudeCLIProvider (the only backend in v1)
+  pipeline/permission_chat_handler.py — PreToolUse decision via meeting-chat round-trip
+  pipeline/permission_bridge.py        — hook subprocess that pipes one PreToolUse event to the parent
+  pipeline/transcript.py      — caption silence-window finalizer (dial mode)
+  pipeline/audio.py           — Whisper transcription pipeline (slip mode, audio-helper output)
+
+Bridge + bundled MCP
+  bridges/claude.py           — claude-specific constants (trigger phrase, slip reply prefix)
+  mcp_servers/transcript_server.py — bundled MCP exposing the meeting JSONL as
+                                 search_captions / list_captions / list_speakers
 ```
 
 ### Key Data Flow
 
-1. `MeetingConnector.join()` launches Chrome, signs in via saved session, enters the meeting, opens the chat panel and installs a MutationObserver over the chat DOM.
-2. `ChatRunner._loop()` polls `read_chat()` every 500 ms, drops already-seen/own messages, and checks for the trigger phrase (or treats any message as addressed in a 1-on-1).
-3. `LLMClient.ask()` reads the tail of the meeting's JSONL via `MeetingRecord.tail(n)` and sends those messages — plus the in-memory tool-loop scratchpad — to the configured provider with MCP tool schemas attached.
-4. If the model returns a `tool_call`, `ChatRunner` either auto-executes (read-only tools in the allowlist) or requests user confirmation in chat. Tool result is fed back via `send_tool_result`; the model summarizes or chains.
-5. The final text reply goes back through `connector.send_chat()`.
+1. `MeetingConnector.join()` launches (dial) or CDP-attaches to (slip) Chrome, signs in via saved Google session, enters the meeting, opens the chat panel, and installs the chat-message MutationObserver (and the captions observer in dial mode).
+2. `ChatRunner._loop()` polls `read_chat()` every 500 ms, drops already-seen / own messages, and checks for the `@claude` trigger phrase (or treats any message as addressed in 1-on-1 mode).
+3. `LLMClient.ask()` reads the meeting JSONL tail via `MeetingRecord.tail(n)` and sends the latest user turn to `ClaudeCLIProvider`. The inner-claude subprocess owns its full tool loop, system prompt, and context — operator does not see the individual tool calls.
+4. When inner-claude wants to run a tool, its PreToolUse hook spawns `permission_bridge.py`, which pipes the tool-use payload to operator's `PermissionChatHandler`. Read tools auto-approve; everything else either matches the recent-yes auto-approve window (Phase 14.19.8) or blocks awaiting a chat reply ("yes/ok/sure" → allow, anything else → deny with the user's text as the reason).
+5. The streamed reply text flows back through `connector.send_chat()` paragraph-by-paragraph; the slip-mode adapter prefixes outgoing chat with `[🤖 Claude] ` so the room can distinguish bot replies from the user's own messages.
 
 ### Configuration
 
-Every dial names an agent explicitly (`operator dial <name> [url]`). Config loading is driven by the `OPERATOR_BOT` env var — the CLI sets this before importing `config`, which then reads `~/.operator/agents/<name>/config.yaml` into module-level constants. There is no root `config.yaml`; there is one config file per bot under `~/.operator/agents/`. Bundled preset definitions live in the package at `src/_1_800_operator/agents/{claude,codex}/` and are copied into the user dir on first build. User-facing blocks (top-to-bottom ordering mirrors the setup wizard's four-layer view of a bot):
-- `agent` — `name`, `trigger_phrase`, `first_contact_hint`, `tagline`, `intro_on_join`
-- `llm` — `provider` (`openai` | `anthropic`), `model`, `history_messages` (tail size replayed from the meeting record)
-- `transcript` — `captions_enabled`
-- `mcp_servers` (wizard: **Tools**) — per-server `command`, `args`, `env`, `hints`, `read_tools`, `confirm_tools`, and an optional `tool_timeout_seconds` override for slow servers like `claude-code`
-- `skills` (wizard: **Playbooks**) — `enabled: [names]` names the skills this agent activates. They resolve against the shared library at `~/.operator/skills/<name>/SKILL.md` (seeded from the bundled package on first run, additive; user edits never overwritten) plus `external_paths: [...]` for per-agent opt-in sources. **External paths must be tilde-prefixed (`~/...`) or absolute (`/...`)** — relative paths are CWD-dependent and WARN + skip at load time. The claude agent ships with `external_paths: [~/.claude/skills]` so Claude Code skills flow in live (no copy; edits propagate on next meeting join). `progressive_disclosure` controls whether the LLM gets a menu (lazy `load_skill` tool) or sees every skill body up-front. Individual SKILL.md files may declare `mcp-required: [server, ...]` in frontmatter; the wizard locks those MCP toggles on so the skill can't be chosen without the server it needs. If the LLM calls a tool from a disabled server anyway, the runtime raises a granular "server disabled" error (`pipeline/mcp_client.disabled_server_for_tool`) that the bot relays to the user in chat. Legacy `paths: [...]` shape is still accepted on load — `config.py` translates in-memory and logs a one-line nudge to re-run setup.
-- `system_prompt` — voice + always-on rules in one free-form text block. Authored via wizard step 4 (or hand-edit). Composed onto the framework's system prompt to produce `SYSTEM_PROMPT`.
+There are no user-editable config files. All runtime knobs live in code:
 
-The wizard's instructional copy frames the field as two concerns (voice vs. always-on rules) for the author's mental model, but the schema and runtime treat it as one string.
+- `bridges/claude.py` — claude-specific constants. `TRIGGER_PHRASE = "@claude"`, `REPLY_PREFIX_SLIP = "[🤖 Claude] "`.
+- `config.py` — shared runtime tunables in the `INTERNAL TUNING` block (`MAX_TOKENS`, `LOBBY_WAIT_SECONDS`, `CAPTION_SILENCE_SECONDS`, `ALONE_EXIT_GRACE_SECONDS`, `HOLD_DURATION_SECONDS`), plus the canonical user-data paths (`BROWSER_PROFILE_DIR`, `AUTH_STATE_FILE`, `GOOGLE_ACCOUNT_FILE`, `ENV_FILE`, `DEBUG_DIR`). Edit here to change runtime behavior globally.
+- `~/.operator/.env` — secrets file. Loaded at `config.py` import via `load_dotenv(config.ENV_FILE)`. The user populates it themselves; nothing in operator writes to it post-14.19.7.
 
-Tuned-once internals (LLM max_tokens, tool-call timeout/heartbeat, tool-result truncation, Meet lobby wait, caption silence gap, browser profile path, `ALONE_EXIT_GRACE_SECONDS`) live in the `INTERNAL TUNING` block at the top of `config.py` — identical across bots, edit there to change globally.
+User-scoped state (never inside the repo):
 
-API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc.) live in a single `.env` at `~/.operator/.env`, shared across all bots. The wizard writes into that file; `config.py` loads from it via `load_dotenv(Path.home() / ".operator" / ".env")`. Debug dumps from `session.save_debug` and the adapters' failure paths land in `~/.operator/debug/`. Google-session artifacts (`~/.operator/browser_profile/`, `~/.operator/auth_state.json`) live next to them. A one-shot migration in `__main__.py:_migrate_legacy_user_artifacts` relocates any pre-Phase-14.5 copies (`.env`, `browser_profile/`, `auth_state.json`) that were stored at the repo root.
+- `~/.operator/browser_profile/` — persistent Chrome profile for dial/deploy (cookies, Google login).
+- `~/.operator/slip_profile/` — dedicated Chrome profile for slip mode (separate from main Chrome to dodge Chrome 121+ CDP restrictions).
+- `~/.operator/auth_state.json` — Playwright storageState; recovery seed for the Linux adapter.
+- `~/.operator/google_account.json` — `{"email": "..."}` cache for the doctor's "✓ signed in as X" detect.
+- `~/.operator/history/<slug>.jsonl` — append-only meeting record (chat + captions + meta).
+- `~/.operator/.current_meeting` — marker file written at meeting-join, deleted at leave; lets statically-registered MCPs find the active meeting JSONL.
+- `~/.operator/debug/` — screenshots + HTML dumps from `session.save_debug` and adapter failure paths.
+
+Inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy (`~/.claude.json` for stdio servers, `claude mcp list` for hosted connectors like Gmail/Drive/Linear, `~/.claude/skills/` for skills). Operator contributes one MCP — the bundled transcript server — by passing `--mcp-config` at spawn time; that server reads from `OPERATOR_MEETING_RECORD_PATH` (set per-meeting) or the `.current_meeting` marker file.
 
 ### Tool Confirmation
 
-`chat_runner.py` defines `READ_TOOLS` — a set of known read-only MCP tools that auto-execute without confirmation. Any tool not in that set prompts the user in chat before running. Per-server overrides (`confirm_tools`) in the bot's `~/.operator/agents/<name>/config.yaml` can force confirmation on specific tools.
+The `PermissionChatHandler` is wired to claude_cli via `set_permission_handler()`; claude's PreToolUse hook invokes `permission_bridge.py` for every tool_use. The handler:
 
-### Imported MCP Servers — cwd & Secrets Contract
+- **always_ask** glob list (passed at construction): force chat round-trip even for tools that would otherwise auto-approve. `always_ask` wins over `auto_approve`.
+- **auto_approve** glob list: silent allow. Read-side defaults wired in chat_runner: `ToolSearch`, `Read`, `Grep`, `Glob`, `LS`, `WebSearch`, plus glob patterns covering MCP read verbs (`*__get_*`, `*__list_*`, `*__search_*`, `*__find_*`, `*__read_*`, `*__whoami`).
+- **recent-yes auto-approve** (Phase 14.19.8): if the user's most recent chat message was an affirmation within `RECENT_YES_WINDOW_SECONDS = 30s`, the next gate auto-allows and marks the message ID consumed so chained tool calls don't reuse the same yes.
+- **Per-tool prompt**: authored by the inner-claude model in its pre-tool narration (steered by `claude_cli._PRE_TOOL_VOICE_RULE`) and posted to chat via the streaming paragraph path *before* the handler is invoked. Operator does not render templated cards — the natural-language question is the model's job.
 
-The `claude` agent re-imports MCPs from `~/.claude.json` and `claude mcp list` on every boot (via `_sync_claude_imports` in `__main__.py`). Two conventions imported servers must follow to spawn cleanly under operator:
-
-- **Absolute paths.** Operator spawns MCP subprocesses from the user's invocation cwd (or `$HOME` for the bundled transcript server). Relative `command` or `args` paths in `~/.claude.json` (e.g. `./mcp-server/index.js`) won't resolve. Use `~/...` (expanded) or `/abs/path/...` instead. Servers using internal `dotenv.config()` to load `./.env` from cwd will not find that file under operator — move secrets to `~/.operator/.env` and reference via `${VAR}` in the server's env block.
-- **Secrets in `~/.operator/.env`.** API keys and tokens belong in the shared `.env` file (loaded by `config.py:load_dotenv`), referenced as `${VAR}` in the MCP server's `env` block. Don't paste literal secrets into `~/.operator/agents/<name>/config.yaml` — the file is opened routinely via `operator edit` and is more likely to leak (screenshots, bug reports, accidental git-add) than `~/.claude.json` itself.
-
-Imported entries split field ownership between the source and the user. Re-imports overwrite `command`, `args`, `env`, `auth`, `auth_url`, `description` from `~/.claude.json`. They preserve `enabled`, `hints`, `read_tools`, `confirm_tools` so meeting-scope edits via `operator edit claude` survive each sync. Servers removed from `~/.claude.json` are dropped on the next sync.
+`--yolo` on the dial/deploy/slip CLI sets `OPERATOR_YOLO=1`, which appends `--dangerously-skip-permissions` to the inner-claude spawn AND flattens the auto_approve list to `["*"]` as belt-and-suspenders.
 
 ### Participant-based Auto-leave
 
-When the bot has seen at least one other participant and is then alone for `ALONE_EXIT_GRACE_SECONDS`, it leaves automatically. 1-on-1 mode (participant count ≤ `ONE_ON_ONE_THRESHOLD`) skips the trigger-phrase requirement.
+When the bot has seen at least one other participant and is then alone for `ALONE_EXIT_GRACE_SECONDS` (default 60s), it leaves automatically. 1-on-1 mode (participant count ≤ `ONE_ON_ONE_THRESHOLD = 2`) skips the `@claude` trigger-phrase requirement and treats every user message as addressed.
 
 ## Development Notes
 
-- `docs/agent-context.md` tracks current dev phase, hard-won debugging knowledge, and working context — read it before making structural changes.
+- `docs/agent-context.md` tracks the current dev phase, hard-won debugging knowledge, and working context — read it before making structural changes.
 - `docs/roadmap.md` has the phase checklist and strategic direction.
+- `docs/pre-launch-audit.md` tracks the four-lens audit pass currently underway across Tier 1 (live-meeting hot path), Tier 2 (supporting infrastructure), and Tier 3 (setup / cold path).
 - The voice pipeline was decoupled in session 93 (April 2026) and preserved on the `voice-preserved` branch. `main` is chat-only.
 - `~/.operator/browser_profile/` and `~/.operator/auth_state.json` hold logged-in Google session state. They are user-scoped, never inside the repo.
