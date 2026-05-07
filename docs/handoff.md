@@ -1,26 +1,33 @@
-# Session 204 handoff (2026-05-06) — 1-hour endurance audit kickoff + closed deferred llm.py call
+# Session 205 handoff (2026-05-07) — endurance audit A3+C1 + Tier 3 doc reconciliation + two small cleanups
 
-Started a new audit axis distinct from the pre-launch static-cleanup work: how the bot behaves over a 1-hour meeting (resource growth, time drift, stale handles, etc.). Produced a 20-row suspect catalog across five failure-mode buckets via grep-driven sweep. Diagnosed the three 🔴 candidates in detail. **One landed as commit `6b20483`:** the long-deferred `llm.py` product call (`docs/pre-launch-audit.md` line 161, carried since S201) is now resolved by a design refinement — chose option (b) "keep tail but chat-only" rather than the binary delete-vs-keep the audit doc framed. Captions are dropped from the prompt entirely (transcript MCP is the on-demand channel); chat stays in the prompt because people assume the bot saw what they typed. Also fixed the underlying full-file-read latency bug at the same time: `MeetingRecord` now has a `deque(maxlen=200)` chat tail populated by `append()`, served by new `tail_chat(n)` with no I/O; JSONL + `tail()` for generic queries unchanged. 19/19 tests green.
+Four atomic-per-axis commits this session, all on `main` (branch is now 7 commits ahead of `origin/main`). `58adf88` reconciled `docs/pre-launch-audit.md` against the S203 parallel-session work that closed Tier 3 without ever propagating checkmarks into the audit doc itself — all 32 cells across Tier 1/2/3 are now marked closed in the matrix and a populated revisit/wontfix log captures five concrete deferred items. `3d5cc1d` landed the two endurance-audit fixes from the S204 catalog: A3 swapped `claude_cli._stderr_buf` to `deque(maxlen=500)`, and C1 added a `_browser_alive` threading.Event flag in `macos_adapter` (distinct from `_browser_closed`) populated by a per-tick `page.is_closed()` probe + a reduced-from-30s-to-10s active health probe, so `is_connected()` now reflects real page health within ~10s instead of waiting up to 30s. Same commit added a CHAINED TURNS section to `_PRE_TOOL_VOICE_RULE` in claude_cli + a "self-correcting MCP-hint loop" deferred entry to roadmap.md. C2/C3/C5 dispositioned: C2/C3 out of operator scope (mcp-remote and inner-claude own subprocess + token lifecycles); C5 has two findings that stay deferred (no helper-restart-on-death, O(N²) byte-string concat) but no v1 fix needed. Two small cleanups landed: `49ce78e` purged the now-dead `wrap_spoken`/`SAFETY_RULES`/`_neutralize_close`/`_ZWSP` chain in llm.py post-S204's caption-out-of-prompt change, and `e827677` deduped google_signin.py's hardcoded chrome_path via the canonical `chrome_preflight.CHROME_PATH`. 19/19 tests green throughout.
 
-## Exact next step (session 205)
+## Three uncommitted user-authored fixes in the working tree
 
-**Pick one of three directions:**
+User asked me at end-session to leave these for them to commit separately:
 
-1. **Continue endurance audit** — start with A3 (`claude_cli._stderr_buf` is a daemon-thread `extend()` accumulator with no size cap; trivial deque swap, ~1 LOC), then read the remaining 🟡 items: C1 (CDP staleness — `macos_adapter.is_connected()` only checks an internal flag, doesn't probe real page health → bot zombies post-sleep/blip), C2 (MCP subprocess death detection over an hour), C3 (OAuth token mid-meeting expiry on hosted MCPs), C5 (audio helper hour-long behavior).
-2. **Standalone workflow passes** — install dry-run on a fresh Mac (`docs/pre-launch-audit.md` Pass 1, the #1 launch-day failure mode), dep pinning audit (Pass 7), runbook draft (Pass 8).
-3. **Close S203 phantom-feature product calls** — `install_preflight` + `readiness.preflight_mcp_readiness` orphans (~600 LOC of test coverage of unreachable code, plus a latent `from _1_800_operator.pipeline.auth import run_auth` ImportError landmine). Decision needed: add `operator setup` subcommand or delete the orphans.
+- **`attach_adapter.py`** — self-heal for CDP-reuse zombie Chrome. When a previous slip session detached cleanly and the user later closed the last slip window, on macOS Chrome stays alive in the menu bar with zero browser contexts. CDP socket is open, `_cdp_belongs_to_slip()` says yes, but Playwright's `connect_over_cdp` fails with "Browser context management is not supported." Fix tracks reuse-path with a local bool, evicts + relaunches + retries connect once on reuse-path failure only.
+- **`chat_runner.py`** — auto-leave when participant count drops to 0 (bot was booted from meeting). Previously only fired on count==1 after `_saw_others=True`; new branch covers count==0 regardless. Also adds `else: self._alone_since = None` reset for the lobby-wait case.
+- **`docs/agent-context.md`** — Hard-Won Knowledge entry at line 2232 documenting the zombie Chrome CDP issue. Preserved in this session's docs sweep.
+
+## Exact next step (session 206)
+
+User commits the three uncommitted live-session fixes above, then picks one of:
+
+1. **Standalone workflow passes** — Pass 1 install dry-run on a fresh Mac (the audit doc calls it "the #1 launch-day failure mode"), Pass 7 dep pinning audit, Pass 8 runbook draft (capture the OAuth re-auth + Google session at-next-join expiry papercuts).
+2. **install_preflight + readiness orphan product call** — decide whether to build `operator setup` + `operator auth` subcommands + `pipeline/auth.py` (wires the orphans into runtime), auto-invoke install preflight at top of dial/slip/login (silent when ready), document curl|sh as the only path + delete orphans + ~600 LOC of test coverage, or keep as scaffolding. The latent `from _1_800_operator.pipeline.auth import run_auth` ImportError landmine in `readiness.preflight_mcp_readiness` either vanishes (orphan deleted) or needs `pipeline/auth.py` written.
+3. **openai + anthropic Python deps** — gated on the second-provider scope question: is a second LLM provider in v1 scope?
 
 ## Open questions / blockers
 
 - **Apple Dev cert** still in flight from S198. Blocks 14.20.5 (productized .app + notarization) only.
-- **`openai` + `anthropic` Python deps** — paired with the resolved llm.py call in S203's narrative but actually independent. Still open: keep if a second provider is in v1 scope, drop otherwise.
-- **Two phantom-feature product calls** carried from S203: `install_preflight.run_install_preflight` (no `operator setup` subcommand exists today) and `readiness.preflight_mcp_readiness` orphan with ImportError landmine. Same shape as prior wizard-era cleanups.
-- **Heartbeat watchdog from S199 still has no tests.** Nice-to-have follow-up.
+- **`/ultrareview` + `/security-review`** remain deferred until slip captions ship (per `project_ultrareview_gated_on_slip_captions.md` memory). For interim security reads, suggest static tools (Bandit/Semgrep) or focused manual agent passes.
+- **No tests for the S199 heartbeat watchdog.** Nice-to-have; runtime path is exercised in production but not unit-tested.
 
 ## Don't forget
 
-- **A3 stderr buffer is a real candidate for memory growth in long meetings** but won't OOM a modern Mac in one hour. Cosmetic priority.
-- **C1 (CDP staleness) is the biggest endurance UX risk** — without it, the bot enters a silent zombie state after Mac sleep / network blips and the user has to kill + restart. Fix is detection-only (probe `page.is_closed()` + `context.browser.is_connected()`); reconnect-and-resume is a much bigger feature.
-- **`wrap_spoken` / `_neutralize_close` / `SAFETY_RULES` in `llm.py` are now dead in src/** post-`6b20483` (still tested in `test_wrap_spoken_sanitizes_speaker`). One-commit cleanup whenever convenient.
-- **Two unpushed local commits ahead of `origin/main`** — one from a parallel session before this one (unclear provenance, didn't investigate), plus this session's `6b20483` and the docs sweep about to land at end-session. Push when ready.
-- **Lesson saved to memory** (`feedback_no_git_acrobatics.md`): when asked for "separate commits" on coupled changes, never revert+reapply to disentangle — use `git add -p` or push back on the split request.
+- **C1 fix is detection-only.** Reconnect-and-resume after a transient network blip / Mac sleep is a much bigger feature (would need session-state rehydration, captions observer re-injection, chat panel re-open, participant-name cache rebuild). The new `_browser_alive` flag makes detection visible to ChatRunner within ~10s, but `is_connected() == False` still means the user has to leave + rejoin.
+- **C5's helper-restart-on-death is the parallel deferred feature** for the audio-helper Swift binary. Same shape: detection works, recovery doesn't. Document together when the runbook lands.
+- **The CHAINED TURNS prompt rule is load-bearing UX guidance** that lives in code (per `feedback_capability_in_code_over_prompt`) — `_PRE_TOOL_VOICE_RULE` in claude_cli.py:100. Don't migrate it to a user-editable system_prompt; a hand-edit could silently drop the chained-turns requirement.
+- **Cross-thread Playwright restriction is permanent for macos_adapter.** If you ever need to add another live page probe in dial mode, it has to run on the browser thread (the `_browser_session` daemon) — `is_connected()` from outside that thread can only read flags, never touch Playwright objects.
+- **Lesson saved to memory in S204**: when asked for "separate commits" on coupled changes, never revert+reapply manually — use `git add` per-file (clean) or `git add -p` for hunk-splits within a file (and acknowledge that's the kind of git acrobatics the lesson warns against). This session's two-commit decision (Tier 3 docs separate from endurance fixes) was clean per-file selection, no acrobatics.
