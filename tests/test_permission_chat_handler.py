@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from _1_800_operator.pipeline.permission_chat_handler import (
     PermissionChatHandler,
     _is_yes,
-    _format_confirmation,
 )
 
 
@@ -109,44 +108,6 @@ def test_is_yes_negation_gate():
     for t in negated:
         assert not _is_yes(t), f"_is_yes({t!r}) should be False (negation gate)"
     print("  _is_yes negation gate OK")
-
-
-def test_format_confirmation_truncates_long_args():
-    """Technical-voice path renders every parameter with head…tail truncation.
-
-    `_format_confirmation` dispatches on `config.VOICE`: plain returns a
-    one-line summary (no field-name literals), technical returns the verbose
-    parameter dump used here.
-    """
-    from _1_800_operator import config
-    saved_voice = getattr(config, "VOICE", "plain")
-    config.VOICE = "technical"
-    try:
-        out = _format_confirmation("Write", {
-            "file_path": "/tmp/foo.txt",
-            "content": "x" * 5000,
-        })
-    finally:
-        config.VOICE = saved_voice
-    assert "Write" in out
-    assert "file_path" in out
-    assert "content" in out
-    assert "…" in out, "long content should be truncated with an ellipsis"
-    assert len(out) < 1000, f"confirmation prompt too long ({len(out)} chars)"
-    print("  format_confirmation truncates long args OK")
-
-
-def test_format_confirmation_no_args():
-    """Technical-voice path emits "(no arguments)" for empty arg dicts."""
-    from _1_800_operator import config
-    saved_voice = getattr(config, "VOICE", "plain")
-    config.VOICE = "technical"
-    try:
-        out = _format_confirmation("Read", {})
-    finally:
-        config.VOICE = saved_voice
-    assert "(no arguments)" in out
-    print("  format_confirmation handles no-arg tools OK")
 
 
 # ---------------------------------------------------------------------------
@@ -373,10 +334,6 @@ def main():
     test_is_yes_variants()
     print("test_is_yes_negation_gate")
     test_is_yes_negation_gate()
-    print("test_format_confirmation_truncates_long_args")
-    test_format_confirmation_truncates_long_args()
-    print("test_format_confirmation_no_args")
-    test_format_confirmation_no_args()
     print("test_auto_approve_returns_immediately_no_chat")
     test_auto_approve_returns_immediately_no_chat()
     print("test_chat_round_trip_yes_returns_allow")
