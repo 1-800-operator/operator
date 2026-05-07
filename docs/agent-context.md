@@ -17,6 +17,24 @@
 
 ## Current Status
 
+**Session 204 (May 6, 2026) — 1-hour-meeting endurance audit + closed deferred llm.py product call.** Started a new audit axis (resource/time behavior in long meetings, distinct from the pre-launch static-cleanup audit). Produced a 20-row suspect catalog across five failure-mode buckets: unbounded growth (transcript dict, tool-loop scratchpad, seen-IDs, log files), time drift (poll loops, silence-gap, heartbeat watchdog), stale handles (CDP, MCP pipes, OAuth tokens), retries, and participant flapping. Top three 🔴 candidates diagnosed in detail:
+
+1. **A3 (`claude_cli._stderr_buf`)** — daemon thread `extend()`-s every byte of subprocess stderr into a plain list for the entire meeting; only ever read as `[-20:]` for error diagnostics. Simple `deque(maxlen=N)` swap. Not yet fixed — flagged for a follow-up commit.
+
+2. **A4 (`_tail_messages` + full-file tail) — RESOLVED.** Two coupled bugs in one shape: (a) `MeetingRecord.tail()` re-read the entire JSONL + JSON-parsed every line on every LLM call → growing latency over an hour-long meeting with captions on; (b) the user surfaced the bigger insight that captions were being prompt-stuffed even though the transcript MCP server already exposes them on demand → architectural duplication, plus chat-history was being crowded out of the 40-slot budget by ambient talk. Chose option (b) "keep tail but chat-only" over total deletion: chat carries a UI continuity expectation captions don't (people reference ambient talk explicitly when they want it). Fix landed in commit `6b20483`: dropped captions from `_tail_messages`, added a `deque(maxlen=200)` chat tail in `MeetingRecord` populated by `append()`, new `tail_chat(n)` method serves it without I/O. JSONL on disk and `tail()` for generic queries unchanged. 19/19 tests green. Closes the long-deferred `pipeline/llm.py` product decision (`docs/pre-launch-audit.md` line 161).
+
+3. **C1 (post-join CDP staleness)** — `macos_adapter.is_connected()` checks an internal `_browser_closed` flag, not actual CDP/page health. After Mac sleep / 30s network blip, the flag stays unset while chat read/captures are dead → bot enters "looks alive but isn't" zombie state. attach_adapter does the right probe. Downgraded from 🔴 to 🟡 — fix is detection-only (probe `page.is_closed()` + `context.browser.is_connected()`); reconnect-and-resume is a bigger feature. Not yet fixed.
+
+**S204 dead-code carry-forward:** `wrap_spoken` / `_neutralize_close` / `SAFETY_RULES` in `llm.py` are now dead in src/ post-`6b20483` (still tested in `test_wrap_spoken_sanitizes_speaker`). One-commit cleanup whenever the user wants.
+
+**Independent of S204 product decision:** the S203 question about whether `openai` + `anthropic` Python deps stay or go is **still open** — they were paired with the llm.py decision in S203's narrative, but they're independent. The deps decision turns on "is a second LLM provider in v1 scope?", not on how chat history is plumbed.
+
+**Exact next step (session 205):** A3 fix (claude_cli stderr deque swap) — ~1 LOC change, then a quick read of the remaining 🟡 endurance-audit items (C2 MCP pipe death, C3 OAuth token expiry mid-meeting, C4 Google session expiry mid-meeting, C5 audio helper 1hr behavior). Or pivot to the standalone workflow passes from `docs/pre-launch-audit.md` (install dry-run on a fresh Mac is the highest-leverage one — Pass 1, the #1 launch-day failure mode). Or address the S203 phantom-feature product calls (install_preflight + readiness preflight orphans, ~600 LOC of test coverage of unreachable code).
+
+**`/end-session` lesson saved to memory** (`feedback_no_git_acrobatics.md`): when asked to split coupled changes into separate commits, don't do revert+reapply manual disentangling — use `git add -p` or push back on the split request and explain why a combined commit communicates the design move better.
+
+---
+
 **Session 203 (May 6, 2026) — Pre-launch audit Tier 3 closed (12/12 cells complete) running in parallel with S202's Tier 2 work. Eleven S203 audit-cell commits landed in atomic per-cell shape; two cells closed REVIEW-only awaiting product call (`install_preflight.py`, `readiness.py`'s preflight orphan); ~−470 LOC src, ~−403 LOC tests across the session. Apple Dev cert still pending; 14.20.5 still gated on it.**
 
 **Eleven S203 commits land this session, all using the plain-language / 🟡🟢 / disposition-emoji finding format:**

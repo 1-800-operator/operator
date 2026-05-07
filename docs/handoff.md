@@ -1,45 +1,26 @@
-# Session 197 handoff (2026-05-05) — Phase 14.20.2 + 14.20.3 SHIPPED
+# Session 204 handoff (2026-05-06) — 1-hour endurance audit kickoff + closed deferred llm.py call
 
-Skipped 14.19.9-11 (small polish, not launch-blocking) and went straight to the meaty 14.20.x audio work since the spike from S193 was still fresh. **14.20.2** lands the Swift dual-stream audio helper at `src/_1_800_operator/swift/operator-audio-capture.swift` (288 LOC) — single binary captures system audio via ScreenCaptureKit + mic via AVAudioEngine, writes framed `[1B tag 'S'|'M'][4B BE u32 length][N bytes Float32 16kHz mono PCM]` chunks to stdout, with per-stream 10s no-callback watchdog and TCC preflight for both perms. Single-binary chosen over two-procs (one cdhash → cleaner TCC UX). **14.20.3** adds a `--probe` flag to the same binary (read-only TCC report, prints JSON, never prompts; necessary because TCC.db is SIP-protected) and two new `operator doctor` checks for Screen Recording + Microphone, gated on darwin-only, with fix copy pointing at exact System Settings panes. Smoke-tests passed: clean compile, mic stream flowed (105 frames over 12s with real RMS signal during `say`), framing decoded zero-error, watchdog fired at exactly 10s for the system stream — the empirical replay of the silent-failure mode DECISION.md predicted, fixed by Developer-ID code-signing at release time.
+Started a new audit axis distinct from the pre-launch static-cleanup work: how the bot behaves over a 1-hour meeting (resource growth, time drift, stale handles, etc.). Produced a 20-row suspect catalog across five failure-mode buckets via grep-driven sweep. Diagnosed the three 🔴 candidates in detail. **One landed as commit `6b20483`:** the long-deferred `llm.py` product call (`docs/pre-launch-audit.md` line 161, carried since S201) is now resolved by a design refinement — chose option (b) "keep tail but chat-only" rather than the binary delete-vs-keep the audit doc framed. Captions are dropped from the prompt entirely (transcript MCP is the on-demand channel); chat stays in the prompt because people assume the bot saw what they typed. Also fixed the underlying full-file-read latency bug at the same time: `MeetingRecord` now has a `deque(maxlen=200)` chat tail populated by `append()`, served by new `tail_chat(n)` with no I/O; JSONL + `tail()` for generic queries unchanged. 19/19 tests green.
 
-## What landed (origin/main + 1 unpushed S196 commit + 1 new S197 commit pending)
+## Exact next step (session 205)
 
-- `a30537a` 14.19.8 — chat-surfaced permission flow (carried from S196, not yet pushed)
-- **(this commit)** 14.20.2 + 14.20.3 — Swift dual-stream helper + doctor TCC checks
+**Pick one of three directions:**
 
-Files in this commit:
-- `src/_1_800_operator/swift/operator-audio-capture.swift` (new, 288 LOC)
-- `src/_1_800_operator/pipeline/doctor.py` (+112 / -1)
-- `.gitignore` (+3, ignore the compiled binary)
-
-Untracked spike utility kept for posterity: `debug/14_20_audio_spike/decode_frames.py` (50-line Python frame decoder used in smoke testing).
-
-## Exact next step (session 198)
-
-**Phase 14.20.4 — wire the helper into AttachAdapter + MeetingRecord.** Real session-sized work (~3h):
-
-1. Add `mlx-whisper`, `numpy`, `soundfile` back to `pyproject.toml` (all dropped post-14.19.7 since voice-preserved-only).
-2. Port a simplified `AudioProcessor` from `voice-preserved:pipeline/audio.py` — keep VAD constants (`UTTERANCE_SILENCE_RMS=0.02`, `UTTERANCE_SILENCE_THRESHOLD=2`, `UTTERANCE_MAX_DURATION=10`), keep the 0.5s silence pre-pad in `transcribe()` (whisper drops the first word without it), keep mlx-whisper-base. Drop the TTS echo-guard (`is_speaking`) — slip is chat-only.
-3. Two `AudioProcessor` instances in `AttachAdapter` — one fed by `[S]` frames (speaker="other"), one by `[M]` frames (speaker="user"). Each runs its own utterance loop on its own thread.
-4. Spawn helper as `subprocess.Popen([helper_path], stdin=PIPE, stdout=PIPE, stderr=...)` in `AttachAdapter.join()` after CDP connection. Reader thread parses framed stdout and dispatches PCM to the right processor. Keep stdin held open for meeting lifetime; closing triggers helper's clean shutdown.
-5. When a processor finalizes an utterance, call `MeetingRecord.append_caption(speaker, text, timestamp)` — same JSONL shape `captions_js.py` produces, so `mcp_servers/transcript_server.py` reads slip captions identically to dial.
-6. Smoke-test mic-only end-to-end (system-stream confirmation belongs in 14.20.5 post code-signing).
-
-`install.sh` build wiring rolls into 14.20.4 since both touch helper-path resolution. After `uv tool install`, install.sh resolves the package's swift/ via `python -c "import _1_800_operator; print(_1_800_operator.__file__)"`, runs `swiftc <pkg>/swift/operator-audio-capture.swift -O -o ~/.operator/bin/operator-audio-capture`, marks executable. Mac-only branch; Linux skips.
-
-Then **14.20.5** (live-test) — gated on Developer-ID code-signing → release time per `project_apple_dev_account_deferred.md`.
+1. **Continue endurance audit** — start with A3 (`claude_cli._stderr_buf` is a daemon-thread `extend()` accumulator with no size cap; trivial deque swap, ~1 LOC), then read the remaining 🟡 items: C1 (CDP staleness — `macos_adapter.is_connected()` only checks an internal flag, doesn't probe real page health → bot zombies post-sleep/blip), C2 (MCP subprocess death detection over an hour), C3 (OAuth token mid-meeting expiry on hosted MCPs), C5 (audio helper hour-long behavior).
+2. **Standalone workflow passes** — install dry-run on a fresh Mac (`docs/pre-launch-audit.md` Pass 1, the #1 launch-day failure mode), dep pinning audit (Pass 7), runbook draft (Pass 8).
+3. **Close S203 phantom-feature product calls** — `install_preflight` + `readiness.preflight_mcp_readiness` orphans (~600 LOC of test coverage of unreachable code, plus a latent `from _1_800_operator.pipeline.auth import run_auth` ImportError landmine). Decision needed: add `operator setup` subcommand or delete the orphans.
 
 ## Open questions / blockers
 
-- **14.19.9 / 14.19.10 / 14.19.11 skipped this lineage.** Not launch-blocking. Carry forward as post-launch polish: 14.19.9 (install.sh sendoff/welcome refresh — surface `--yolo` + `~/.claude/settings.json` overlay), 14.19.10 (fresh-Mac ladder live-test), 14.19.11 (docs refresh + ~700 LOC `mcp_client.py` deletion per S195 handoff).
-- **Apple Developer account** for production code-signing — explicitly deferred to release-time per memory. 14.20.4 doesn't need it (mic-side validation works under ad-hoc signature; system-side waits for 14.20.5).
-- **Commit `a30537a` (14.19.8) still local on `main`, not yet pushed** — carried from S196.
+- **Apple Dev cert** still in flight from S198. Blocks 14.20.5 (productized .app + notarization) only.
+- **`openai` + `anthropic` Python deps** — paired with the resolved llm.py call in S203's narrative but actually independent. Still open: keep if a second provider is in v1 scope, drop otherwise.
+- **Two phantom-feature product calls** carried from S203: `install_preflight.run_install_preflight` (no `operator setup` subcommand exists today) and `readiness.preflight_mcp_readiness` orphan with ImportError landmine. Same shape as prior wizard-era cleanups.
+- **Heartbeat watchdog from S199 still has no tests.** Nice-to-have follow-up.
 
 ## Don't forget
 
-- The compiled binary `src/_1_800_operator/swift/operator-audio-capture` is now gitignored. Source ships in the wheel via hatchling default (per `pyproject.toml:60`). install.sh compiles per-machine.
-- The 10s no-callback watchdog is load-bearing diagnostic. Don't remove it in 14.20.4 even if the system stream starts working — it's the only signal that distinguishes "TCC silent-failure" from "system is just quiet."
-- The `excludesCurrentProcessAudio = true` flag on the SCStream config means the helper won't echo its own stderr / log noise. Don't flip it.
-- The mic side uses `AVAudioConverter` to downsample from hardware format (48kHz 1ch on this Mac) to 16kHz Float32 mono target. The converter callback supplies the input buffer once via the `supplied` flag — don't loop or you'll re-feed the same buffer.
-- Doctor's `_check_microphone` deliberately defers to `_check_screen_recording` when the upstream cause (helper missing) is shared. This avoids printing two near-identical "rebuild the binary" fix lines. If you split the helper into separate binaries later (don't — see TCC reasoning), reconsider this.
-- TCC has a permission-restart-pending mode where a granted permission isn't yet live to a running parent app. If smoke tests show "permissions granted in Settings, but binary still gets the silent-failure callback drought," quit + relaunch the parent terminal app. This is the user-NOTE.md gotcha from S193.
+- **A3 stderr buffer is a real candidate for memory growth in long meetings** but won't OOM a modern Mac in one hour. Cosmetic priority.
+- **C1 (CDP staleness) is the biggest endurance UX risk** — without it, the bot enters a silent zombie state after Mac sleep / network blips and the user has to kill + restart. Fix is detection-only (probe `page.is_closed()` + `context.browser.is_connected()`); reconnect-and-resume is a much bigger feature.
+- **`wrap_spoken` / `_neutralize_close` / `SAFETY_RULES` in `llm.py` are now dead in src/** post-`6b20483` (still tested in `test_wrap_spoken_sanitizes_speaker`). One-commit cleanup whenever convenient.
+- **Two unpushed local commits ahead of `origin/main`** — one from a parallel session before this one (unclear provenance, didn't investigate), plus this session's `6b20483` and the docs sweep about to land at end-session. Push when ready.
+- **Lesson saved to memory** (`feedback_no_git_acrobatics.md`): when asked for "separate commits" on coupled changes, never revert+reapply to disentangle — use `git add -p` or push back on the split request.
