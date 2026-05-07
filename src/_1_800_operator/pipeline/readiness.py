@@ -29,17 +29,9 @@ import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-from _1_800_operator import config
+from _1_800_operator import config  # noqa: F401 — imported so its module-load load_dotenv runs
 from _1_800_operator.pipeline.oauth_cache import oauth_cache_exists
-
-# Ensure ~/.operator/.env is in os.environ before we inspect it.
-# Idempotent and override=False, so a second load_dotenv (e.g. config.py
-# already called this at import) is a no-op.
-load_dotenv(config.ENV_FILE, override=False)
 
 _ENV_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
