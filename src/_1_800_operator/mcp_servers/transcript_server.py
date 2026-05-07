@@ -26,12 +26,13 @@ ceiling trips, the result is trimmed and a clear hint is appended.
 The meeting record path comes from one of two sources, in order:
 
   1. The marker file at ~/.operator/.current_meeting (written by the
-     bot at meeting-join time, deleted at leave). Lets agents like
-     codex register this MCP via fully-static config without per-meeting
-     env interpolation.
+     bot at meeting-join time, deleted at leave). Lets MCP registrations
+     that don't get per-meeting env interpolation — e.g. a server the
+     user added once via `claude mcp add` and reuses across meetings —
+     still pick up the active meeting JSONL.
 
-  2. The OPERATOR_MEETING_RECORD_PATH env var (the original wire path
-     used by the claude bot since session 171). Kept for back-compat.
+  2. The OPERATOR_MEETING_RECORD_PATH env var, set per-meeting by the
+     bot's bundled MCP spawn path (claude_cli.py:_maybe_write_mcp_config).
 
 If neither is set, or the file doesn't exist yet, tools return a friendly
 empty-state string.
@@ -377,7 +378,7 @@ def list_speakers() -> str:
     """Return the speakers heard so far this meeting session.
 
     Useful before applying a speaker filter on search_captions or
-    list_captions — speaker names are case-sensitive substrings; this
+    list_captions — speaker names are case-insensitive substrings; this
     tool shows you what's actually in the data.
 
     Returns:
