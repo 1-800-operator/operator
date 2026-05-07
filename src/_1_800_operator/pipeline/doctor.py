@@ -14,6 +14,7 @@ for slip's audio helper, Phase 14.20.4) skip on other platforms.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,10 +26,28 @@ from _1_800_operator.pipeline.chrome_preflight import (
     INSTALL_URL as CHROME_INSTALL_URL,
     chrome_installed,
 )
-from _1_800_operator.pipeline.install_preflight import chromium_installed
-from _1_800_operator.pipeline.readiness import _probe_claude_code
+from _1_800_operator.pipeline.claude_code_import import _probe_claude_code
 
 _AUTH_STATE_FILE = Path.home() / ".operator" / "auth_state.json"
+
+
+def _playwright_browsers_root() -> Path:
+    """Directory Playwright stores browser builds under. Honors
+    PLAYWRIGHT_BROWSERS_PATH; otherwise platform default."""
+    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if override:
+        return Path(override)
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ms-playwright"
+    return Path.home() / ".cache" / "ms-playwright"
+
+
+def chromium_installed() -> bool:
+    """True iff Playwright has at least one `chromium-*` build cached."""
+    root = _playwright_browsers_root()
+    if not root.exists():
+        return False
+    return any(child.name.startswith("chromium-") for child in root.iterdir())
 
 # Slip's audio helper. install.sh compiles to ~/.operator/bin/; dev runs
 # the swiftc-built binary in-tree. Production location wins when both exist.
