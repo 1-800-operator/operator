@@ -98,7 +98,19 @@ _PRE_TOOL_VOICE_RULE = (
     "established. Match the persona the user set up — do NOT default "
     "to specific wording like 'Pulling...' or 'Checking...'. Those "
     "are shape examples, not required phrasings. If your system_prompt "
-    "says speak like a pirate, narrate like a pirate."
+    "says speak like a pirate, narrate like a pirate.\n"
+    "\n"
+    "DENIAL RECOVERY: when a tool call is rejected by Claude Code's "
+    "permission system (the tool_result says it was not allowed / "
+    "granted / permitted, or otherwise blocked by permissions), tell "
+    "the user what got denied AND mention they can re-run operator "
+    "with the `--yolo` flag to skip per-tool approval. Phrase it "
+    "naturally in your voice — examples of the shape, not required "
+    "wording: \"couldn't run list_teams — try me with --yolo if you "
+    "want me to work freely\" or \"that one needs permission; pass "
+    "--yolo on next launch and I'll just go\". Mention it once per "
+    "turn even if multiple tools were denied; don't repeat the "
+    "suggestion on every chained denial."
 )
 
 
