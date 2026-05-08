@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import struct
 import subprocess
 import sys
@@ -366,6 +367,26 @@ class AttachAdapter(MeetingConnector):
         self._page = None
         self._chrome_proc = None
         self._observer_installed = False
+        # Browser thread + chat command queue. Playwright's sync API is
+        # single-threaded by contract: only the thread that opened the
+        # context may call its methods. To keep AttachAdapter safe to
+        # invoke from any thread (chat-runner main, provider permission
+        # pump, heartbeat daemon), all Playwright work runs on a
+        # dedicated browser thread; public methods drop commands onto
+        # _chat_queue and block on a per-call result queue. Mirrors the
+        # design already in MacOSAdapter and LinuxAdapter — slip mode
+        # used to be the odd one out (greenlet errors when off-thread
+        # callers reached page.evaluate directly).
+        self._chat_queue: queue.Queue = queue.Queue()
+        self._browser_thread: threading.Thread | None = None
+        self._leave_event = threading.Event()
+        # Mirrors browser-session liveness for is_connected() so callers
+        # don't have to touch Playwright objects from arbitrary threads.
+        # Set when the page+browser are live; cleared when the session
+        # is winding down. _browser_closed is set at the very end of
+        # _browser_session so leave() can wait for clean teardown.
+        self._browser_alive = threading.Event()
+        self._browser_closed = threading.Event()
         # Audio pipeline (14.20.4) — populated by _start_audio_pipeline()
         # after meeting entry. Stays None on Linux (mac-only helper) or
         # when the helper binary hasn't been built. set_caption_callback
@@ -382,11 +403,22 @@ class AttachAdapter(MeetingConnector):
     # ------------------------------------------------------------------
 
     def join(self, meeting_url):
-        # Populate join_status — ChatRunner inspects connector.join_status
-        # to decide whether the join succeeded (matches macos_adapter
-        # contract). Both signal_success() and signal_failure() set
-        # the underlying threading.Event, so callers blocking on it
-        # never deadlock no matter which branch we take.
+        """Validate input, then spawn the browser thread that owns Playwright.
+
+        Fire-and-forget: returns once the thread is started; failures
+        and successes both surface via `self.join_status` (callers wait
+        on `join_status.ready`). The previous design ran Playwright on
+        the calling thread and raised SlipAttachError synchronously,
+        which meant any off-thread caller (PermissionChatHandler on the
+        provider's pump thread, heartbeat daemon, etc.) hit greenlet
+        errors. Mirrors the contract already in MacOSAdapter /
+        LinuxAdapter.
+
+        Synchronous validation is kept on the calling thread because
+        these checks don't touch Playwright and surfacing them through
+        join_status would defer obvious user errors to a background
+        thread.
+        """
         self.join_status = JoinStatus()
         js = self.join_status
 
@@ -410,118 +442,163 @@ class AttachAdapter(MeetingConnector):
                 f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
-        # Probe CDP. Three cases, all handled silently:
-        #   - alive AND belongs to slip Chrome → reuse (Ctrl+C and re-run)
-        #   - alive but NOT slip's Chrome → silently SIGTERM that Chrome,
-        #     then launch our own (handles leftover spikes, stale
-        #     debugger sessions, crashed previous slip Chromes)
-        #   - not alive → launch slip Chrome fresh
-        took_reuse_path = False
-        if _cdp_endpoint_alive() and _cdp_belongs_to_slip():
-            log.info(f"AttachAdapter: CDP at {CDP_URL} is slip Chrome — reusing")
-            took_reuse_path = True
-        else:
-            if _cdp_endpoint_alive():
-                # Some other Chrome is hogging the port. Evict it
-                # silently — the user shouldn't have to know.
-                _evict_other_chrome_on_cdp_port()
-                # Brief settle so the kernel releases the port before
-                # we try to bind.
-                time.sleep(0.5)
-            self._chrome_proc = _launch_slip_chrome(meeting_url)
-            try:
-                _wait_for_cdp_ready()
-            except SlipAttachError:
-                js.signal_failure("cdp_not_ready")
-                raise
+        self._leave_event.clear()
+        self._browser_alive.clear()
+        self._browser_closed.clear()
+        self._observer_installed = False
+        self._browser_thread = threading.Thread(
+            target=self._browser_session,
+            args=(meeting_url,),
+            daemon=True,
+            name="AttachAdapter-browser",
+        )
+        self._browser_thread.start()
+        log.info(f"AttachAdapter: joining {meeting_url}")
 
-        self._playwright = sync_playwright().start()
+    def _browser_session(self, meeting_url):
+        """Browser-thread entry point. Owns the entire Playwright lifecycle.
+
+        Runs on a dedicated daemon thread spawned by join(). All
+        Playwright sync API calls happen here; public methods (send_chat,
+        read_chat, get_participant_*) round-trip via `_chat_queue` so
+        callers from any thread are decoupled from the single-threaded
+        sync API constraint. Exits when leave() sets `_leave_event` or
+        when the browser disconnects.
+        """
+        js = self.join_status
         try:
-            self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
-        except Exception as e:
-            # Reuse path failure → almost always a zombie slip Chrome:
-            # the process is alive and the CDP socket is open, but every
-            # window has been closed so there is no BrowserContext for
-            # Playwright to manage. The canonical symptom is
-            # `Browser.setDownloadBehavior … Browser context management
-            # is not supported`. On macOS this happens whenever the user
-            # closes the last slip window after a previous session
-            # detached — Chrome stays alive in the menu bar with zero
-            # contexts. Self-heal by evicting the zombie Chrome and
-            # relaunching once. We only retry on the reuse path: a
-            # connect failure immediately after a fresh launch is a
-            # real problem (port held by something un-killable, OS-level
-            # issue) that we should surface rather than paper over.
-            if took_reuse_path:
-                log.warning(
-                    f"AttachAdapter: reused slip Chrome rejected connect_over_cdp "
-                    f"({e}); evicting zombie Chrome and relaunching"
-                )
-                self._teardown_playwright()
-                _evict_other_chrome_on_cdp_port()
-                time.sleep(0.5)
+            # CDP probe + Chrome launch — these are subprocess-level
+            # operations (no Playwright) but we keep them on the browser
+            # thread so the entire session lifecycle lives in one place
+            # and so a slow CDP probe doesn't block the calling thread.
+            took_reuse_path = False
+            if _cdp_endpoint_alive() and _cdp_belongs_to_slip():
+                log.info(f"AttachAdapter: CDP at {CDP_URL} is slip Chrome — reusing")
+                took_reuse_path = True
+            else:
+                if _cdp_endpoint_alive():
+                    # Some other Chrome is hogging the port. Evict it
+                    # silently — the user shouldn't have to know.
+                    _evict_other_chrome_on_cdp_port()
+                    # Brief settle so the kernel releases the port
+                    # before we try to bind.
+                    time.sleep(0.5)
                 self._chrome_proc = _launch_slip_chrome(meeting_url)
                 try:
                     _wait_for_cdp_ready()
                 except SlipAttachError:
                     js.signal_failure("cdp_not_ready")
-                    raise
-                self._playwright = sync_playwright().start()
-                try:
-                    self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
-                except Exception as e2:
+                    return
+
+            self._playwright = sync_playwright().start()
+            try:
+                self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+            except Exception as e:
+                # Reuse path failure → almost always a zombie slip
+                # Chrome: the process is alive and the CDP socket is
+                # open, but every window has been closed so there is no
+                # BrowserContext for Playwright to manage. The canonical
+                # symptom is `Browser.setDownloadBehavior … Browser
+                # context management is not supported`. Self-heal by
+                # evicting the zombie Chrome and relaunching once. We
+                # only retry on the reuse path: a connect failure
+                # immediately after a fresh launch is a real problem
+                # (port held by something un-killable, OS-level issue)
+                # that we should surface rather than paper over.
+                if took_reuse_path:
+                    log.warning(
+                        f"AttachAdapter: reused slip Chrome rejected "
+                        f"connect_over_cdp ({e}); evicting zombie Chrome "
+                        "and relaunching"
+                    )
+                    self._teardown_playwright()
+                    _evict_other_chrome_on_cdp_port()
+                    time.sleep(0.5)
+                    self._chrome_proc = _launch_slip_chrome(meeting_url)
+                    try:
+                        _wait_for_cdp_ready()
+                    except SlipAttachError:
+                        js.signal_failure("cdp_not_ready")
+                        return
+                    self._playwright = sync_playwright().start()
+                    try:
+                        self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+                    except Exception as e2:
+                        self._teardown_playwright()
+                        js.signal_failure("cdp_attach_failed")
+                        log.error(
+                            f"AttachAdapter: connect_over_cdp failed after "
+                            f"relaunch: {e2}"
+                        )
+                        return
+                    log.info("AttachAdapter: attached after zombie-Chrome recovery")
+                else:
                     self._teardown_playwright()
                     js.signal_failure("cdp_attach_failed")
-                    log.error(
-                        f"AttachAdapter: connect_over_cdp failed after relaunch: {e2}"
-                    )
-                    raise SlipAttachError(
-                        "Slip couldn't attach to its Chrome window. Try running "
-                        "slip again — the connection sometimes settles on a retry."
-                    )
-                log.info("AttachAdapter: attached after zombie-Chrome recovery")
-            else:
+                    log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
+                    return
+
+            self._page = self._find_or_open_meet_page(meeting_url)
+            if self._page is None:
                 self._teardown_playwright()
-                js.signal_failure("cdp_attach_failed")
-                log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
-                raise SlipAttachError(
-                    "Slip couldn't attach to its Chrome window. Try running "
-                    "slip again — the connection sometimes settles on a retry."
-                )
+                js.signal_failure("meet_tab_open_failed")
+                return
+            log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
 
-        self._page = self._find_or_open_meet_page(meeting_url)
-        if self._page is None:
-            self._teardown_playwright()
-            js.signal_failure("meet_tab_open_failed")
-            raise SlipAttachError(
-                f"Could not find or open a Meet tab for {meeting_url!r}. "
-                "Open it manually in Chrome and re-run."
+            # Mark the session live so off-thread is_connected() short-
+            # circuits to True before signalling join_status — the
+            # _wait_for_meeting_entry loop also reads it.
+            self._browser_alive.set()
+
+            # Block here until the user has actually entered the meeting.
+            # Lobby admission is user-paced and can take many minutes.
+            if not self._wait_for_meeting_entry(self._page):
+                js.signal_failure("chrome_closed_before_entry")
+                return
+
+            # Audio is best-effort — meeting entry already succeeded, so
+            # failure to spawn the helper must NOT fail the join.
+            self._start_audio_pipeline()
+
+            js.signal_success()
+
+            # Main loop: drain queued chat commands, watch for browser
+            # death. 200 ms cadence balances responsiveness for queued
+            # reads/sends against CPU spend on idle meetings.
+            while not self._leave_event.is_set():
+                self._process_chat_queue(self._page)
+                try:
+                    if self._page.is_closed():
+                        log.warning("AttachAdapter: page closed mid-meeting — exiting")
+                        break
+                    if not self._browser.is_connected():
+                        log.warning(
+                            "AttachAdapter: browser disconnected mid-meeting — exiting"
+                        )
+                        break
+                except Exception as e:
+                    log.warning(f"AttachAdapter: liveness probe raised: {e}")
+                    break
+                # page.wait_for_timeout is the browser-thread-safe sleep —
+                # it parks the greenlet without breaking sync_playwright's
+                # event loop. Plain time.sleep would also work but stays
+                # consistent with MacOSAdapter's main loop.
+                try:
+                    self._page.wait_for_timeout(200)
+                except Exception:
+                    # Page died during the wait. Loop top will re-check.
+                    pass
+        except Exception as e:
+            log.error(
+                f"AttachAdapter: browser session crashed: {e}", exc_info=True,
             )
-        log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
-
-        # The user's Chrome opened the meeting URL but they may still be in
-        # the green room (pre-join screen) or stuck in the host-admission
-        # lobby. Block until they've actually entered the meeting —
-        # otherwise ChatRunner's first read_chat poll fires against an
-        # empty DOM and slip appears hung. The wait is indefinite; lobby
-        # admission can take many minutes, the user can Ctrl+C anytime,
-        # and the only fatal signal is Chrome being closed (which the
-        # wait loop detects via is_connected).
-        if not self._wait_for_meeting_entry(self._page):
+            if not js.ready.is_set():
+                js.signal_failure(f"browser_session_crashed: {type(e).__name__}")
+        finally:
+            self._browser_alive.clear()
+            self._stop_audio_pipeline()
             self._teardown_playwright()
-            js.signal_failure("chrome_closed_before_entry")
-            raise SlipAttachError(
-                "Chrome was closed before you joined the meeting. Re-run "
-                "`operator slip claude <url>` when you're ready."
-            )
-
-        # Audio is best-effort — meeting entry already succeeded, so failure
-        # to spawn the helper must NOT fail the join. _start_audio_pipeline
-        # logs and returns silently on any error; chat-only mode is the
-        # safe fallback.
-        self._start_audio_pipeline()
-
-        js.signal_success()
+            self._browser_closed.set()
 
     def set_caption_callback(self, fn):
         """Register fn(speaker, text, timestamp) for finalized utterances.
@@ -542,69 +619,183 @@ class AttachAdapter(MeetingConnector):
         self._caption_callback = fn
 
     def send_chat(self, message):
-        """Post a message to chat with the slip-mode reply prefix.
+        """Post a message to chat. Queues the request for the browser thread.
 
-        Mirrors MacOSAdapter._do_send_chat: snapshot existing IDs,
-        fill the textarea, send, poll every 50ms (up to 1s) for one
-        new ID. Returns the new data-message-id, or None on timeout
-        (caller falls back to text-match dedup).
+        Returns the new `data-message-id` from the post, or None on
+        timeout / failure (caller falls back to text-match dedup).
+        Returns None immediately when called before the browser thread
+        is alive — same fallback shape.
+        """
+        if not self._browser_alive.is_set():
+            return None
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("send", message, result_q))
+        try:
+            return result_q.get(timeout=10)
+        except queue.Empty:
+            return None
+
+    def read_chat(self):
+        """Drain new chat messages. Queues the request for the browser thread."""
+        if not self._browser_alive.is_set():
+            return []
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("read", None, result_q))
+        try:
+            return result_q.get(timeout=10)
+        except queue.Empty:
+            return []
+
+    def get_participant_count(self):
+        """Return participant count via the browser thread."""
+        if not self._browser_alive.is_set():
+            return 0
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("participant_count", None, result_q))
+        try:
+            return result_q.get(timeout=5)
+        except queue.Empty:
+            return 0
+
+    def get_participant_names(self):
+        """Return participant display names via the browser thread."""
+        if not self._browser_alive.is_set():
+            return []
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("participant_names", None, result_q))
+        try:
+            return result_q.get(timeout=5)
+        except queue.Empty:
+            return []
+
+    def is_connected(self):
+        """Cross-thread-safe liveness check.
+
+        Reads only threading.Event flags maintained by the browser
+        thread — no Playwright access from the caller's thread.
+        Returns True iff the browser thread is holding a live page and
+        hasn't started its teardown.
+        """
+        return self._browser_alive.is_set() and not self._browser_closed.is_set()
+
+    # --- Browser-thread chat implementations (called from _process_chat_queue) ---
+
+    def _process_chat_queue(self, page):
+        """Drain the chat command queue. Called from the browser thread."""
+        while True:
+            try:
+                cmd, args, result_q = self._chat_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if cmd == "send":
+                    result_q.put(self._do_send_chat(page, args))
+                elif cmd == "read":
+                    result_q.put(self._do_read_chat(page))
+                elif cmd == "participant_count":
+                    result_q.put(self._do_get_participant_count(page))
+                elif cmd == "participant_names":
+                    result_q.put(self._do_get_participant_names(page))
+                else:
+                    log.warning(f"AttachAdapter: unknown chat-queue command {cmd!r}")
+                    result_q.put(None)
+            except Exception as e:
+                # Don't let a single command crash the browser session.
+                # Surface the failure to the waiter via the sentinel
+                # value its public wrapper expects on error.
+                log.warning(f"AttachAdapter: chat-queue command {cmd!r} raised: {e}")
+                fallback = [] if cmd in ("read", "participant_names") else (
+                    0 if cmd == "participant_count" else None
+                )
+                try:
+                    result_q.put(fallback)
+                except Exception:
+                    pass
+
+    def _do_send_chat(self, page, message):
+        """Browser-thread implementation. Mirrors MacOSAdapter._do_send_chat:
+        snapshot existing IDs, fill the textarea, send, poll every 50 ms
+        (up to 1 s) for one new ID. Returns the new `data-message-id`
+        or None on timeout (caller falls back to text-match dedup).
 
         slip-mode quirk: the message is prefixed with self._reply_prefix
         (e.g. '[🤖 Claude] ') so the room can distinguish claude's words
         from the user's own typing. Empty prefix (dial/deploy) means no
         marker. Prefix value lives in `bridges/claude.py:REPLY_PREFIX_SLIP`.
-
-        Direct call — no queue/thread bridging needed because slip runs
-        playwright on the same thread that drives ChatRunner. The
-        queue dance in MacOSAdapter exists to bridge main → browser
-        thread under launch_persistent_context; CDP-attach has no
-        background thread.
         """
-        if self._page is None:
-            return None
         full_message = f"{self._reply_prefix}{message}" if self._reply_prefix else message
-        self._ensure_chat_open(self._page)
+        self._ensure_chat_open(page)
         try:
-            pre_ids = set(self._page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
-            input_box = self._page.locator('textarea[aria-label="Send a message"]')
+            pre_ids = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
+            input_box = page.locator('textarea[aria-label="Send a message"]')
             input_box.wait_for(timeout=5000)
             input_box.fill(full_message)
             input_box.press("Enter")
             log.info(f"AttachAdapter: chat sent: {full_message!r}")
             for _ in range(20):
-                current = set(self._page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
+                current = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
                 new_ids = current - pre_ids
                 if new_ids:
                     return next(iter(new_ids))
                 time.sleep(0.05)
-            log.debug("AttachAdapter: send_chat ID-readback timed out — caller will fall back to text-match dedup")
+            log.debug(
+                "AttachAdapter: send_chat ID-readback timed out — caller will "
+                "fall back to text-match dedup"
+            )
             return None
         except Exception as e:
             log.warning(f"AttachAdapter: send_chat failed: {e}")
             return None
 
-    def read_chat(self):
-        """Drain the JS-side chat queue. Mirrors MacOSAdapter._do_read_chat.
+    def _do_read_chat(self, page):
+        """Browser-thread implementation. Drains the JS-side chat queue.
 
-        Slip-mode quirk: send_chat prepends self._reply_prefix
-        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) to
-        outgoing messages so the room can distinguish claude's words from
-        the user's typing. The DOM observer reads back the prefixed
-        text. ChatRunner's _own_messages dedup set stores the
-        UN-prefixed text (what ChatRunner._send received). Without
+        Slip-mode prefix-strip: send_chat prepends self._reply_prefix
+        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) so the
+        room can distinguish claude's words from the user's typing. The
+        DOM observer reads back the prefixed text. ChatRunner's
+        _own_messages dedup set stores the UN-prefixed text. Without
         normalization the text-match dedup misses, the bot's own
         messages get treated as new user input, and a self-reply
         cascade kicks off. Strip the prefix here so the text passed
         upstream matches what was added to _own_messages.
+
+        Slip-only optimistic-ID filter: when the slip-mode user types a
+        message in their own Chrome, Meet renders an optimistic
+        placeholder element with a numeric local-timestamp ID
+        (e.g. `1778216640038`) before the server confirms. ~5–10 s
+        later Meet swaps in a real element with the canonical ID
+        (`spaces/<spaceId>/messages/<msgId>`). The MutationObserver
+        fires on both, so without filtering ChatRunner sees the same
+        user message twice under different IDs and dispatches two LLM
+        turns. Drop placeholder-shaped IDs here — the canonical always
+        follows under normal Meet delivery; we accept the rare
+        canonical-never-arrives case (network drop) as silent message
+        loss rather than risk a double turn on every user message.
+        Other adapters (dial/deploy/Linux) don't hit this because the
+        bot is a separate participant observing only server-confirmed
+        traffic, so this filter lives here, not in chat_runner.
         """
-        if self._page is None:
-            return []
-        self._ensure_chat_open(self._page)
-        self._install_chat_observer(self._page)
+        self._ensure_chat_open(page)
+        self._install_chat_observer(page)
         try:
-            messages = self._page.evaluate(DRAIN_CHAT_QUEUE_JS)
+            messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             if messages:
-                log.debug(f"AttachAdapter: observer drained {len(messages)} new messages")
+                log.debug(
+                    f"AttachAdapter: observer drained {len(messages)} new messages"
+                )
+            filtered = []
+            for msg in messages:
+                mid = msg.get("id") or ""
+                if not mid.startswith("spaces/"):
+                    log.debug(
+                        f"AttachAdapter: dropping placeholder-id message "
+                        f"id={mid!r} text={msg.get('text', '')[:40]!r} "
+                        "(awaiting canonical)"
+                    )
+                    continue
+                filtered.append(msg)
+            messages = filtered
             if self._reply_prefix and messages:
                 for msg in messages:
                     text = msg.get("text", "")
@@ -615,41 +806,49 @@ class AttachAdapter(MeetingConnector):
             log.warning(f"AttachAdapter: read_chat failed: {e}")
             return []
 
-    def get_participant_count(self):
-        """Count participants via data-requested-participant-id elements."""
-        if self._page is None:
-            return 0
+    def _do_get_participant_count(self, page):
         try:
-            return self._page.locator('[data-requested-participant-id]').count()
+            return page.locator('[data-requested-participant-id]').count()
         except Exception as e:
             log.warning(f"AttachAdapter: get_participant_count failed: {e}")
             return 0
 
-    def get_participant_names(self):
-        """Best-effort participant name scrape. Mirrors MacOSAdapter."""
-        if self._page is None:
-            return []
+    def _do_get_participant_names(self, page):
         try:
-            return self._page.evaluate(GET_PARTICIPANT_NAMES_JS) or []
+            return page.evaluate(GET_PARTICIPANT_NAMES_JS) or []
         except Exception as e:
             log.warning(f"AttachAdapter: get_participant_names failed: {e}")
             return []
-
-    def is_connected(self):
-        if self._browser is None:
-            return False
-        try:
-            return self._browser.is_connected()
-        except Exception:
-            return False
 
     def leave(self):
         """Disconnect from CDP. Does NOT quit Chrome — the user's browser
         keeps running with all its tabs (including the Meet tab claude
         was attached to). Idempotent.
+
+        Signals the browser thread to exit and waits briefly for clean
+        teardown. Audio pipeline shutdown + Playwright teardown happen
+        inside the browser thread's finally block so all Playwright
+        calls stay on the thread that owns them.
         """
-        self._stop_audio_pipeline()
-        self._teardown_playwright()
+        if self._leave_event.is_set():
+            return
+        self._leave_event.set()
+        if self._browser_thread and self._browser_thread.is_alive():
+            log.info("AttachAdapter: waiting for browser thread to exit...")
+            if not self._browser_closed.wait(timeout=10):
+                log.warning("AttachAdapter: browser-thread close timed out (10s)")
+            self._browser_thread.join(timeout=2)
+            if self._browser_thread.is_alive():
+                log.warning(
+                    "AttachAdapter: browser thread still alive after 12s; "
+                    "abandoning (daemon thread will exit with the process)"
+                )
+        else:
+            # Edge case: leave() called before join() ever spawned the
+            # thread (e.g. early validation failure path). Nothing to
+            # tear down beyond what the failure path already cleaned.
+            self._stop_audio_pipeline()
+            self._teardown_playwright()
         log.info("AttachAdapter: detached from Chrome (Chrome left running)")
 
     # ------------------------------------------------------------------
@@ -691,7 +890,7 @@ class AttachAdapter(MeetingConnector):
             file=sys.stderr, flush=True,
         )
         last_log = time.monotonic()
-        while True:
+        while not self._leave_event.is_set():
             try:
                 leave_btn = page.get_by_role("button", name="Leave call")
                 chat_btn = page.get_by_role("button", name="Chat with everyone")
@@ -707,14 +906,27 @@ class AttachAdapter(MeetingConnector):
                     return True
             except Exception:
                 pass
-            if not self.is_connected():
-                log.warning("AttachAdapter: Chrome closed during meeting-entry wait")
+            # We're on the browser thread here, so probe Playwright
+            # directly — public is_connected() reads cached threading
+            # events that aren't updated mid-wait.
+            try:
+                if page.is_closed() or not self._browser.is_connected():
+                    log.warning("AttachAdapter: Chrome closed during meeting-entry wait")
+                    return False
+            except Exception:
+                log.warning("AttachAdapter: liveness probe failed during meeting-entry wait")
                 return False
             now = time.monotonic()
             if now - last_log > 30:
                 log.info("AttachAdapter: still waiting for meeting entry…")
                 last_log = now
             time.sleep(1.0)
+        # leave_event tripped while we were waiting for entry — caller
+        # is shutting down before the user joined. Surface as a clean
+        # not-entered signal so _browser_session takes the failure path
+        # and tears Playwright down cleanly.
+        log.info("AttachAdapter: leave requested before meeting entry")
+        return False
 
     def _ensure_chat_open(self, page):
         """Open the chat panel if it isn't already.

@@ -61,122 +61,44 @@ TURN_TIMEOUT_SECONDS = 600
 HEARTBEAT_SILENCE_SECONDS = 60
 
 
-# Framework-level UX guarantee for chat-mediated tool confirmation.
+# Pre-tool narration rule. Operator does not gate tool calls — Claude
+# Code's own permission system handles that, governed by whether the
+# user passed `--yolo` (operator forwards `--dangerously-skip-permissions`)
+# or not (operator passes nothing extra and Claude Code applies its
+# normal rules from `~/.claude/settings.json`). This rule is purely
+# about keeping the meeting visible: before each tool call the model
+# narrates one short sentence of what it's doing, so participants in
+# chat see progress instead of silence.
 #
-# The PreToolUse bridge (chat_runner + permission_chat_handler) blocks
-# every non-auto-approved tool until the user replies in chat. Pre-14.19.8
-# the bridge posted a sterile templated card ("Run? linear__list_issues
-# …  OK?") to elicit the yes/no. 14.19.8 drops the card entirely and
-# uses the model's pre-tool narration AS the question — the inner-claude
-# model authors a one-sentence question in its own voice, the bridge
-# silently waits for the user's next chat message as the answer.
-#
-# Two reliability-shaping requirements drove this rule's wording:
-#
-#   1. INTERROGATIVE FORM. A declarative narration ("I'll pull the open
-#      Linear issues now.") leaves the user unsure whether action is
-#      required from them. The rule below requires the model to phrase
-#      every pre-tool message as a question ending in "?", so the user
-#      knows a yes/no is expected.
-#
-#   2. PER-TOOL NARRATION. In multi-tool turns (e.g. ToolSearch to
-#      discover a Linear MCP tool, then the actual list_issues call) the
-#      model's default behavior is to narrate the conceptual intent ONCE
-#      and run subsequent tools silently. Without an explicit per-tool
-#      requirement, the second tool's permission gate would block with
-#      no question on screen. The rule explicitly calls out "each
-#      subsequent tool in a multi-step turn" to head that off.
-#
-# Inner-claude flushes text-delta events to stdout before invoking the
-# PreToolUse hook (probe 10, session 196), so ordering is reliable: the
-# question lands in chat first, then the bridge unblocks on the user's
-# reply.
-#
-# Lives in code per feedback_capability_in_code_over_prompt — load-bearing
-# UX guarantees don't belong in user-editable system_prompt where a
-# hand-edit can silently drop them. The disposition (must ask, must be
-# a question, must precede the tool) is encoded here; the exact wording
-# stays the model's per feedback_llm_steering_via_tool_results.
+# Lives in code per feedback_capability_in_code_over_prompt — the
+# disposition (narrate every tool call, one sentence, declarative)
+# is load-bearing UX and shouldn't be a user-editable directive that
+# could silently drop. The exact wording stays the model's per
+# feedback_llm_steering_via_tool_results.
 _PRE_TOOL_VOICE_RULE = (
-    "MEETING-CHAT TOOL UX RULE — load-bearing, do not skip.\n"
+    "MEETING-CHAT NARRATION RULE — load-bearing, do not skip.\n"
     "\n"
-    "Every assistant turn that calls a tool must put a text content "
-    "block first and the tool_use content block right after, in the "
-    "SAME turn. Tools fall into two tiers:\n"
+    "Before every tool call, emit a one-sentence text content block "
+    "narrating what you're about to do, then the tool_use block, in "
+    "the same assistant turn. Declarative voice — describe what's "
+    "happening, do not phrase as a question. The user is not being "
+    "asked to approve; they're being kept in the loop on a meeting "
+    "chat panel where silence reads as the bot being stuck.\n"
     "\n"
-    "READ tools — pure information lookups with no side effects. "
-    "Includes any MCP tool whose verb is get_/list_/search_/find_/"
-    "read_; plus the built-ins Read, Grep, Glob, LS, WebSearch, and "
-    "ToolSearch. For these, the text block is a one-sentence "
-    "DECLARATIVE narration of what you're checking. Do NOT end this "
-    "line with '?'. The framework auto-approves reads silently; your "
-    "narration is the only signal the user sees. Exception: do not "
-    "narrate ToolSearch — it's internal tool-schema loading the user "
-    "doesn't need to see; just invoke it without preceding text on "
-    "that one tool.\n"
-    "\n"
-    "WRITE / ACTION tools — anything that changes state, sends, "
-    "creates, updates, deletes, runs commands, posts, or has external "
-    "side effects. Includes Write, Edit, Bash, Task, WebFetch, and any "
-    "MCP tool whose verb is create_/update_/delete_/save_/send_/post_/"
-    "run_. For these, the text block is a one-sentence QUESTION ending "
-    "in '?'. ALWAYS a question — even when the user's prior message "
-    "was an explicit command ('create that issue', 'write the file'). "
-    "Why: the framework's permission gate blocks the write until the "
-    "user replies in meeting chat, and a declarative narration leaves "
-    "the user with nothing visible to reply to (the operation hangs "
-    "until they realize). Phrase as a question regardless of how "
-    "explicit the user's instruction was. The framework gates the call "
-    "at a permission checkpoint AFTER your invocation: invoke the "
-    "tool_use normally — do NOT withhold it waiting for a reply; the "
-    "framework handles the pause.\n"
+    "Exception: do not narrate ToolSearch — it's internal tool-schema "
+    "loading the user doesn't need to see. Invoke ToolSearch without "
+    "any preceding text.\n"
     "\n"
     "For high-blast-radius operations include the literal critical "
-    "detail verbatim in the question — exact command, path, recipient, "
-    "or summary — so the user can audit before approving.\n"
+    "detail verbatim in the narration — exact command, path, "
+    "recipient, or summary — so anyone watching can spot a problem "
+    "before the operation completes.\n"
     "\n"
-    "VOICE: phrase narrations and questions in whatever voice your "
-    "system_prompt established. Match the persona the user set up — "
-    "do NOT default to specific wording like 'Want me to...' or "
-    "'Pulling...'. Those are shape examples, not required phrasings. "
-    "If your system_prompt says speak like a pirate, narrate and ask "
-    "like a pirate.\n"
-    "\n"
-    "If a write is denied, you'll get a tool_result describing the "
-    "user's response — react conversationally and do not retry without "
-    "explicit approval. In multi-tool turns ask one question per write "
-    "tool (one question, one approval, one tool); reads chain freely "
-    "with one narration each."
-)
-
-
-# YOLO-mode override appended after _PRE_TOOL_VOICE_RULE when the user
-# passed `--yolo` (sets OPERATOR_YOLO=1, which adds
-# `--dangerously-skip-permissions` to the inner-claude spawn). With the
-# permission gate bypassed at the CLI level, asking a question for
-# writes leaves the user thinking they're being prompted when they're
-# not — the bot proceeds either way. This override flattens the WRITE
-# tier into the READ tier: narrate everything declaratively, no
-# question form, since there's no chat-side approval contract to honor.
-# The audit-detail rule still applies (include the literal critical
-# detail in narrations of high-blast-radius operations), so the user
-# can still see and react if they spot something wrong before the
-# operation completes.
-_PRE_TOOL_VOICE_RULE_YOLO_OVERRIDE = (
-    "YOLO MODE OVERRIDE — applies on top of the rule above:\n"
-    "\n"
-    "The framework's permission gate is BYPASSED for this session. All "
-    "tool calls run immediately without chat-side approval. As a result, "
-    "the WRITE tier's question requirement does NOT apply: narrate writes "
-    "in declarative voice too, just like reads. There is no permission "
-    "gate for the user's reply to release, so a question form would "
-    "mislead them into thinking action is required from them when it "
-    "isn't.\n"
-    "\n"
-    "Continue to include the literal critical detail (exact command, "
-    "path, recipient, summary) in narrations of high-blast-radius "
-    "operations, so the user can spot a problem before the operation "
-    "completes — even though they no longer have a gate to reject at."
+    "VOICE: phrase narrations in whatever voice your system_prompt "
+    "established. Match the persona the user set up — do NOT default "
+    "to specific wording like 'Pulling...' or 'Checking...'. Those "
+    "are shape examples, not required phrasings. If your system_prompt "
+    "says speak like a pirate, narrate like a pirate."
 )
 
 
@@ -221,7 +143,7 @@ class ClaudeCLIProvider(LLMProvider):
     without paying spawn cost until a meeting actually starts.
     """
 
-    def __init__(self, *, append_system_prompt=None, cwd=None, permission_handler=None):
+    def __init__(self, *, append_system_prompt=None, cwd=None):
         """
         Args:
           append_system_prompt: text passed via --append-system-prompt at spawn.
@@ -231,22 +153,19 @@ class ClaudeCLIProvider(LLMProvider):
             builder (build_provider) overrides this with the user's
             invocation cwd so "this codebase" resolves naturally — same
             model as the bare `claude` CLI.
-          permission_handler: optional callable
-              (tool_name: str, tool_input: dict) -> dict
-            Called from a pump thread on every PreToolUse event. Must return
-            a dict with at minimum `permissionDecision` ("allow"|"deny"|"ask")
-            and optionally `permissionDecisionReason` (str). When None, the
-            PreToolUse hook is not registered and inner-claude follows its
-            default permission flow (subject to the user's
-            ~/.claude/settings.json rules).
         """
         self._append_system_prompt = append_system_prompt or None
         self._cwd = cwd or os.path.expanduser("~")
-        self._permission_handler = permission_handler
         # Optional progress narrator: callable (tool_name, tool_input) ->
         # None, fired on every tool_use content block as the model emits
         # them. None disables narration.
         self._progress_callback = None
+        # Optional in-turn tick: callable () -> None, fired on every
+        # iteration of the out-queue read loop (both streaming and
+        # non-streaming variants), regardless of whether an event was
+        # received. ChatRunner uses this to drain its off-thread send
+        # queue on the polling thread while a turn is in flight.
+        self._tick_callback = None
 
         self._proc = None
         self._out_q = None
@@ -266,24 +185,20 @@ class ClaudeCLIProvider(LLMProvider):
         # full local session state (messages + tool use + tool results)
         # rather than rebuilding from a synthesized text-only opener.
         self._session_id: str | None = None
-        # Permission-bridge state (populated by _spawn when permission_handler
-        # is set). Tempdir holds settings.json + named pipes; pump thread
-        # listens on req pipe and dispatches to the handler.
-        self._perm_tempdir = None
-        self._perm_req_pipe = None
-        self._perm_resp_pipe = None
-        self._perm_pump_thread = None
-        self._perm_stop = threading.Event()
-        # Standalone tempdir created by _maybe_write_mcp_config when no
-        # permission bridge is in play (no permission handler set). Its
-        # lifecycle is independent of _perm_tempdir; cleaned up alongside
-        # the bridge in _teardown_permission_bridge.
-        self._mcp_only_tempdir = None
+        # Tempdir for the bundled transcript MCP config. Created by
+        # _maybe_write_mcp_config when a meeting record path is set;
+        # cleaned up alongside subprocess teardown.
+        self._mcp_tempdir: Path | None = None
         # Meeting record path. When set (captions enabled + meeting URL
         # known), _spawn registers a bundled transcript MCP server via
         # --mcp-config so inner-claude can fetch spoken-caption history
         # on demand. None disables that server entirely.
         self._meeting_record_path: str | None = None
+        # Set by stop() during shutdown. Suppresses the
+        # _restart_after_death code path so a SIGINT-triggered subprocess
+        # kill doesn't race in a fresh claude subprocess after the rest
+        # of operator has already torn down.
+        self._stopping = False
 
     def set_meeting_record_path(self, path):
         """Set the meeting JSONL path so the bundled transcript MCP can read it.
@@ -338,7 +253,7 @@ class ClaudeCLIProvider(LLMProvider):
         # dead too — clean them up before spawning fresh.
         if self._proc is not None:
             self._terminate_subprocess()
-            self._teardown_permission_bridge()
+            self._teardown_mcp_tempdir()
             self._init_validated = False
 
         claude = shutil.which("claude")
@@ -364,13 +279,12 @@ class ClaudeCLIProvider(LLMProvider):
             # on_paragraph as they arrive.
             "--include-partial-messages",
         ]
-        # Phase 14.19.2 — `--yolo` flag on dial/deploy/slip sets
-        # OPERATOR_YOLO=1 in env before _run_bot runs. Append the
-        # claude-CLI permission-bypass flag at spawn time. The permission
-        # bridge below still gets set up (PreToolUse hook fires) but
-        # `--dangerously-skip-permissions` overrides at the CLI level so
-        # claude never pauses regardless of hook output. 14.19.8 rewrites
-        # the bridge to be conditionally skipped under yolo.
+        # `--yolo` on the operator CLI sets OPERATOR_YOLO=1 in env. Forward
+        # it as `--dangerously-skip-permissions` to inner-claude. With no
+        # yolo flag we pass nothing extra and Claude Code applies its
+        # native permission rules (configured via the user's
+        # ~/.claude/settings.json). Operator does not impose its own
+        # permission layer.
         if os.environ.get("OPERATOR_YOLO") == "1":
             cmd.append("--dangerously-skip-permissions")
         if self._session_id is not None:
@@ -380,53 +294,22 @@ class ClaudeCLIProvider(LLMProvider):
             # turn pairs. The new init event will echo the same session_id.
             cmd += ["--resume", self._session_id]
         # Compose the agent's voice (self._append_system_prompt) with the
-        # framework's pre-tool voice rule. Single injection point so the
-        # rule composes cleanly with: (a) the lazy `system` path in
+        # framework's pre-tool narration rule. Single injection point so
+        # the rule composes cleanly with: (a) the lazy `system` path in
         # complete()/complete_streaming() that sets _append_system_prompt
         # on first call when no construction-time prompt was passed, and
         # (b) the transcript-tool backstop appended by
         # set_meeting_record_path. By the time _spawn() runs, both have
         # already landed in self._append_system_prompt.
-        #
-        # When OPERATOR_YOLO=1 the permission gate is bypassed at the
-        # CLI level (--dangerously-skip-permissions, appended above);
-        # the YOLO override tacks on after the main rule to flatten the
-        # WRITE tier into the READ tier so the model doesn't ask
-        # questions the user has nothing to reply to.
-        rule_parts = [_PRE_TOOL_VOICE_RULE]
-        if os.environ.get("OPERATOR_YOLO") == "1":
-            rule_parts.append(_PRE_TOOL_VOICE_RULE_YOLO_OVERRIDE)
         composed = "\n\n".join(
-            p for p in [self._append_system_prompt, *rule_parts] if p
+            p for p in [self._append_system_prompt, _PRE_TOOL_VOICE_RULE] if p
         )
         if composed:
             cmd += ["--append-system-prompt", composed]
 
-        # If a permission_handler was provided, set up the named-pipe IPC
-        # rendezvous + write a per-invocation settings.json that registers
-        # our PreToolUse hook. Without a handler we skip this entirely so
-        # inner-claude follows its default permission flow.
-        #
-        # YOLO note: contrary to a stale comment from 14.19.2, live
-        # testing in session 196 confirmed `--dangerously-skip-permissions`
-        # does NOT skip PreToolUse hooks — they still fire and the
-        # handler is invoked. The flag appears to override deny decisions
-        # but doesn't suppress the hook itself. We rely on this behavior:
-        # under YOLO, chat_runner._wire_permissions wires an auto_approve
-        # list that matches '*' so the handler always returns allow,
-        # belt-and-suspenders alongside the CLI flag.
-        if self._permission_handler is not None:
-            self._setup_permission_bridge()
-            cmd += ["--settings", str(self._perm_tempdir / "settings.json")]
-            # `default` permission mode lets PreToolUse hooks be the source
-            # of truth (rather than auto-accept or auto-bypass).
-            cmd += ["--permission-mode", "default"]
-
         # Register the bundled transcript MCP server via --mcp-config so the
-        # model can fetch spoken-caption history on demand. We piggyback on
-        # the permission-bridge tempdir when present; otherwise create a
-        # one-off tempdir scoped to the spawn so the JSON survives until
-        # claude reads it.
+        # model can fetch spoken-caption history on demand. The config
+        # lives in a per-spawn tempdir; cleaned up at teardown.
         mcp_config_path = self._maybe_write_mcp_config()
         if mcp_config_path is not None:
             cmd += ["--mcp-config", str(mcp_config_path)]
@@ -449,11 +332,10 @@ class ClaudeCLIProvider(LLMProvider):
                 env=env,
             )
         except OSError as exc:
-            # Bridge tempdir + named pipes were created in
-            # _setup_permission_bridge above; if Popen fails, tear them down
-            # before raising so we don't accumulate orphan /tmp dirs across
-            # repeated spawn failures.
-            self._teardown_permission_bridge()
+            # MCP tempdir was created in _maybe_write_mcp_config above; if
+            # Popen fails, tear it down before raising so we don't
+            # accumulate orphan /tmp dirs across repeated spawn failures.
+            self._teardown_mcp_tempdir()
             raise ClaudeCLIProtocolError(f"failed to launch claude CLI: {exc}") from exc
 
         self._out_q = Queue()
@@ -471,18 +353,12 @@ class ClaudeCLIProvider(LLMProvider):
         """Write the per-spawn MCP config registering the transcript server.
 
         Returns the path to the JSON file, or None when no meeting record
-        path is set (captions disabled, or no meeting yet). Lives in the
-        permission-bridge tempdir if one exists, else a fresh one.
+        path is set (captions disabled, or no meeting yet).
         """
         if not self._meeting_record_path:
             return None
-        if self._perm_tempdir is not None:
-            target_dir = self._perm_tempdir
-        else:
-            # Track the standalone tempdir so _teardown_permission_bridge
-            # can rm it — it has no permission-bridge state to piggyback on.
-            target_dir = Path(tempfile.mkdtemp(prefix="operator-claude-mcp-"))
-            self._mcp_only_tempdir = target_dir
+        target_dir = Path(tempfile.mkdtemp(prefix="operator-claude-mcp-"))
+        self._mcp_tempdir = target_dir
         config_path = target_dir / "mcp.json"
         config_path.write_text(json.dumps({
             "mcpServers": {
@@ -501,149 +377,12 @@ class ClaudeCLIProvider(LLMProvider):
         )
         return config_path
 
-    def _setup_permission_bridge(self):
-        """Create the tempdir, named pipes, and settings.json for the IPC bridge.
-
-        Spawns the pump thread that listens on the request pipe.
-        """
-        tmp = Path(tempfile.mkdtemp(prefix="operator-claude-perm-"))
-        req = tmp / "request.pipe"
-        resp = tmp / "response.pipe"
-        os.mkfifo(req, 0o600)
-        os.mkfifo(resp, 0o600)
-        self._perm_tempdir = tmp
-        self._perm_req_pipe = req
-        self._perm_resp_pipe = resp
-
-        # Bridge command claude will invoke on every PreToolUse event. We
-        # pass the bridge's file path directly rather than `-m
-        # operator.pipeline.permission_bridge` so it runs as a standalone
-        # script — no dependency on PYTHONPATH or `pip install -e .` in the
-        # spawned shell. The bridge module imports only stdlib (verified at
-        # write-time), so this is sound.
-        import shlex
-        from _1_800_operator.pipeline import permission_bridge as _bridge_mod
-        bridge_path = Path(_bridge_mod.__file__).resolve()
-        bridge_cmd = (
-            f"{shlex.quote(sys.executable)} {shlex.quote(str(bridge_path))} "
-            f"{shlex.quote(str(req))} {shlex.quote(str(resp))}"
-        )
-
-        settings = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": bridge_cmd,
-                                "timeout": 600,  # generous; parent governs UX-level timeout
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        (tmp / "settings.json").write_text(json.dumps(settings, indent=2))
-        log.info(f"ClaudeCLI permission bridge: tempdir={tmp}")
-
-        self._perm_stop.clear()
-        self._perm_pump_thread = threading.Thread(
-            target=self._permission_pump,
-            args=(req, resp, self._permission_handler),
-            daemon=True,
-        )
-        self._perm_pump_thread.start()
-
-    def _permission_pump(self, req_pipe, resp_pipe, handler):
-        """Read one JSON request per bridge invocation, write back the decision.
-
-        Bridge writes one payload then closes its end (EOF). We re-open the
-        pipe each iteration. Stops cleanly when self._perm_stop is set: the
-        sentinel write in _teardown_permission_bridge() unblocks the open().
-        """
-        log.info("ClaudeCLI permission pump started")
-        while not self._perm_stop.is_set():
-            try:
-                with open(req_pipe, "r") as fr:
-                    line = fr.read()
-            except Exception as e:
-                if self._perm_stop.is_set():
-                    break
-                log.warning(f"ClaudeCLI permission pump req-read failed: {e}")
-                continue
-            if self._perm_stop.is_set():
-                break
-            if not line.strip():
-                # Spurious wakeup or empty payload — ignore.
-                continue
-            try:
-                request = json.loads(line.strip())
-            except json.JSONDecodeError as e:
-                log.warning(f"ClaudeCLI permission pump got non-JSON: {e}; payload={line!r}")
-                continue
-            tool_name = request.get("tool_name", "")
-            tool_input = request.get("tool_input", {})
-            try:
-                decision = handler(tool_name, tool_input)
-            except Exception as e:
-                log.exception(f"ClaudeCLI permission handler raised on {tool_name!r}")
-                decision = {
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": f"handler error: {e}",
-                }
-            try:
-                with open(resp_pipe, "w") as fw:
-                    fw.write(json.dumps(decision) + "\n")
-            except Exception as e:
-                log.warning(f"ClaudeCLI permission pump resp-write failed: {e}")
-                continue
-        log.info("ClaudeCLI permission pump exited")
-
-    def _teardown_permission_bridge(self):
-        """Stop the pump thread and remove the tempdir + pipes.
-
-        Also cleans up any standalone mcp-only tempdir created by
-        _maybe_write_mcp_config when no permission bridge is in play —
-        that path is independent of the bridge's own state and must run
-        even when _perm_tempdir was never created.
-        """
-        # mcp-only tempdir cleanup runs first so it's not skipped by the
-        # bridge-not-set early return below. Created by
-        # _maybe_write_mcp_config when permission_handler is None but
-        # captions/transcript MCP are wired.
-        if self._mcp_only_tempdir is not None:
-            if self._mcp_only_tempdir.exists():
-                shutil.rmtree(self._mcp_only_tempdir, ignore_errors=True)
-            self._mcp_only_tempdir = None
-
-        if self._perm_tempdir is None:
-            return
-        self._perm_stop.set()
-        # Unblock the pump's open() by writing a sentinel to the request
-        # pipe. open(..., "w") would block until a reader exists, but the
-        # pump itself is the reader and is currently blocked in its own
-        # open(..., "r") — so writing satisfies both sides.
-        try:
-            if self._perm_req_pipe and self._perm_req_pipe.exists():
-                # Use os.open + O_NONBLOCK so we don't deadlock if the
-                # pump already exited.
-                fd = os.open(str(self._perm_req_pipe), os.O_WRONLY | os.O_NONBLOCK)
-                try:
-                    os.write(fd, b"\n")
-                finally:
-                    os.close(fd)
-        except OSError:
-            pass  # pump already gone; that's fine
-        if self._perm_pump_thread is not None:
-            self._perm_pump_thread.join(timeout=5)
-            self._perm_pump_thread = None
-        if self._perm_tempdir.exists():
-            shutil.rmtree(self._perm_tempdir, ignore_errors=True)
-        self._perm_tempdir = None
-        self._perm_req_pipe = None
-        self._perm_resp_pipe = None
+    def _teardown_mcp_tempdir(self):
+        """Remove the per-spawn MCP config tempdir. Idempotent."""
+        if self._mcp_tempdir is not None:
+            if self._mcp_tempdir.exists():
+                shutil.rmtree(self._mcp_tempdir, ignore_errors=True)
+            self._mcp_tempdir = None
 
     # --- restart / resume ---------------------------------------------
 
@@ -660,15 +399,41 @@ class ClaudeCLIProvider(LLMProvider):
         Permission-bridge state is also rebuilt — pipes/settings.json are
         per-subprocess. Reset _init_validated so the new subprocess gets
         its own apiKeySource check.
+
+        No-op if stop() has been called — during shutdown the subprocess
+        gets SIGKILLed by operator's safety net, which would otherwise
+        race a fresh restart here. Callers in the streaming/non-streaming
+        retry paths re-check _stopping before retrying.
         """
+        if self._stopping:
+            log.info("ClaudeCLI: shutdown in progress — not restarting subprocess")
+            return
         log.warning(
             "ClaudeCLI: subprocess died mid-meeting, restarting "
             f"(session={self._session_id or 'none — fresh spawn'})"
         )
         self._terminate_subprocess()
-        self._teardown_permission_bridge()
+        self._teardown_mcp_tempdir()
         self._init_validated = False
         self._spawn()
+
+    def stop(self):
+        """Mark the provider as shutting down and tear down its subprocess.
+
+        Called at meeting end (chat_runner.stop()) and from the
+        signal-handler shutdown path. Setting `_stopping` makes the
+        mid-turn restart path (_restart_after_death + the streaming /
+        non-streaming retry sites) bail instead of spawning a zombie
+        replacement subprocess that nothing will ever serve. If the
+        meeting bot is still talking, this cuts off the response —
+        caller is responsible for sequencing. Idempotent.
+        """
+        if self._stopping:
+            return
+        log.info("ClaudeCLI stop() called")
+        self._stopping = True
+        self._terminate_subprocess()
+        self._teardown_mcp_tempdir()
 
     def _validate_init_event(self, payload):
         """Check the apiKeySource on a system-init event. Raise if not subscription.
@@ -717,22 +482,6 @@ class ClaudeCLIProvider(LLMProvider):
         self._out_q = None
         self._reader = None
 
-    def set_permission_handler(self, handler):
-        """Late-bind the permission handler.
-
-        Construction-time wiring is awkward when the handler needs the
-        meeting connector (only available after ChatRunner sets up). This
-        setter lets the handler be plugged in just before the first
-        complete() call. Must be called before _spawn() — once the
-        subprocess is alive the bridge wiring is fixed for its lifetime.
-        """
-        if self._proc is not None:
-            raise RuntimeError(
-                "set_permission_handler must be called before the subprocess spawns; "
-                "the bridge is wired in _spawn() and not reconfigurable mid-meeting."
-            )
-        self._permission_handler = handler
-
     def set_progress_callback(self, callback):
         """Late-bind the progress narrator.
 
@@ -743,15 +492,25 @@ class ClaudeCLIProvider(LLMProvider):
         """
         self._progress_callback = callback
 
-    def stop(self):
-        """Cleanly shut down the subprocess + permission bridge. Idempotent.
+    def set_tick_callback(self, callback):
+        """Late-bind a per-iteration tick fired during in-turn out-queue
+        polling. Signature: () -> None. Called from the same thread that
+        invoked complete()/complete_streaming() (the polling thread, on
+        the live runner) on every loop iteration of the streaming and
+        non-streaming event readers — both event arrivals and the 0.5s
+        timeout cycle. ChatRunner uses this to drain its off-thread
+        send queue while the polling thread is parked here. Exceptions
+        are swallowed so a misbehaving callback can't kill the turn."""
+        self._tick_callback = callback
 
-        Called at meeting end. If the meeting bot is still talking, this
-        cuts off the response — caller is responsible for sequencing.
-        """
-        log.info("ClaudeCLI stop() called")
-        self._terminate_subprocess()
-        self._teardown_permission_bridge()
+    def _fire_tick(self):
+        cb = self._tick_callback
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            log.warning(f"ClaudeCLI: tick callback raised: {e}")
 
     # --- event-loop helpers (used by _send_and_collect{,_streaming}) --
 
@@ -834,6 +593,11 @@ class ClaudeCLIProvider(LLMProvider):
         context, so we send only the LAST entry — which must be the new
         user turn.
         """
+        if self._stopping:
+            # Shutdown in progress. Refuse to spawn a fresh subprocess —
+            # that's how _narrate_failure was racing a zombie claude
+            # right after the safety net killed the in-flight one.
+            raise ClaudeCLIProtocolError("provider is stopping")
         if not messages:
             raise ValueError("complete() requires at least one message")
         last = messages[-1]
@@ -864,7 +628,13 @@ class ClaudeCLIProvider(LLMProvider):
             # Subprocess died *during* the turn (write or read). Restart
             # via _restart_after_death (which uses --resume when a
             # session_id has been captured) and replay just the new user
-            # text against the rehydrated session.
+            # text against the rehydrated session. Skip retry if stop()
+            # has been called — the subprocess died because we asked it
+            # to (SIGINT shutdown), and a respawn here would just be
+            # killed by the safety net on the way out.
+            if self._stopping:
+                log.info("ClaudeCLI: turn aborted during shutdown — propagating")
+                raise
             log.warning(f"ClaudeCLI: turn aborted ({exc}); attempting one restart")
             self._restart_after_death()
             response = self._send_and_collect(new_user_text)
@@ -892,6 +662,7 @@ class ClaudeCLIProvider(LLMProvider):
         last_event_ts = time.monotonic()
         tool_in_flight = False
         while time.monotonic() < deadline:
+            self._fire_tick()
             try:
                 kind, payload = self._out_q.get(timeout=0.5)
             except Empty:
@@ -965,6 +736,8 @@ class ClaudeCLIProvider(LLMProvider):
 
         If on_paragraph is None this falls back to non-streaming behavior.
         """
+        if self._stopping:
+            raise ClaudeCLIProtocolError("provider is stopping")
         if on_paragraph is None:
             return self.complete(system, messages, model, max_tokens, tools=tools)
 
@@ -997,7 +770,13 @@ class ClaudeCLIProvider(LLMProvider):
             # reply as a fresh message and the user reads it as a redo).
             # _restart_after_death uses --resume when a session_id has
             # been captured so the rehydrated subprocess inherits prior
-            # context; we replay just the new user text.
+            # context; we replay just the new user text. Skip retry if
+            # stop() has been called — the subprocess died because we
+            # asked it to (SIGINT shutdown), and respawning would race
+            # the safety net.
+            if self._stopping:
+                log.info("ClaudeCLI: streaming turn aborted during shutdown — propagating")
+                raise
             log.warning(
                 f"ClaudeCLI: streaming turn aborted ({exc}); attempting one restart"
             )
@@ -1043,6 +822,7 @@ class ClaudeCLIProvider(LLMProvider):
         last_event_ts = time.monotonic()
         tool_in_flight = False
         while time.monotonic() < deadline:
+            self._fire_tick()
             try:
                 kind, payload = self._out_q.get(timeout=0.5)
             except Empty:

@@ -126,6 +126,12 @@ def test_heartbeat_fires_after_silence(monkeypatch):
     time.sleep(0.6)  # 2x the threshold to ensure trip + post
     stop.set()
     t.join(timeout=2.0)
+    # The heartbeat daemon enqueues sends to be drained on the main
+    # thread (Playwright's sync API rejects non-main-thread calls).
+    # In the live runner this drain happens via the polling loop and
+    # the provider's tick callback; in this isolated test we run it
+    # explicitly from the test's main thread.
+    runner._drain_pending_sends()
 
     assert len(heartbeat_called) >= 1, "side-channel should have fired"
     assert heartbeat_called[0]["user_msg"] == "what's open before MVP?"
@@ -165,6 +171,9 @@ def test_heartbeat_skipped_when_text_landed_during_call(monkeypatch):
     time.sleep(0.7)
     stop.set()
     t.join(timeout=2.0)
+    # Drain any queued off-thread sends so the assertion runs against
+    # the same end state as production.
+    runner._drain_pending_sends()
 
     # Side-channel did fire (threshold tripped before the bump), but
     # the heartbeat post should have been suppressed by the race re-check.
@@ -222,6 +231,7 @@ def test_heartbeat_does_not_double_fire(monkeypatch):
     time.sleep(0.45)
     stop.set()
     t.join(timeout=2.0)
+    runner._drain_pending_sends()
 
     heartbeat_records = [r for r in runner._record.appended if r["kind"] == "heartbeat"]
     assert len(heartbeat_records) == 1, (

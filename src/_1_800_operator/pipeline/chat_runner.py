@@ -7,6 +7,7 @@ Usage:
 """
 import collections
 import logging
+import queue
 import re
 import subprocess
 import threading
@@ -111,19 +112,6 @@ class ChatRunner:
         # which prevents a partial-state observer from the read loop
         # seeing one without the other.
         self._send_lock = threading.Lock()
-        # Most-recent-user-message bookkeeping for the recent-yes
-        # auto-approval path in PermissionChatHandler. When the user has
-        # JUST said "yes" (the message that triggered the current turn)
-        # and the model immediately invokes a tool, the bridge would
-        # otherwise sit waiting for a redundant second "yes". The handler
-        # consults `latest_user_message()` and, if the most recent user
-        # turn is unambiguously affirmative AND was not already consumed
-        # by a prior gate (tracked in `_approval_msg_ids_used`), auto-
-        # allows. Updated in the polling loop on every observed user
-        # message; never cleared mid-meeting (stale entries fall out of
-        # the recency window the handler enforces).
-        self._latest_user_msg: tuple[str, str, float] | None = None
-        self._approval_msg_ids_used: set[str] = set()
         # Loop-state. Promoted to self.* (vs. _loop locals) so the
         # _advance_intro_state / _check_participant_state / _process_messages
         # helpers can read+mutate without 4-tuple parameter passing. Lifetime
@@ -150,75 +138,49 @@ class ChatRunner:
         # silence clock so back-to-back heartbeats don't fire faster
         # than the threshold. Reset to 0.0 at turn start.
         self._last_heartbeat_post_ts: float = 0.0
+        # Cached LLM provider. Set by _wire_provider when the provider
+        # is a ClaudeCLIProvider; remains None otherwise. stop() calls
+        # provider.stop() so a SIGINT shutdown doesn't race a mid-turn
+        # restart.
+        self._provider = None
+        # Thread-routing for outbound chat sends. Playwright's sync API
+        # is single-threaded by contract — only the thread that opened
+        # the Page may call its methods. The polling loop owns the
+        # Page, so any _send call from another thread (the per-turn
+        # heartbeat daemon, primarily) gets enqueued here and drained
+        # on the polling thread (between turns) and on the provider's
+        # out-queue tick (during turns — the polling thread is blocked
+        # inside _send_and_collect_streaming, but it cycles through
+        # out_q.get every 0.5s and we drain on each cycle).
+        self._main_thread = threading.current_thread()
+        self._send_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
-    def _wire_permissions(self):
-        """Plug a chat-routed PreToolUse handler into the claude_cli provider.
+    def _wire_provider(self):
+        """Cache the ClaudeCLIProvider and wire its progress + tick callbacks.
 
-        Every tool call inside the inner CLI subprocess fires a PreToolUse
-        hook that round-trips through meeting chat. Reads auto-approve
-        silently (the model narrates what it's looking up; the framework
-        runs the tool); writes gate at a chat round-trip (the model asks
-        a question, the user replies yes/no). Bypass the whole flow by
-        passing `--yolo` (sets `--dangerously-skip-permissions` at spawn).
+        Operator does not impose its own permission layer — Claude Code's
+        native rules apply (governed by `--dangerously-skip-permissions`
+        when --yolo is set, otherwise by the user's
+        `~/.claude/settings.json`). This method only wires the
+        narration/heartbeat support that ChatRunner needs for chat output:
 
-        Auto-approved patterns are deliberately conservative — anything
-        not on this list falls through to a chat round-trip, which is the
-        safe default. The patterns target the standard MCP naming
-        convention `mcp__<server>__<verb>_<object>` plus the canonical
-        claude-code built-in reads. If an MCP author names a destructive
-        tool with a read-shaped verb (`mcp__x__list_and_burn`) we'd
-        false-positive auto-approve it — accept that risk in exchange
-        for friction-free read flows. The prompt rule
-        (claude_cli._PRE_TOOL_VOICE_RULE) keeps the model's tier
-        classification aligned with these patterns.
+          - progress_callback: records each tool_use into the bounded
+            deque so the heartbeat side-channel call has context.
+          - tick_callback: drains off-thread queued sends on the polling
+            thread during in-turn out-queue iteration (so heartbeats
+            actually reach Meet during long silences).
+
+        Caching `self._provider` lets stop() also stop the provider so
+        SIGINT doesn't race a mid-turn restart.
         """
-        import os
         from _1_800_operator.pipeline.providers.claude_cli import ClaudeCLIProvider
-        from _1_800_operator.pipeline.permission_chat_handler import PermissionChatHandler
         provider = getattr(self._llm, "_provider", None)
         if not isinstance(provider, ClaudeCLIProvider):
             return
-        if os.environ.get("OPERATOR_YOLO") == "1":
-            # Belt and suspenders alongside --dangerously-skip-permissions:
-            # auto-approve every tool at the bridge so the handler never
-            # gates anything. Without this, the bridge still calls the
-            # handler under YOLO (the CLI flag overrides deny decisions
-            # but doesn't suppress the hook itself), and the handler's
-            # default behavior on unknown tools is to round-trip via chat.
-            auto_approve = ["*"]
-            log.info("ChatRunner: permission handler wired (YOLO — all tools auto-approve)")
-        else:
-            auto_approve = [
-                # Claude's internal tool-schema discovery — meta, not
-                # user-visible action.
-                "ToolSearch",
-                # Built-in claude-code reads.
-                "Read", "Grep", "Glob", "LS", "WebSearch",
-                # MCP read patterns (mcp__<server>__<verb>_<object>).
-                "*__get_*",
-                "*__list_*",
-                "*__search_*",
-                "*__find_*",
-                "*__read_*",
-                # MCP servers commonly expose bare-verb tools too —
-                # `mcp__github__get_me`, `mcp__sentry__whoami`. The
-                # bare-verb ones we want to auto-approve are typed out
-                # explicitly to avoid over-broad globs.
-                "*__whoami",
-            ]
-            log.info("ChatRunner: permission handler wired (reads auto-approve, writes gate)")
-        handler = PermissionChatHandler(
-            connector=self._connector,
-            runner=self,
-            auto_approve=auto_approve,
-            always_ask=[],
-        )
-        provider.set_permission_handler(handler)
-        # Wire the tool-use tracker for heartbeats. The provider already
-        # fires progress_callback per tool_use block during streaming;
-        # we just need to record name+input into the bounded deque so
-        # the heartbeat side-channel call has context.
         provider.set_progress_callback(self._record_tool_use)
+        provider.set_tick_callback(self._drain_pending_sends)
+        self._provider = provider
+        log.info("ChatRunner: provider wired (no permission gate; Claude Code defaults apply)")
 
     def _record_tool_use(self, tool_name: str, tool_input: dict):
         """Progress callback hooked into ClaudeCLIProvider — appends each
@@ -236,7 +198,7 @@ class ChatRunner:
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
         log.info(f"ChatRunner: joining {meeting_url}")
-        self._wire_permissions()
+        self._wire_provider()
         # Open a meeting record for this URL if one wasn't provided.
         if self._record is None:
             slug = slug_from_url(meeting_url)
@@ -324,8 +286,19 @@ class ChatRunner:
         self._intro_ready.set()
 
     def stop(self):
-        """Signal the polling loop to exit."""
+        """Signal the polling loop to exit and tear down the LLM provider.
+
+        Calling provider.stop() before the safety net SIGKILLs the
+        subprocess closes the race where the provider's mid-turn
+        restart path would otherwise spawn a fresh claude subprocess
+        right as operator is shutting down.
+        """
         self._stop_event.set()
+        if self._provider is not None:
+            try:
+                self._provider.stop()
+            except Exception as e:
+                log.warning(f"ChatRunner: provider.stop raised: {e}")
 
     def _safe_leave(self):
         """Wrap connector.leave() — if it raises (e.g. Playwright already
@@ -375,6 +348,13 @@ class ChatRunner:
             # separate participant and ambient chat IS for it.
             one_on_one = (not self._quiet_mode) and (self._participant_count <= ONE_ON_ONE_THRESHOLD)
             self._process_messages(messages, one_on_one)
+
+            # Flush any sends queued by off-thread callers since the
+            # last iteration. Between-turn coverage; in-turn drain
+            # happens via the provider's tick callback (set in
+            # _wire_provider) since this loop is blocked inside the
+            # LLM call once a turn is in flight.
+            self._drain_pending_sends()
 
             self._stop_event.wait(POLL_INTERVAL)
 
@@ -553,10 +533,6 @@ class ChatRunner:
                 continue
 
             log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r} one_on_one={one_on_one}")
-            # Stash for the recent-yes auto-approval path. The handler reads
-            # this when its bridge fires; the time.monotonic() stamp is
-            # what enforces the recency window.
-            self._latest_user_msg = (msg_id or text, text, time.monotonic())
 
             # Pre-intro user messages: buffer in memory and persist at drain
             # time, AFTER the intro has been written to the record. If we
@@ -697,7 +673,17 @@ class ChatRunner:
         retry window after the original call already exhausted its retries).
         On any narration failure (call raises, returns empty), posts the
         hardcoded `fallback`. Always emits turn_done(failed=True).
+
+        Skipped entirely during shutdown: the only "failures" reaching us
+        post-stop are subprocess-killed-by-safety-net and other shutdown
+        artifacts — narrating them would (a) post into a chat panel
+        that's already detaching and (b) re-spawn the subprocess we just
+        killed. Just emit turn_done and return.
         """
+        if self._stop_event.is_set():
+            log.info("ChatRunner: skipping failure narration — shutdown in progress")
+            self._emit_turn_done(failed=True)
+            return
         prompt = (
             f"Internal note (do not echo verbatim): {context} "
             f"Send a short plain-text reply telling the user what happened "
@@ -974,7 +960,17 @@ class ChatRunner:
         for adapters that can't return an ID (linux) or when the ID read-back
         times out; we store text stripped so DOM normalization (trailing
         newlines etc.) doesn't break the comparison.
+
+        Off-thread callers (heartbeat daemon, etc.) get their send enqueued
+        instead of executed inline — Playwright's sync API rejects calls
+        from any thread other than the one that opened the Page, and silent
+        failure inside the connector would otherwise look like a successful
+        post in the log. The polling loop and the provider's out-queue tick
+        drain the queue on the main thread.
         """
+        if threading.current_thread() is not self._main_thread:
+            self._send_queue.put((text, kind))
+            return
         text_normalized = text.strip()
         with self._send_lock:
             self._own_messages.add(text_normalized)
@@ -992,3 +988,21 @@ class ChatRunner:
             if msg_id:
                 self._seen_ids.add(msg_id)
             self._last_send_time = time.time()
+
+    def _drain_pending_sends(self):
+        """Flush any queued off-thread sends on the main thread.
+
+        Called from two places, both on the main (Playwright-owning)
+        thread: the polling loop between iterations (covers between-turn
+        sends) and the provider's out-queue tick (covers during-turn
+        sends, when the polling thread is blocked inside the LLM call).
+        Bounded per call so a flood doesn't starve the caller.
+        """
+        drained = 0
+        while drained < 16:
+            try:
+                text, kind = self._send_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._send(text, kind=kind)
+            drained += 1
