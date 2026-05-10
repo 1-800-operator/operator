@@ -426,8 +426,7 @@ class AttachAdapter(MeetingConnector):
             js.signal_failure("linux_unsupported")
             raise SlipAttachError(
                 "slip mode is currently macOS-only. Linux support is "
-                "tracked for a follow-up phase. Use `operator dial claude` "
-                "or `operator deploy claude <url>` on Linux."
+                "tracked for a follow-up phase."
             )
         if not meeting_url:
             js.signal_failure("missing_url")

@@ -10,10 +10,9 @@ hierarchy natively when the binary spawns. What remains is:
      pipeline/ and connectors/ read by name. Hardcoded; edit here to
      change runtime behavior globally.
   2. A small set of claude-bridge constants (AGENT_NAME, TRIGGER_PHRASE,
-     HISTORY_MESSAGES, CAPTIONS_ENABLED) that LLMClient and ChatRunner
-     read by name. Inlined here for now; when a second bridge
-     (codex/gemini) lands, callers will pick the right bridge module
-     instead.
+     HISTORY_MESSAGES) that LLMClient and ChatRunner read by name.
+     Inlined here for now; when a second bridge (codex/gemini) lands,
+     callers will pick the right bridge module instead.
 """
 
 import os
@@ -37,20 +36,14 @@ from _1_800_operator.bridges import claude as _claude_bridge
 AGENT_NAME       = "Claude"
 TRIGGER_PHRASE   = _claude_bridge.TRIGGER_PHRASE  # "@claude"
 HISTORY_MESSAGES = 40
-CAPTIONS_ENABLED = True
 
 
 # ── INTERNAL TUNING ───────────────────────────────────────────────────────
 # Tuned-once internals — edit here to change runtime behavior globally.
 ALONE_EXIT_GRACE_SECONDS    = 60     # once we've seen a peer and they leave, exit after this many seconds
-HOLD_DURATION_SECONDS       = 2.0    # min gap between "Hold for <bot>..." and the LLM-generated intro, so users register the "connecting you now" beat even when intro generation finishes fast
 LOBBY_WAIT_SECONDS          = 600    # max wait in Meet waiting room for host to admit us
-CAPTION_SILENCE_SECONDS     = 0.7    # dead-air gap before a buffered caption chunk commits to history
 MAX_TOKENS                  = 2000   # runaway guard on LLM output; "be brief" system-prompt does the real shaping
 
-BROWSER_PROFILE_DIR = str(Path.home() / ".operator" / "browser_profile")     # persistent Chrome profile (cookies, Google login)
-AUTH_STATE_FILE     = str(Path.home() / ".operator" / "auth_state.json")     # Playwright storageState JSON for quick re-auth
-GOOGLE_ACCOUNT_FILE = str(Path.home() / ".operator" / "google_account.json") # cached {"email": "..."} for the doctor's "✓ signed in as X" detect
 ENV_FILE            = str(Path.home() / ".operator" / ".env")                # shared .env for API keys
 DEBUG_DIR           = str(Path.home() / ".operator" / "debug")               # screenshots + HTML dumps from save_debug() and adapter failure paths
 

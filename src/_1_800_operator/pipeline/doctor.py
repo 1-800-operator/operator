@@ -14,40 +14,23 @@ for slip's audio helper, Phase 14.20.4) skip on other platforms.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from _1_800_operator.pipeline.chrome_preflight import (
-    CHROME_PATH,
-    INSTALL_URL as CHROME_INSTALL_URL,
-    chrome_installed,
-)
 from _1_800_operator.pipeline.claude_code_import import _probe_claude_code
 
-_AUTH_STATE_FILE = Path.home() / ".operator" / "auth_state.json"
+CHROME_PATH = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+CHROME_INSTALL_URL = "https://www.google.com/chrome/"
 
 
-def _playwright_browsers_root() -> Path:
-    """Directory Playwright stores browser builds under. Honors
-    PLAYWRIGHT_BROWSERS_PATH; otherwise platform default."""
-    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if override:
-        return Path(override)
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Caches" / "ms-playwright"
-    return Path.home() / ".cache" / "ms-playwright"
-
-
-def chromium_installed() -> bool:
-    """True iff Playwright has at least one `chromium-*` build cached."""
-    root = _playwright_browsers_root()
-    if not root.exists():
-        return False
-    return any(child.name.startswith("chromium-") for child in root.iterdir())
+def chrome_installed() -> bool:
+    """True on non-darwin (no system-Chrome dependency) or when the binary exists."""
+    if sys.platform != "darwin":
+        return True
+    return CHROME_PATH.exists()
 
 # Slip's audio helper. Production is the signed+notarized .app produced by
 # scripts/build_signed_helper.sh (only this path can capture system audio).
@@ -96,7 +79,7 @@ def _check_claude() -> CheckResult:
 
 
 def _check_chrome() -> CheckResult:
-    """Real Google Chrome.app present (macOS) — required by slip + sign-in."""
+    """Real Google Chrome.app present (macOS) — required by slip's CDP attach."""
     if chrome_installed():
         return CheckResult(
             "Google Chrome",
@@ -109,23 +92,6 @@ def _check_chrome() -> CheckResult:
         ok=False,
         detail="not installed",
         fix=f"brew install --cask google-chrome  (or download from {CHROME_INSTALL_URL})",
-    )
-
-
-def _check_chromium() -> CheckResult:
-    """Playwright Chromium runtime — required by dial/deploy headless flow."""
-    if chromium_installed():
-        return CheckResult(
-            "Playwright Chromium",
-            True,
-            "installed",
-            "",
-        )
-    return CheckResult(
-        name="Playwright Chromium",
-        ok=False,
-        detail="not installed",
-        fix=f"{sys.executable} -m playwright install chromium",
     )
 
 
@@ -146,29 +112,6 @@ def _check_git() -> CheckResult:
     except (subprocess.TimeoutExpired, OSError):
         version = "(installed)"
     return CheckResult("git", True, version, "")
-
-
-def _check_auth_state() -> CheckResult:
-    """`~/.operator/auth_state.json` — required only for dial/deploy.
-
-    Slip launches its own dedicated Chrome under `~/.operator/slip_profile/`
-    and never reads auth_state.json. Doctor reports this absence as a
-    warning (yellow) rather than a hard fail so a slip-only user isn't
-    pushed to set up dial sign-in they don't need.
-    """
-    if _AUTH_STATE_FILE.exists():
-        return CheckResult(
-            name="Google sign-in (dial/deploy)",
-            ok=True,
-            detail=f"auth_state.json present at {_AUTH_STATE_FILE}",
-            fix="",
-        )
-    return CheckResult(
-        name="Google sign-in (dial/deploy)",
-        ok=False,
-        detail="not signed in — only needed for dial/deploy (slip is independent)",
-        fix="operator login claude",
-    )
 
 
 _TCC_STATUS_DETAIL = {
@@ -274,9 +217,7 @@ def run_doctor() -> int:
     checks = [
         _check_claude(),
         _check_chrome(),
-        _check_chromium(),
         _check_git(),
-        _check_auth_state(),
     ]
     # Slip is macOS-only — TCC checks are meaningless elsewhere.
     if sys.platform == "darwin":
@@ -298,7 +239,7 @@ def run_doctor() -> int:
     print()
 
     if failures == 0:
-        print("All checks passed. You're ready to dial/deploy/slip.")
+        print("All checks passed. You're ready to slip.")
         return 0
     word = "issue" if failures == 1 else "issues"
     print(f"{failures} {word} above. Fix and re-run `operator doctor`.")

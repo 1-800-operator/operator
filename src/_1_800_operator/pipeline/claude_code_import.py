@@ -1,7 +1,7 @@
 """Claude Code installation preflight — used at boot.
 
-Used by `_run_bot` and `_run_slip` to fail loudly before any browser
-starts when the `claude` CLI is missing or not logged in.
+Used by `_run_slip` to fail loudly before any browser starts when the
+`claude` CLI is missing or not logged in.
 """
 from __future__ import annotations
 

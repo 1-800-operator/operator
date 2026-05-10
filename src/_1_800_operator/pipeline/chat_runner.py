@@ -20,7 +20,6 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.5  # seconds between read_chat() calls
 PARTICIPANT_CHECK_INTERVAL = 3  # seconds between participant count checks
-ONE_ON_ONE_THRESHOLD = 2  # participant count at or below = 1-on-1 mode (skip trigger phrase)
 
 # Min wall-clock spacing between streamed paragraph posts. Two reasons:
 # (a) Meet's chat panel rate-limits rapid sends and may swallow back-to-back
@@ -48,17 +47,10 @@ class ChatRunner:
         connector,
         llm,
         meeting_record: MeetingRecord | None = None,
-        quiet_mode: bool = False,
     ):
         self._connector = connector
         self._llm = llm
         self._record = meeting_record
-        # Slip mode: claude is "speak when spoken to." No intro, no
-        # "Hold for Claude..." filler, no 1-on-1 trigger bypass —
-        # claude only responds when explicitly addressed via
-        # config.TRIGGER_PHRASE. Dial/deploy leave this False so the
-        # original speak-up behavior holds.
-        self._quiet_mode = quiet_mode
         self._stop_event = threading.Event()
         # Track messages we've sent so we can ignore our own echoes
         self._own_messages: set[str] = set()
@@ -286,37 +278,13 @@ class ChatRunner:
             if not join_status.success:
                 reason = join_status.failure_reason or "unknown"
                 log.error(f"ChatRunner: join failed: {reason}")
-                if "session_expired" in reason:
-                    log.error("Re-export session: python scripts/auth_export.py")
-                    ui.err("Not authenticated — run: python scripts/auth_export.py")
-                elif "already_running" in reason:
-                    ui.warn("Another Operator session is already running. Use --force to stop it and start a new one.")
-                else:
-                    ui.err(f"Join failed: {reason}")
+                ui.err(f"Join failed: {reason}")
                 self._safe_leave()
                 return
-            if join_status.session_recovered:
-                log.warning("ChatRunner: session recovered via cookie injection — "
-                            "consider re-running scripts/auth_export.py")
 
         log.info("ChatRunner: joined")
-        # Listening line — show trigger phrase + room state up front so
-        # the user knows how to address the bot and whether 1-on-1 mode
-        # is active. Best-effort participant count; falls back to a
-        # generic message if the connector hasn't reported yet.
-        try:
-            seed_count = self._connector.get_participant_count()
-        except Exception:
-            seed_count = 0
         trigger = config.TRIGGER_PHRASE
-        if self._quiet_mode:
-            ui.ok(f"Listening for @{trigger} — quiet mode (won't speak unless addressed).")
-        elif seed_count and seed_count <= ONE_ON_ONE_THRESHOLD:
-            ui.ok(f"Joined as @{trigger} · solo (1-on-1 mode)")
-        elif seed_count:
-            ui.ok(f"Joined as @{trigger} · {seed_count} participants")
-        else:
-            ui.ok(f"Joined as @{trigger} — listening for chat.")
+        ui.ok(f"Listening for @{trigger} — claude only replies when addressed.")
         log.info("ChatRunner: starting chat loop")
         self._loop()
 
@@ -375,12 +343,10 @@ class ChatRunner:
             if self._stop_event.is_set():
                 break
 
-            # Quiet mode (slip) requires the trigger phrase regardless of
-            # participant count — claude must be explicitly addressed.
-            # Dial/deploy keep the 1-on-1 bypass since claude is a
-            # separate participant and ambient chat IS for it.
-            one_on_one = (not self._quiet_mode) and (self._participant_count <= ONE_ON_ONE_THRESHOLD)
-            self._process_messages(messages, one_on_one)
+            # Slip mode is "speak when spoken to" — claude only responds
+            # to messages containing the trigger phrase, regardless of
+            # participant count.
+            self._process_messages(messages)
 
             # Flush any sends queued by off-thread callers since the
             # last iteration. Between-turn coverage; in-turn drain
@@ -474,9 +440,9 @@ class ChatRunner:
             self._alone_since = None
         return False
 
-    def _process_messages(self, messages, one_on_one: bool):
-        """Filter out own/seen/empty messages, persist new ones to the record
-        (or buffer pre-intro), and dispatch them to the LLM router."""
+    def _process_messages(self, messages):
+        """Filter out own/seen/empty messages, persist new ones to the record,
+        and dispatch them to the LLM router."""
         # Track which own-message texts matched this batch so we can discard
         # AFTER the full batch — Meet creates multiple DOM elements per
         # message (different IDs, same text), so we must keep the text in
@@ -512,35 +478,31 @@ class ChatRunner:
                 own_matched.add(text)
                 continue
 
-            log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r} one_on_one={one_on_one}")
+            log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r}")
 
             if self._record is not None:
                 self._record.append(sender=sender, text=text, kind="chat")
 
-            self._dispatch_user_message(text, one_on_one)
+            self._dispatch_user_message(text)
 
         self._own_messages -= own_matched
 
-    def _dispatch_user_message(self, text: str, one_on_one: bool):
+    def _dispatch_user_message(self, text: str):
         """Trigger-check a chat message and route it to the LLM if addressed.
 
         Pure routing — message persistence and seen-id tracking happen
         upstream, before this is invoked.
         """
         trigger = config.TRIGGER_PHRASE.lower()
-        has_trigger = trigger in text.lower()
-        if has_trigger or one_on_one:
-            if has_trigger:
-                prompt = re.sub(
-                    re.escape(config.TRIGGER_PHRASE) + r'[,:]?\s*',
-                    '', text, count=1, flags=re.IGNORECASE,
-                ).strip()
-            else:
-                prompt = text
-            if prompt:
-                self._handle_message(prompt)
-        else:
+        if trigger not in text.lower():
             log.debug("ChatRunner: stored as context (no trigger phrase)")
+            return
+        prompt = re.sub(
+            re.escape(config.TRIGGER_PHRASE) + r'[,:]?\s*',
+            '', text, count=1, flags=re.IGNORECASE,
+        ).strip()
+        if prompt:
+            self._handle_message(prompt)
 
     def _emit_turn_done(self, *, failed: bool = False):
         """Close out the per-turn stdout heartbeat.

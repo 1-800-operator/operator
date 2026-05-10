@@ -105,13 +105,7 @@ if [ ! -f "${ENV_PATH}" ]; then
   bold "Seeding ${ENV_PATH} with API-key placeholders..."
   cat > "${ENV_PATH}" <<'ENV_EOF'
 # Operator API keys — uncomment + fill in the ones you need.
-# This file is loaded by every `operator dial <bot>` invocation.
-#
-# Anthropic (claude agent default model):
-# ANTHROPIC_API_KEY=sk-ant-...
-#
-# OpenAI (used by the codex agent and any custom bot pointed at OpenAI):
-# OPENAI_API_KEY=sk-...
+# Loaded by every `operator slip` invocation.
 #
 # GitHub (for the bundled GitHub MCP — read-only ops on issues, PRs, repos):
 # GITHUB_TOKEN=ghp_...
@@ -219,9 +213,8 @@ bold "Next:"
 printf '  Verify your install:\n'
 printf '    %s\033[1;95moperator doctor\033[0m\n' "${PATH_PREFIX}"
 echo
-printf '  Then dial into a meeting:\n'
-printf '    %s\033[1;95moperator slip claude\033[0m \033[2m<meet-url>\033[0m   attach claude to your own Chrome\n' "${PATH_PREFIX}"
-printf '    %s\033[1;95moperator dial claude\033[0m                  dial claude into a fresh meet.new\n' "${PATH_PREFIX}"
+printf '  Then attach claude to a meeting:\n'
+printf '    %s\033[1;95moperator slip claude\033[0m \033[2m<meet-url>\033[0m\n' "${PATH_PREFIX}"
 echo
 info "Operator drives the Claude Code CLI for its LLM brain. If you haven't already:"
 info "  Install:  https://claude.ai/code"

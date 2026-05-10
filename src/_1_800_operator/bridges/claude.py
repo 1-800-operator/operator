@@ -1,12 +1,12 @@
 """Claude Code bridge — hardcoded constants for the claude CLI.
 
 Replaces the wizard-era `agents/claude/config.yaml` + per-agent config-loading
-machinery (deleted in Phase 14.19.7). Bridges are per-CLI; modes
-(slip/dial/deploy) are per-posture and branched in `chat_runner` / `__main__`.
+machinery (deleted in Phase 14.19.7). v1 ships claude only; codex/gemini
+bridges would be sibling modules under `bridges/`.
 
-Persistent state files (`auth_state.json`, `browser_profile/`, `history/`,
-`debug/`) still live under `~/.operator/`, written by code only — there are
-no user-editable config files in the bridge model.
+Persistent state files (`history/`, `debug/`) live under `~/.operator/`,
+written by code only — there are no user-editable config files in the
+bridge model.
 """
 
 from __future__ import annotations
