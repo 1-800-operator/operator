@@ -5,8 +5,12 @@ Covers pipeline/llm.py:
   1. ask() — single provider.complete call, empty system + chat tail wired
   2. _tail_messages — agent sender to assistant role; others get "first: text";
      captions are dropped (transcript MCP delivers them on demand)
-  3. intro() — one provider.complete, no history, returns trimmed text;
-     provider exceptions propagate (ChatRunner is responsible)
+
+Pre-14.22.3.5 there was an `intro()` test here; intro itself was deleted in
+that audit step (operator-authored prompt fed into claude -p — the same
+harness-shaped pattern stripped from the heartbeat side-channel). Slip mode
+never called intro (`quiet_mode=True` skipped it); after the audit, no
+caller remains.
 
 Uses MagicMock for the provider and an in-memory MeetingRecord.
 
@@ -121,39 +125,6 @@ def test_tail_messages_shape():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: intro() — single-shot, no history, exceptions propagate
-# ---------------------------------------------------------------------------
-
-def test_intro_single_shot_and_propagates_errors():
-    """intro() fires exactly one provider.complete with no message history; trims text; raises on provider failure."""
-    client, provider, record = make_client(ProviderResponse(text="  I'm the PM bot. I can triage, summarize, follow up.  "))
-    # Even if the record has entries, intro() must not include them
-    record.append("Alice", "hey")
-
-    text = client.intro()
-
-    provider.complete.assert_called_once()
-    kwargs = provider.complete.call_args.kwargs
-    # No history — only the intro prompt
-    assert len(kwargs["messages"]) == 1
-    assert kwargs["messages"][0]["role"] == "user"
-    assert "Introduce yourself" in kwargs["messages"][0]["content"]
-    # Text is trimmed
-    assert text == "I'm the PM bot. I can triage, summarize, follow up."
-
-    # Provider exceptions must propagate — intro() does not catch
-    provider.complete.side_effect = RuntimeError("provider down")
-    raised = False
-    try:
-        client.intro()
-    except RuntimeError as e:
-        raised = True
-        assert "provider down" in str(e)
-    assert raised, "intro() swallowed a provider exception — it should propagate"
-    print("PASS  test_intro_single_shot_and_propagates_errors")
-
-
-# ---------------------------------------------------------------------------
 # Run all
 # ---------------------------------------------------------------------------
 
@@ -161,7 +132,6 @@ if __name__ == "__main__":
     tests = [
         test_ask_no_tools_calls_provider_once,
         test_tail_messages_shape,
-        test_intro_single_shot_and_propagates_errors,
     ]
     failures = []
     for t in tests:

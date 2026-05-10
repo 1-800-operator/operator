@@ -31,8 +31,12 @@ The meeting record path comes from one of two sources, in order:
      user added once via `claude mcp add` and reuses across meetings —
      still pick up the active meeting JSONL.
 
-  2. The OPERATOR_MEETING_RECORD_PATH env var, set per-meeting by the
-     bot's bundled MCP spawn path (claude_cli.py:_maybe_write_mcp_config).
+  2. The OPERATOR_MEETING_RECORD_PATH env var. Pre-14.22.3 this was set
+     per-meeting by claude_cli's `--mcp-config` tempfile path; that
+     mechanism was stripped (it carried harness identity at the spawn
+     layer). The env var is now a fallback for static MCP registrations
+     that pre-set it via shell rc / launchctl plist; the marker file is
+     the primary discovery path.
 
 If neither is set, or the file doesn't exist yet, tools return a friendly
 empty-state string.

@@ -625,11 +625,38 @@ class AttachAdapter(MeetingConnector):
         timeout / failure (caller falls back to text-match dedup).
         Returns None immediately when called before the browser thread
         is alive — same fallback shape.
+
+        Slip-mode prefix-strip: prepends self._reply_prefix
+        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) so
+        meeting participants can tell the bot's replies apart from the
+        user's own messages. Use `send_chat_raw` to post without the
+        prefix (operator-voice status messages already carry their
+        own `[☎️ Operator] ` prefix).
         """
         if not self._browser_alive.is_set():
             return None
         result_q: queue.Queue = queue.Queue()
         self._chat_queue.put(("send", message, result_q))
+        try:
+            return result_q.get(timeout=10)
+        except queue.Empty:
+            return None
+
+    def send_chat_raw(self, message):
+        """Post a message verbatim — no slip reply-prefix prepended.
+
+        Used by ChatRunner for operator-voice status lines (connection
+        drops, throttled tool narration, permission-denial hints) which
+        already carry the `[☎️ Operator] ` prefix from
+        `bridges/claude.py:REPLY_PREFIX_OPERATOR`. Posting them through
+        `send_chat` would double-prefix them with the slip bot prefix,
+        confusing the visual contract that meeting participants rely on
+        (Claude voice vs. Operator voice).
+        """
+        if not self._browser_alive.is_set():
+            return None
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("send_raw", message, result_q))
         try:
             return result_q.get(timeout=10)
         except queue.Empty:
@@ -690,6 +717,8 @@ class AttachAdapter(MeetingConnector):
             try:
                 if cmd == "send":
                     result_q.put(self._do_send_chat(page, args))
+                elif cmd == "send_raw":
+                    result_q.put(self._do_send_chat(page, args, prepend_prefix=False))
                 elif cmd == "read":
                     result_q.put(self._do_read_chat(page))
                 elif cmd == "participant_count":
@@ -712,7 +741,7 @@ class AttachAdapter(MeetingConnector):
                 except Exception:
                     pass
 
-    def _do_send_chat(self, page, message):
+    def _do_send_chat(self, page, message, prepend_prefix: bool = True):
         """Browser-thread implementation. Mirrors MacOSAdapter._do_send_chat:
         snapshot existing IDs, fill the textarea, send, poll every 50 ms
         (up to 1 s) for one new ID. Returns the new `data-message-id`
@@ -722,8 +751,14 @@ class AttachAdapter(MeetingConnector):
         (e.g. '[🤖 Claude] ') so the room can distinguish claude's words
         from the user's own typing. Empty prefix (dial/deploy) means no
         marker. Prefix value lives in `bridges/claude.py:REPLY_PREFIX_SLIP`.
+
+        `prepend_prefix=False` is used by `send_chat_raw` for operator-voice
+        status messages — they carry their own `[☎️ Operator] ` prefix and
+        must not be double-prefixed with the slip bot prefix.
         """
-        full_message = f"{self._reply_prefix}{message}" if self._reply_prefix else message
+        full_message = (
+            f"{self._reply_prefix}{message}" if (prepend_prefix and self._reply_prefix) else message
+        )
         self._ensure_chat_open(page)
         try:
             pre_ids = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))

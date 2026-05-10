@@ -1,22 +1,18 @@
 """
-Smoke test for ClaudeCLIProvider.
+Smoke + mock tests for ClaudeCLIProvider (per-@mention shellouts).
 
-Unlike the other provider tests this one is not mocked — it actually
-spawns the `claude -p` CLI under the user's Claude Max subscription and
-runs a 3-turn arithmetic conversation through it. The point is to
-confirm the per-meeting subprocess actually works end-to-end:
-  - lazy spawn
-  - subscription-auth assertion (apiKeySource: "none")
-  - stream-json envelope shape on stdin
-  - result-event latching on stdout
-  - context retention across turns within the same subprocess
-  - clean teardown via stop()
+The provider was rewritten in Phase 14.22.3 (S211) from a long-lived
+per-meeting subprocess to per-@mention spawn-and-exit shellouts. Each
+turn launches a fresh `claude -p` with `--resume <session_id>` (after
+the first turn captures the session id from `system_init`), drains the
+stream until `result`, and exits. There is no persistent subprocess,
+no `--append-system-prompt`, no `--mcp-config` tempfile. See
+`memory/project_anthropic_detection_vector.md` for the architecture
+constraint driving the shape.
 
-Skipped if `claude` is not on PATH or if ANTHROPIC_API_KEY is set in the
-environment (which would force API-key auth and trip our subscription
-assertion). The test removes ANTHROPIC_API_KEY from the spawn env itself,
-but if the developer running the test has it locally they should know
-the test is intentionally exercising the no-API-key path.
+The smoke tests are not mocked — they spawn the real `claude -p` CLI
+under the user's Claude Max subscription. Skipped if `claude` is not
+on PATH.
 
 Run:
     source venv/bin/activate
@@ -24,14 +20,12 @@ Run:
 """
 import os
 import shutil
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from _1_800_operator.pipeline.providers.claude_cli import (
     ClaudeCLIProvider,
-    ClaudeCLINotFoundError,
 )
 
 
@@ -42,36 +36,46 @@ def _skip_if_no_claude():
 
 
 def test_three_turn_conversation():
-    """Spawn once, run 2+2 -> *3 -> -1, verify final answer is 11."""
+    """Three @mentions in a row exercise session continuity via --resume.
+
+    Spawn-and-exit per turn: each `complete()` call launches its own
+    subprocess. After turn 1 captures session_id from system_init,
+    turns 2-3 spawn with `--resume <captured-id>` so claude rehydrates
+    the prior message history from its on-disk session store. End
+    result (2+2 -> *3 -> -1) should still be 11.
+    """
     provider = ClaudeCLIProvider()
-    try:
-        # Build a neutral history that grows turn by turn, mirroring how
-        # LLMClient feeds messages. claude_cli only looks at the last
-        # entry per call — it relies on the long-lived subprocess to
-        # remember prior turns internally.
-        history = []
+    history = []
 
-        prompts = [
-            ("What is 2+2? Reply with just the number, nothing else.", "4"),
-            ("Now multiply that by 3. Reply with just the number, nothing else.", "12"),
-            ("Now subtract 1. Reply with just the number, nothing else.", "11"),
-        ]
+    prompts = [
+        ("What is 2+2? Reply with just the number, nothing else.", "4"),
+        ("Now multiply that by 3. Reply with just the number, nothing else.", "12"),
+        ("Now subtract 1. Reply with just the number, nothing else.", "11"),
+    ]
 
-        for prompt, expected in prompts:
-            history.append({"role": "user", "content": prompt})
-            response = provider.complete(
-                system=None, messages=history, model=None, max_tokens=None,
+    captured_session_id = None
+    for prompt, expected in prompts:
+        history.append({"role": "user", "content": prompt})
+        response = provider.complete(
+            system=None, messages=history, model=None, max_tokens=None,
+        )
+        text = (response.text or "").strip().rstrip(".")
+        print(f"  turn: {prompt!r} -> {text!r} (expected {expected!r})")
+        assert text == expected, f"expected {expected!r}, got {text!r}"
+        assert response.tool_calls == []
+        assert response.stop_reason == "end"
+        history.append({"role": "assistant", "content": response.text})
+        # After turn 1, session_id should be captured and re-used.
+        if captured_session_id is None:
+            captured_session_id = provider._session_id
+            assert captured_session_id, "session_id should be captured on first turn"
+        else:
+            assert provider._session_id == captured_session_id, (
+                f"session_id should survive across turns; expected "
+                f"{captured_session_id} got {provider._session_id}"
             )
-            text = (response.text or "").strip().rstrip(".")
-            print(f"  turn: {prompt!r} -> {text!r} (expected {expected!r})")
-            assert text == expected, f"expected {expected!r}, got {text!r}"
-            assert response.tool_calls == []
-            assert response.stop_reason == "end"
-            history.append({"role": "assistant", "content": response.text})
 
-        print("  three-turn conversation OK")
-    finally:
-        provider.stop()
+    print("  three-turn conversation OK")
 
 
 def test_idempotent_stop():
@@ -82,264 +86,154 @@ def test_idempotent_stop():
     print("  idempotent stop OK")
 
 
-def test_warmup_then_complete():
-    """warmup() spawns the subprocess; a subsequent complete() reuses it."""
+def test_warmup_is_noop():
+    """warmup() is a no-op for the per-@mention provider — there is no
+    persistent subprocess to pre-spawn. Still callable for ABC contract.
+    """
     provider = ClaudeCLIProvider()
-    try:
-        provider.warmup(model=None)
-        # After warmup the subprocess should already be alive — verify by
-        # poking the internal handle. (Using internal state is fine in a
-        # provider-owned smoke test.)
-        assert provider._proc is not None and provider._proc.poll() is None, \
-            "warmup did not leave the subprocess running"
-
-        history = [{"role": "user", "content": "Say the single word 'pong' and nothing else."}]
-        response = provider.complete(
-            system=None, messages=history, model=None, max_tokens=None,
-        )
-        text = (response.text or "").strip().lower()
-        assert "pong" in text, f"expected 'pong' in reply, got {text!r}"
-        print("  warmup + complete OK")
-    finally:
-        provider.stop()
+    result = provider.warmup(model=None)
+    assert result is None
+    print("  warmup no-op OK")
 
 
 def test_build_provider_returns_claude_cli():
-    """build_provider() returns a ClaudeCLIProvider in v1 (claude is the only brain)."""
+    """build_provider() returns a ClaudeCLIProvider in v1 (claude is the only brain).
+    `resume_session_id=None` by default; the value is forwarded into the provider."""
     from _1_800_operator.pipeline.providers import build_provider
 
     provider = build_provider()
     assert isinstance(provider, ClaudeCLIProvider), (
         f"expected ClaudeCLIProvider, got {type(provider).__name__}"
     )
-    provider.stop()  # nothing was spawned, but stop is idempotent
+    assert provider._session_id is None
+
+    bridged = build_provider(resume_session_id="abc-123-bridged-session")
+    assert bridged._session_id == "abc-123-bridged-session", (
+        "resume_session_id should pre-populate the provider's _session_id"
+    )
     print("  build_provider returns ClaudeCLIProvider OK")
-
-
-def test_subprocess_restart_with_resume():
-    """Killing the subprocess mid-meeting recovers via `claude -p --resume`.
-
-    Run 2 turns, terminate the subprocess externally, then send turn 3.
-    The provider should detect the broken pipe / EOF, spawn a fresh
-    subprocess with `--resume <session_id>`, send only the new user turn,
-    and produce the correct answer (11) — proving claude rehydrated the
-    prior message history from its on-disk session store. Also verifies
-    `_session_id` survives the restart unchanged (no fork-session).
-    """
-    provider = ClaudeCLIProvider()
-    try:
-        history = []
-
-        # Turns 1 and 2.
-        for prompt, expected in [
-            ("What is 2+2? Reply with just the number, nothing else.", "4"),
-            ("Now multiply that by 3. Reply with just the number, nothing else.", "12"),
-        ]:
-            history.append({"role": "user", "content": prompt})
-            r = provider.complete(
-                system=None, messages=history, model=None, max_tokens=None,
-            )
-            text = (r.text or "").strip().rstrip(".")
-            assert text == expected, f"pre-kill turn expected {expected!r}, got {text!r}"
-            history.append({"role": "assistant", "content": r.text})
-        print("  pre-kill: 4 -> 12 OK")
-
-        # Kill the subprocess externally to simulate a mid-meeting crash.
-        # We bypass provider.stop() so the provider's bookkeeping still
-        # thinks the process is alive; the next complete() call will hit
-        # a broken pipe or EOF and trigger restart.
-        old_pid = provider._proc.pid
-        captured_session_id = provider._session_id
-        assert captured_session_id, (
-            "session_id should have been captured from init events by now"
-        )
-        provider._proc.terminate()
-        try:
-            provider._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            provider._proc.kill()
-            provider._proc.wait(timeout=5)
-        print(f"  killed subprocess pid={old_pid} session={captured_session_id}")
-
-        # Turn 3 — provider should auto-restart, replay history, answer correctly.
-        history.append({
-            "role": "user",
-            "content": "Now subtract 1. Reply with just the number, nothing else.",
-        })
-        r = provider.complete(
-            system=None, messages=history, model=None, max_tokens=None,
-        )
-        text = (r.text or "").strip().rstrip(".")
-        print(f"  post-restart turn 3: {text!r} (expected '11')")
-        assert text == "11", f"expected '11' after restart, got {text!r}"
-        # Confirm a *new* subprocess is alive — pid must have changed.
-        assert provider._proc is not None
-        assert provider._proc.pid != old_pid, (
-            f"expected a fresh subprocess after restart; pid did not change ({old_pid})"
-        )
-        # Same session_id should survive resume (default behavior, not --fork-session).
-        assert provider._session_id == captured_session_id, (
-            f"expected session_id {captured_session_id} to survive resume; "
-            f"got {provider._session_id}"
-        )
-        print(f"  restart OK (new pid={provider._proc.pid}, old={old_pid})")
-    finally:
-        provider.stop()
 
 
 def test_streaming_paragraph_callback():
     """complete_streaming() flushes paragraphs to on_paragraph as they arrive.
 
-    Requests a multi-paragraph reply, captures every paragraph the
-    callback receives, and verifies (a) on_paragraph was called more than
-    once (proving we actually streamed paragraph-by-paragraph rather than
-    waiting for the end), (b) the response.text matches the canonical
-    text from the terminal assistant event, and (c) the joined paragraphs
-    cover the same content.
+    Multi-paragraph reply, paragraphs captured by on_paragraph, full
+    response.text matches canonical text from terminal assistant event.
     """
     provider = ClaudeCLIProvider()
-    try:
-        paragraphs_seen = []
+    paragraphs_seen = []
 
-        def on_paragraph(text):
-            paragraphs_seen.append(text)
+    def on_paragraph(text):
+        paragraphs_seen.append(text)
 
-        prompt = (
-            "Write a 3-paragraph haiku about cold pizza, with a blank line "
-            "between paragraphs. No commentary, just the three paragraphs."
-        )
-        history = [{"role": "user", "content": prompt}]
-        response = provider.complete_streaming(
-            system=None, messages=history, model=None, max_tokens=None,
-            on_paragraph=on_paragraph,
-        )
+    prompt = (
+        "Write a 3-paragraph haiku about cold pizza, with a blank line "
+        "between paragraphs. No commentary, just the three paragraphs."
+    )
+    history = [{"role": "user", "content": prompt}]
+    response = provider.complete_streaming(
+        system=None, messages=history, model=None, max_tokens=None,
+        on_paragraph=on_paragraph,
+    )
 
-        print(f"  saw {len(paragraphs_seen)} paragraph flushes")
-        for i, p in enumerate(paragraphs_seen, 1):
-            preview = p[:60].replace("\n", " ")
-            print(f"    {i}: {preview!r}{'...' if len(p) > 60 else ''}")
+    print(f"  saw {len(paragraphs_seen)} paragraph flushes")
+    for i, p in enumerate(paragraphs_seen, 1):
+        preview = p[:60].replace("\n", " ")
+        print(f"    {i}: {preview!r}{'...' if len(p) > 60 else ''}")
 
-        assert len(paragraphs_seen) >= 2, (
-            f"expected >=2 paragraph flushes for a multi-paragraph reply; got {len(paragraphs_seen)}"
-        )
-        assert response.text and response.text.strip(), "response.text should be the full reply"
-        assert response.tool_calls == []
-        assert response.stop_reason == "end"
-
-        # Joined paragraphs should account for most of the canonical text
-        # (we drop separator-only fragments via the flush helper, so exact
-        # equality isn't guaranteed).
-        joined = "\n\n".join(paragraphs_seen)
-        joined_chars = sum(len(p) for p in paragraphs_seen)
-        canonical_chars = len(response.text)
-        coverage = joined_chars / canonical_chars if canonical_chars else 0
-        assert coverage > 0.9, (
-            f"streamed paragraphs covered only {coverage:.0%} of canonical reply "
-            f"({joined_chars}/{canonical_chars} chars)"
-        )
-        print(f"  streaming OK ({coverage:.0%} coverage of canonical reply)")
-    finally:
-        provider.stop()
+    assert len(paragraphs_seen) >= 2, (
+        f"expected >=2 paragraph flushes for a multi-paragraph reply; got {len(paragraphs_seen)}"
+    )
+    assert response.text and response.text.strip(), "response.text should be the full reply"
+    assert response.tool_calls == []
+    assert response.stop_reason == "end"
+    joined_chars = sum(len(p) for p in paragraphs_seen)
+    canonical_chars = len(response.text)
+    coverage = joined_chars / canonical_chars if canonical_chars else 0
+    assert coverage > 0.9, (
+        f"streamed paragraphs covered only {coverage:.0%} of canonical reply"
+    )
+    print(f"  streaming OK ({coverage:.0%} coverage of canonical reply)")
 
 
-def test_restart_spawn_includes_resume_flag():
-    """After capturing a session_id, the next _spawn() passes --resume <id>.
+def test_first_spawn_omits_resume_subsequent_spawns_pass_resume():
+    """Mock-only: pin the cmd-array shape across two consecutive turns.
 
-    Mock-only: we patch subprocess.Popen so the test never actually launches
-    claude. The point is to pin the cmd-array shape so a future refactor
-    can't silently drop the --resume arg and regress crash-recovery
-    fidelity (Phase 14.17).
+    First @mention without resume_session_id pre-population → spawn
+    omits --resume. After the test fakes a session_id capture (what
+    happens when the system_init event fires), the next spawn carries
+    --resume <captured>.
+
+    This pins the contract that future refactors can't drop the
+    --resume flag without failing this test (which would silently
+    regress session continuity across @mentions).
     """
     from _1_800_operator.pipeline.providers import claude_cli as cc_mod
 
-    captured_cmds = []
+    provider = ClaudeCLIProvider()
 
-    class FakePopen:
-        def __init__(self, cmd, **kwargs):
-            captured_cmds.append(list(cmd))
-            self._cmd = cmd
-            self.pid = 99999
-            # Pretend the process is alive so _spawn doesn't loop on
-            # detecting an immediate exit.
-            self._exited = False
-            # Provide just enough of the subprocess.Popen surface that
-            # ClaudeCLIProvider._spawn touches before the reader thread
-            # would have anything to do. _spawn writes to stdin and
-            # reads stdout in a separate thread; we stub minimally.
-            import io
-            self.stdin = io.StringIO()
-            self.stdout = io.StringIO()
-            self.stderr = io.StringIO()
+    # First spawn: no session_id, no --resume.
+    cmd1 = provider._build_cmd()
+    assert "--resume" not in cmd1, (
+        f"first @mention (no captured session_id) should not pass --resume: {cmd1}"
+    )
 
-        def poll(self):
-            return None if not self._exited else 0
+    # Simulate apiKeySource validation succeeding and session_id capture.
+    provider._session_id = "abc-123-fake-session-id"
 
-        def terminate(self):
-            self._exited = True
+    # Subsequent spawn: --resume <captured-id>.
+    cmd2 = provider._build_cmd()
+    assert "--resume" in cmd2, (
+        f"subsequent @mention should pass --resume: {cmd2}"
+    )
+    idx = cmd2.index("--resume")
+    assert cmd2[idx + 1] == "abc-123-fake-session-id", (
+        f"expected --resume abc-123-fake-session-id, got {cmd2[idx + 1]}"
+    )
 
-        def wait(self, timeout=None):
-            self._exited = True
-            return 0
+    # Confirm the naked-spawn invariant — no harness-shaped flags
+    # snuck back in. These are the smoking-gun spawn-signature flags
+    # that 14.22.3 explicitly stripped.
+    for flag in ("--append-system-prompt", "--mcp-config"):
+        assert flag not in cmd1, f"naked-spawn invariant violated in cmd1: {flag} in {cmd1}"
+        assert flag not in cmd2, f"naked-spawn invariant violated in cmd2: {flag} in {cmd2}"
 
-        def kill(self):
-            self._exited = True
+    print("  first spawn omits --resume; subsequent spawns pass --resume <id> OK")
+    print("  naked-spawn invariant (no --append-system-prompt, no --mcp-config) OK")
 
-    real_popen = cc_mod.subprocess.Popen
-    cc_mod.subprocess.Popen = FakePopen
-    try:
-        provider = ClaudeCLIProvider()
-        # First spawn: no session_id captured yet, so cmd must NOT include --resume.
-        provider._spawn()
-        assert captured_cmds, "expected first _spawn() to invoke Popen"
-        first_cmd = captured_cmds[0]
-        assert "--resume" not in first_cmd, (
-            f"first spawn (no session_id) should not pass --resume: {first_cmd}"
-        )
-        # Simulate apiKeySource validation succeeding and an init event
-        # delivering a session_id.
-        provider._session_id = "abc-123-fake-session-id"
 
-        # Force a respawn (simulate crash recovery).
-        provider._proc._exited = True  # type: ignore[attr-defined]
-        provider._spawn()
-        assert len(captured_cmds) == 2, "expected respawn to invoke Popen a second time"
-        second_cmd = captured_cmds[1]
-        assert "--resume" in second_cmd, (
-            f"crash-recovery spawn should pass --resume: {second_cmd}"
-        )
-        idx = second_cmd.index("--resume")
-        assert second_cmd[idx + 1] == "abc-123-fake-session-id", (
-            f"expected --resume abc-123-fake-session-id, got {second_cmd[idx + 1]}"
-        )
-        # Sanity: --no-session-persistence must NOT appear (mutually
-        # exclusive with --resume per claude's own help text).
-        assert "--no-session-persistence" not in second_cmd, (
-            f"--no-session-persistence is mutually exclusive with --resume: {second_cmd}"
-        )
-        assert "--no-session-persistence" not in first_cmd, (
-            f"--no-session-persistence in steady-state spawn would block resume: {first_cmd}"
-        )
-        print("  restart spawn carries --resume <id> OK")
-    finally:
-        cc_mod.subprocess.Popen = real_popen
+def test_resume_session_pre_population_from_constructor():
+    """When constructed with resume_session_id, the very first spawn
+    passes --resume <id>. This is the path the plugin's slash command
+    uses to bridge an existing Claude Code session into the meeting
+    via `--resume-session ${CLAUDE_SESSION_ID}`.
+    """
+    provider = ClaudeCLIProvider(resume_session_id="plugin-bridged-id")
+    cmd = provider._build_cmd()
+    assert "--resume" in cmd, (
+        f"first @mention with pre-populated session_id should pass --resume: {cmd}"
+    )
+    idx = cmd.index("--resume")
+    assert cmd[idx + 1] == "plugin-bridged-id"
+    print("  --resume-session pre-population OK")
 
 
 def main():
-    print("test_restart_spawn_includes_resume_flag")
-    test_restart_spawn_includes_resume_flag()
-    _skip_if_no_claude()
-    print("test_three_turn_conversation")
-    test_three_turn_conversation()
+    print("test_first_spawn_omits_resume_subsequent_spawns_pass_resume")
+    test_first_spawn_omits_resume_subsequent_spawns_pass_resume()
+    print("test_resume_session_pre_population_from_constructor")
+    test_resume_session_pre_population_from_constructor()
     print("test_idempotent_stop")
     test_idempotent_stop()
-    print("test_warmup_then_complete")
-    test_warmup_then_complete()
-    print("test_streaming_paragraph_callback")
-    test_streaming_paragraph_callback()
-    print("test_subprocess_restart_with_resume")
-    test_subprocess_restart_with_resume()
+    print("test_warmup_is_noop")
+    test_warmup_is_noop()
+    _skip_if_no_claude()
     print("test_build_provider_returns_claude_cli")
     test_build_provider_returns_claude_cli()
+    print("test_three_turn_conversation")
+    test_three_turn_conversation()
+    print("test_streaming_paragraph_callback")
+    test_streaming_paragraph_callback()
     print("\nAll claude_cli provider tests passed.")
 
 

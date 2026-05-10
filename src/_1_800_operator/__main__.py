@@ -103,6 +103,7 @@ def _print_usage():
     print("Flags:")
     print("  --force                         Retry join even if a session is flagged stuck")
     print("  --yolo                          Skip per-tool permission prompts (dial/deploy/slip)")
+    print("  --resume-session <id>           Bridge an existing Claude Code session into slip (slip only)")
 
 
 def _run_login(name):
@@ -281,16 +282,37 @@ def _run_slip(name, rest):
     Caller must have already filtered for `name == "claude"` (the main
     dispatcher does this at argv parse time).
     """
+    # `--resume-session <id>` bridges an existing Claude Code session into
+    # the meeting. The plugin's slash command always passes this
+    # (substituted from `${CLAUDE_SESSION_ID}` at execution time) so the
+    # meeting brain rehydrates the user's pre-meeting context on the first
+    # @mention. Terminal-direct invocation omits it; a fresh session is
+    # born on first @mention and re-used thereafter.
     url = None
-    for arg in rest:
+    resume_session_id = None
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--resume-session":
+            if i + 1 >= len(rest):
+                print("--resume-session requires a session id", file=sys.stderr)
+                return 2
+            resume_session_id = rest[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--resume-session="):
+            resume_session_id = arg.split("=", 1)[1]
+            i += 1
+            continue
         if arg.startswith("-"):
             print(f"Unknown flag: {arg}", file=sys.stderr)
             return 2
-        elif url is None:
+        if url is None:
             url = arg
-        else:
-            print(f"Unexpected argument: {arg}", file=sys.stderr)
-            return 2
+            i += 1
+            continue
+        print(f"Unexpected argument: {arg}", file=sys.stderr)
+        return 2
 
     if not url:
         print(
@@ -353,8 +375,10 @@ def _run_slip(name, rest):
     slug = slug_from_url(url)
     meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
 
-    llm = LLMClient(build_provider())
+    llm = LLMClient(build_provider(resume_session_id=resume_session_id))
     llm.set_record(meeting_record)
+    if resume_session_id:
+        log.info(f"slip: bridging existing Claude Code session {resume_session_id} into meeting")
 
     # Active-meeting marker (parity with _run_macos — useful for any
     # static-config MCPs that need the active meeting JSONL path).

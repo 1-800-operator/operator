@@ -11,19 +11,11 @@ inside the subprocess. We just send the user turn in and stream final
 text out.
 """
 import logging
-import re
 from _1_800_operator import config
 from _1_800_operator.pipeline.meeting_record import MeetingRecord
 
 log = logging.getLogger(__name__)
 
-
-def _sanitize_speaker(speaker: str) -> str:
-    # Drop attribute-breaking chars from the attacker-controlled display name.
-    # Used by intro() before participant names hit the prompt; Meet display
-    # names are user-controlled and could otherwise carry prompt-injection
-    # payloads.
-    return re.sub(r'[<>"\'&]', "", speaker)[:64]
 
 class LLMClient:
     """Sends prompts to an LLM provider and builds context from a MeetingRecord.
@@ -44,17 +36,14 @@ class LLMClient:
     def set_record(self, record: MeetingRecord):
         """Attach (or replace) the MeetingRecord backing this client.
 
-        Also forwards the record's JSONL path to providers that expose
-        `set_meeting_record_path` — used by claude_cli to register a
-        bundled transcript MCP server pointing at the live file.
+        The transcript MCP discovers the live meeting JSONL via the
+        `~/.operator/.current_meeting` marker file written by operator
+        at meeting-join (and removed at leave). No per-spawn forwarding
+        from operator into the inner-claude subprocess — that was the
+        old `--mcp-config` tempfile path, stripped in 14.22.3 because
+        it carried harness identity at the spawn layer.
         """
         self._record = record
-        setter = getattr(self._provider, "set_meeting_record_path", None)
-        if callable(setter) and getattr(record, "path", None) is not None:
-            try:
-                setter(record.path)
-            except Exception as e:
-                log.warning(f"LLM: provider rejected meeting record path: {e}")
 
     def _tail_messages(self) -> list[dict]:
         """Build neutral-shape messages from the meeting record tail.
@@ -146,92 +135,13 @@ class LLMClient:
         return reply
 
     def warmup(self):
-        """Fire a 1-token request to establish the TCP/TLS connection pool."""
-        try:
-            self._provider.warmup("")
-            log.info("LLM warmup complete")
-        except Exception as e:
-            log.warning(f"LLM warmup failed (non-fatal): {e}")
+        """No-op for the per-@mention provider shape.
 
-    def intro(
-        self,
-        *,
-        participant_names: list[str] | None = None,
-        participant_count: int = 0,
-    ) -> str:
-        """Generate a self-introduction for the chat panel on join.
-
-        Sent with no message history — the bot is greeting the room, not
-        reacting to it. Relies on the system prompt already carrying skills,
-        MCP hints, and MCP status (injected during startup) so the model has
-        full visibility into what it can actually do this session.
-
-        `participant_names` and `participant_count` are best-effort signals
-        from the connector. When names are available, the bot can address
-        people directly; when only count is available, the bot at least
-        knows whether it's a 1-on-1 or a group.
+        Pre-14.22.3 this fired a 1-token request to spawn the long-lived
+        claude subprocess so the first real turn didn't pay init cost.
+        With per-@mention shellouts there's no persistent subprocess to
+        warm — every turn pays its own spawn cost. Kept on the LLMClient
+        surface for caller compatibility.
         """
-        # Filter out the bot's own tile from any scraped names. Match
-        # case-insensitively because Meet sometimes uppercases the display
-        # name in the participants panel. Sanitize the remaining names
-        # before they hit the prompt — Meet display names are attacker-
-        # controlled (anyone can set their display name to a prompt-
-        # injection payload), and intro generation runs on the same
-        # system prompt as regular turns. Drop attribute-breaking chars
-        # and cap length, same as _sanitize_speaker does for captions.
-        own_name_lower = config.AGENT_NAME.lower()
-        others: list[str] = []
-        for n in (participant_names or []):
-            stripped = (n or "").strip()
-            if not stripped or stripped.lower() == own_name_lower:
-                continue
-            sanitized = _sanitize_speaker(stripped)
-            if sanitized:
-                others.append(sanitized)
-        if others:
-            if len(others) == 1:
-                room_ctx = f"You are joining a 1-on-1 with {others[0]}. "
-            elif len(others) <= 4:
-                room_ctx = f"You are joining a meeting with: {', '.join(others)}. "
-            else:
-                sample = ", ".join(others[:3])
-                room_ctx = (
-                    f"You are joining a meeting with {len(others)} people, "
-                    f"including {sample}. "
-                )
-        elif participant_count > 1:
-            room_ctx = (
-                f"You are joining a meeting with {participant_count - 1} "
-                f"other participants. "
-            )
-        elif participant_count == 1:
-            room_ctx = "You are joining a 1-on-1 with one other person. "
-        else:
-            room_ctx = ""
-        prompt = (
-            f"{room_ctx}"
-            f"Introduce yourself in chat. Your name is "
-            f"\"{config.AGENT_NAME}\" — use that exact name; do not invent "
-            f"a different one.\n"
-            "Constraints:\n"
-            "- Keep it tight: two mid-size sentences, or up to three short "
-            "ones. Aim for ~30 words total; never exceed 45.\n"
-            "- After the greeting, cover two things only: who you are "
-            "(one line), and 1–2 brief use cases framed as 'I can …'. "
-            "No third use case, no elaboration.\n"
-            "- Focus on outcomes, not mechanisms. Never name specific tools, "
-            "MCP servers, or skill names.\n"
-            "- No offers to help, no questions back. Lead with substance "
-            "after the greeting.\n"
-            "- Plain text. No markdown, no bullet block, no headings."
-        )
-        response = self._provider.complete(
-            system="",
-            messages=[{"role": "user", "content": prompt}],
-            model="",
-            max_tokens=self._max_tokens,
-        )
-        text = (response.text or "").strip()
-        log.info(f"LLM intro generated ({len(text)} chars): \"{text[:80]}\"")
-        return text
+        return None
 
