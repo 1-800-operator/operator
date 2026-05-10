@@ -123,7 +123,39 @@ if [ "${OS}" = "macos" ]; then
   fi
 fi
 
-# -- 7. macOS audio helper (operator-audio-capture) -------------------------
+# -- 7. Register transcript MCP user-scope -----------------------------------
+
+# Operator's bundled transcript MCP exposes the meeting JSONL as
+# search_captions / list_captions / list_speakers tools. Registering it
+# user-scope here means every `claude` session afterward (terminal-direct
+# or meeting-spawned) has the transcript tools available without operator
+# passing --mcp-config at spawn time — the naked-spawn invariant (Phase
+# 14.22.3). Soft-skip if `claude` isn't on PATH yet; re-running install.sh
+# after `claude login` lands the registration.
+
+if command -v claude >/dev/null 2>&1; then
+  bold "Registering transcript MCP user-scope..."
+  MCP_TOOL_DIR="$(uv tool dir)/1-800-operator"
+  MCP_PY_IN_TOOL="${MCP_TOOL_DIR}/bin/python"
+  if [ ! -x "${MCP_PY_IN_TOOL}" ]; then
+    err "Could not find tool venv python at ${MCP_PY_IN_TOOL} — skipping MCP registration."
+  else
+    # Idempotent: remove first (no-op if not registered), then re-add.
+    claude mcp remove transcript --scope user >/dev/null 2>&1 || true
+    if claude mcp add transcript --scope user -- "${MCP_PY_IN_TOOL}" -m _1_800_operator.mcp_servers.transcript_server; then
+      info "Registered transcript MCP (user-scope)."
+    else
+      err "Failed to register transcript MCP — re-run install.sh after the issue is resolved."
+    fi
+  fi
+  echo
+else
+  warn "Claude Code CLI not found on PATH — skipping transcript MCP registration."
+  warn "Install it from https://claude.ai/code, run \`claude login\`, then re-run install.sh."
+  echo
+fi
+
+# -- 8. macOS audio helper (operator-audio-capture) -------------------------
 
 # Slip mode's dual-stream audio capture (mic + system) is delivered by a
 # Swift helper that needs Apple-Dev signing + notarization to be allowed by
@@ -187,7 +219,7 @@ if [ "${OS}" = "macos" ]; then
   echo
 fi
 
-# -- 8. Sendoff --------------------------------------------------------------
+# -- 9. Sendoff --------------------------------------------------------------
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so
 # `operator` will be found in this terminal *and* future ones). If not, the
