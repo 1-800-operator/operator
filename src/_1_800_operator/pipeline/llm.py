@@ -45,47 +45,14 @@ class LLMClient:
         """
         self._record = record
 
-    def _tail_messages(self) -> list[dict]:
-        """Build neutral-shape messages from the meeting record tail.
-
-        Chat-only. Captions are accessible to inner-claude on demand via
-        the bundled transcript MCP server, so they don't go in the prompt.
-        Chat carries a UI continuity expectation captions don't — users
-        assume the bot saw earlier chat messages, but won't assume it heard
-        ambient room talk unless they reference it explicitly.
-
-        Served from MeetingRecord's in-memory chat deque, not the JSONL —
-        so an hour-long meeting with thousands of caption lines on disk
-        doesn't pay any per-turn read/parse cost.
-        """
-        entries = self._record.tail_chat(config.HISTORY_MESSAGES)
-        agent = (config.AGENT_NAME or "").lower()
-        messages: list[dict] = []
-        for e in entries:
-            sender = (e.get("sender") or "").strip()
-            text = e.get("text", "")
-            if sender.lower() == agent:
-                messages.append({"role": "assistant", "content": text})
-                continue
-            first = sender.split()[0] if sender else ""
-            content = f"{first}: {text}" if first else text
-            messages.append({"role": "user", "content": content})
-        return messages
-
-    def _build_messages(self, extra_user_msg: str | None = None) -> list[dict]:
-        """tail (chat) + optional trailing user turn."""
-        messages = self._tail_messages()
-        if extra_user_msg is not None:
-            messages.append({"role": "user", "content": extra_user_msg})
-        return messages
-
-    def ask(self, message, record=True, on_paragraph=None, retry_rate_limits=True):
+    def ask(self, message, on_paragraph=None, retry_rate_limits=True):
         """Send a message to the LLM and return the reply.
 
-        ChatRunner is expected to have appended this message to the meeting
-        record already, so it appears once in the tail. If `record` is False,
-        the record was NOT pre-populated and we pass `message` as an extra
-        trailing user turn without persisting it.
+        Inner-claude carries prior conversation context through `--resume`
+        against its on-disk session store, so operator only forwards the
+        new user turn. The provider's `messages` arg stays a list for
+        provider-neutrality — future providers that want history can build
+        it themselves from the meeting record.
 
         Returns a plain string normally. If `on_paragraph` is provided, the
         provider streams the reply and invokes the callback with each
@@ -94,14 +61,11 @@ class LLMClient:
         knows the content has already been posted paragraph-by-paragraph and
         should not re-send it as one blob.
         """
-        if record:
-            messages = self._build_messages()
-        else:
-            messages = self._build_messages(extra_user_msg=message)
+        messages = [{"role": "user", "content": message}]
 
         log.info(
             f"LLM ask max_tokens={self._max_tokens} "
-            f"messages={len(messages)} prompt_chars={len(message)} "
+            f"prompt_chars={len(message)} "
             f"streaming={bool(on_paragraph)}"
         )
         log.debug(f"LLM message: {message}")

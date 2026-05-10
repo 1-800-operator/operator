@@ -66,13 +66,11 @@ class FakeRecord:
 
 
 def _make_runner():
-    runner = ChatRunner(
+    return ChatRunner(
         connector=FakeConnector(),
         llm=object(),
         meeting_record=FakeRecord(),
     )
-    runner._intro_posted = True
-    return runner
 
 
 def test_narrate_tool_use_throttles_rapid_chains(monkeypatch):

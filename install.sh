@@ -91,14 +91,7 @@ bold "Installing operator..."
 uv tool install --force --python "${UV_PY_SPEC}" "git+${REPO_URL}"
 echo
 
-# -- 5. Playwright Chromium runtime ------------------------------------------
-
-bold "Downloading Playwright Chromium runtime (~170 MB)..."
-# Run via uv tool so we use the same env operator uses.
-uv tool run --python "${UV_PY_SPEC}" --from "git+${REPO_URL}" playwright install chromium
-echo
-
-# -- 6. Seed ~/.operator/.env ------------------------------------------------
+# -- 5. Seed ~/.operator/.env ------------------------------------------------
 
 mkdir -p "${HOME}/.operator"
 if [ ! -f "${ENV_PATH}" ]; then
@@ -117,7 +110,7 @@ else
 fi
 echo
 
-# -- 7. macOS Chrome cask nudge ----------------------------------------------
+# -- 6. macOS Chrome cask nudge ----------------------------------------------
 
 if [ "${OS}" = "macos" ]; then
   if [ ! -d "/Applications/Google Chrome.app" ]; then
@@ -130,7 +123,7 @@ if [ "${OS}" = "macos" ]; then
   fi
 fi
 
-# -- 8. macOS audio helper (operator-audio-capture) -------------------------
+# -- 7. macOS audio helper (operator-audio-capture) -------------------------
 
 # Slip mode's dual-stream audio capture (mic + system) is delivered by a
 # Swift helper that needs Apple-Dev signing + notarization to be allowed by
@@ -194,7 +187,7 @@ if [ "${OS}" = "macos" ]; then
   echo
 fi
 
-# -- 9. Sendoff --------------------------------------------------------------
+# -- 8. Sendoff --------------------------------------------------------------
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so
 # `operator` will be found in this terminal *and* future ones). If not, the

@@ -1,16 +1,17 @@
 """
-Unit tests for Component C — LLMClient (Boundary depth).
+Unit tests for Component C — LLMClient.
 
 Covers pipeline/llm.py:
-  1. ask() — single provider.complete call, empty system + chat tail wired
-  2. _tail_messages — agent sender to assistant role; others get "first: text";
-     captions are dropped (transcript MCP delivers them on demand)
+  ask() — single provider.complete call with the new user turn forwarded
+  as a one-element messages list.
 
-Pre-14.22.3.5 there was an `intro()` test here; intro itself was deleted in
-that audit step (operator-authored prompt fed into claude -p — the same
-harness-shaped pattern stripped from the heartbeat side-channel). Slip mode
-never called intro (`quiet_mode=True` skipped it); after the audit, no
-caller remains.
+Pre-14.22.5 LLMClient also built a chat-tail message list; provider
+(claude_cli) only ever read messages[-1] because inner-claude rehydrates
+prior conversation through `--resume`. Phase 14.22.5 deleted the dead
+tail-building chain (_tail_messages, _build_messages, HISTORY_MESSAGES).
+
+Pre-14.22.3.5 there was an `intro()` test here too; intro itself was
+deleted in that audit step.
 
 Uses MagicMock for the provider and an in-memory MeetingRecord.
 
@@ -31,108 +32,42 @@ from _1_800_operator.pipeline.meeting_record import MeetingRecord
 from _1_800_operator.pipeline.providers import ProviderResponse
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def make_client(responses=None):
-    """Build an LLMClient with a mock provider and an in-memory MeetingRecord.
-
-    responses: list of ProviderResponse returned in order from provider.complete.
-               (Or a single ProviderResponse to always return.)
-    """
+    """Build an LLMClient with a mock provider and an in-memory MeetingRecord."""
     provider = MagicMock()
     if isinstance(responses, list):
         provider.complete.side_effect = responses
     elif responses is not None:
         provider.complete.return_value = responses
-    record = MeetingRecord()  # in-memory
+    record = MeetingRecord()
     client = LLMClient(provider, record=record)
     return client, provider, record
 
 
-# ---------------------------------------------------------------------------
-# Test 1: ask() — basic wiring
-# ---------------------------------------------------------------------------
+def test_ask_calls_provider_once_with_single_user_turn():
+    """ask() forwards exactly one user-role message containing the new turn.
 
-def test_ask_no_tools_calls_provider_once():
-    """Plain ask returns text; provider.complete called once with system + tail messages."""
-    client, provider, record = make_client(ProviderResponse(text="Hello back."))
-    # The user turn is expected to already be in the record (ChatRunner appends first).
-    record.append("Alice", "hey there")
+    Inner-claude carries prior conversation through --resume, so operator
+    only forwards the new turn — no tail-building, no role mapping.
+    """
+    client, provider, _ = make_client(ProviderResponse(text="Hello back."))
 
     reply = client.ask("hey there")
 
     assert reply == "Hello back."
     provider.complete.assert_called_once()
     kwargs = provider.complete.call_args.kwargs
-    # system is empty: post-S204, captions no longer enter the prompt (transcript
-    # MCP delivers them on demand), so the SAFETY_RULES <spoken>-block guidance
-    # has no input to protect against. claude_cli composes its own framework-level
-    # pre-tool voice rule at spawn time regardless of what this layer passes.
     assert kwargs["system"] == ""
     assert kwargs["model"] == ""
     assert kwargs["max_tokens"] == config.MAX_TOKENS
-    # Tail should be the single user message from the record
     msgs = kwargs["messages"]
-    assert len(msgs) == 1 and msgs[0]["role"] == "user"
-    assert msgs[0]["content"].startswith("Alice:")
-    print("PASS  test_ask_no_tools_calls_provider_once")
+    assert len(msgs) == 1
+    assert msgs[0] == {"role": "user", "content": "hey there"}
+    print("PASS  test_ask_calls_provider_once_with_single_user_turn")
 
-
-# ---------------------------------------------------------------------------
-# Test 2: _tail_messages shape
-# ---------------------------------------------------------------------------
-
-def test_tail_messages_shape():
-    """Agent sender → assistant; user chat → 'first: text'; captions dropped.
-
-    Captions reach inner-claude via the bundled transcript MCP server, not
-    through the prompt tail. The 40-slot context budget goes 100% to chat.
-    """
-    client, _, record = make_client(ProviderResponse(text=""))
-    agent = config.AGENT_NAME
-    record.append("Alice Smith", "hello")
-    record.append("Alice Smith", "and another")
-    record.append(agent, "acknowledged")
-    record.append("Bob Jones", "ambient talk", kind="caption")
-    record.append("Bob Jones", "direct msg")
-    msgs = client._tail_messages()
-
-    # Agent mapped to assistant role
-    assistant_msgs = [m for m in msgs if m["role"] == "assistant"]
-    assert len(assistant_msgs) == 1
-    assert assistant_msgs[0]["content"] == "acknowledged"
-
-    # User chat messages render as "First: text"
-    alice_msgs = [m for m in msgs if m["role"] == "user" and m["content"].startswith("Alice")]
-    assert len(alice_msgs) == 2
-    assert alice_msgs[0]["content"] == "Alice: hello"
-    assert alice_msgs[1]["content"] == "Alice: and another"
-
-    # Captions are skipped entirely — no <spoken> block reaches the prompt
-    spoken_msgs = [m for m in msgs if "<spoken" in m.get("content", "")]
-    assert len(spoken_msgs) == 0
-
-    # Bob's chat message still renders normally
-    bob_chat = [m for m in msgs if m["role"] == "user"
-                and m["content"].startswith("Bob: direct msg")]
-    assert len(bob_chat) == 1
-
-    # Total: 2 alice chat + 1 agent + 1 bob chat = 4. Caption is dropped.
-    assert len(msgs) == 4
-    print("PASS  test_tail_messages_shape")
-
-
-# ---------------------------------------------------------------------------
-# Run all
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    tests = [
-        test_ask_no_tools_calls_provider_once,
-        test_tail_messages_shape,
-    ]
+    tests = [test_ask_calls_provider_once_with_single_user_turn]
     failures = []
     for t in tests:
         try:

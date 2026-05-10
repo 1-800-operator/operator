@@ -1,19 +1,11 @@
 """
-Shared JS strings for the Google Meet chat-panel DOM scraping.
+JS strings for the Google Meet chat-panel DOM scraping.
 
-Both `macos_adapter` (dial/deploy launches a fresh persistent-context
-Chrome) and `attach_adapter` (slip CDP-attaches to the user's existing
-Chrome) need to inject the same MutationObserver, drain the same JS-side
-queue, snapshot the same message IDs for read-back, and walk the same
-participant tiles. Keeping the strings here means a fix to Meet's DOM
-quirks lands in one place — not two slightly-divergent triple-quoted
-literals scattered across adapters.
-
-Mirrors the existing `connectors/captions_js.py` pattern for caption JS.
-
-These are byte-identical extractions from `macos_adapter.py` as of
-Phase 14.19.3b.1 — no behavior change. The original adapter imports
-these constants and uses them in place of the inline strings.
+`attach_adapter` injects these into the meeting page: a MutationObserver
+on the chat panel, a JS-side queue drained from Python, a snapshot of
+message IDs for send-readback, and a walk of participant tiles. Kept in
+this module so DOM quirks land in one place if a future bridge ever
+needs them too.
 """
 
 

@@ -1,5 +1,6 @@
 """
-Tests for chat hardening: history cap, trigger phrase gating, sender filtering.
+Tests for chat hardening: trigger phrase gating, sender filtering, meeting
+record persistence.
 Run: python tests/test_chat_hardening.py
 """
 import sys, os
@@ -8,46 +9,6 @@ os.environ.setdefault("OPERATOR_BOT", "pm")
 
 from _1_800_operator import config
 import re
-
-
-def test_history_cap():
-    """LLMClient should replay at most HISTORY_MESSAGES entries from the record."""
-    from unittest.mock import MagicMock
-    from _1_800_operator.pipeline.llm import LLMClient
-    from _1_800_operator.pipeline.meeting_record import MeetingRecord
-    from _1_800_operator.pipeline.providers import ProviderResponse
-
-    record = MeetingRecord(slug=None)  # in-memory
-    llm = LLMClient(MagicMock(), record=record)
-    # Monkeypatch the history cap for the duration of the test. The cap
-    # used to live as `llm._max_messages` (mutable per-meeting) but was
-    # collapsed to `config.HISTORY_MESSAGES` (constant) when we deleted
-    # the now-dead context-overflow shrinking machinery.
-    original_cap = config.HISTORY_MESSAGES
-    config.HISTORY_MESSAGES = 5
-
-    try:
-        for i in range(10):
-            record.append(sender="Alice", text=f"user msg {i}")
-            record.append(sender=config.AGENT_NAME, text=f"bot reply {i}")
-
-        llm._provider.complete.return_value = ProviderResponse(
-            text="ok", tool_calls=[], stop_reason="end",
-        )
-        llm.ask("probe", record=False)  # don't append; we just want to inspect the call
-
-        call_args = llm._provider.complete.call_args
-        messages = call_args.kwargs["messages"]
-        # 5 tail entries + 1 trailing user turn (extra_user_msg)
-        assert len(messages) == 6, f"Expected 6 messages, got {len(messages)}: {messages}"
-    finally:
-        config.HISTORY_MESSAGES = original_cap
-    # Oldest kept should be entry index -5 (counting from end of the 20 entries written)
-    # The 20 entries are: user0, bot0, user1, bot1, ..., user9, bot9. Last 5 are:
-    # user8, bot8, user9, bot9 is only 4; wait — 20 entries, last 5 = bot7, user8, bot8, user9, bot9
-    assert messages[0]["content"] == "Alice: user msg 8" or "bot reply 7" in messages[0]["content"], \
-        f"Unexpected oldest entry: {messages[0]!r}"
-    print("  history cap: PASS")
 
 
 def test_meeting_record_tail_roundtrip(tmp_dir=None):
@@ -153,7 +114,6 @@ def test_sender_filtering():
 
 if __name__ == "__main__":
     print("Chat hardening tests:")
-    test_history_cap()
     test_meeting_record_tail_roundtrip()
     test_slug_from_url()
     test_trigger_phrase_gating()

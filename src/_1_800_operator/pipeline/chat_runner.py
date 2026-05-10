@@ -58,8 +58,7 @@ class ChatRunner:
         self._seen_ids: set[str] = set()
         # Per-turn heartbeat. Set in _handle_message, drained in
         # _dispatch_result on the terminal text branches. None means
-        # "no turn in flight" — the heartbeat closer is a no-op so
-        # intro sends don't get a phantom "Replied" line.
+        # "no turn in flight" so the heartbeat closer is a no-op.
         self._turn_count = 0
         self._turn_start_ts: float | None = None
         # Bookkeeping for the streaming paragraph callback's pacer.

@@ -370,13 +370,10 @@ class AttachAdapter(MeetingConnector):
         # Browser thread + chat command queue. Playwright's sync API is
         # single-threaded by contract: only the thread that opened the
         # context may call its methods. To keep AttachAdapter safe to
-        # invoke from any thread (chat-runner main, provider permission
-        # pump, heartbeat daemon), all Playwright work runs on a
-        # dedicated browser thread; public methods drop commands onto
-        # _chat_queue and block on a per-call result queue. Mirrors the
-        # design already in MacOSAdapter and LinuxAdapter — slip mode
-        # used to be the odd one out (greenlet errors when off-thread
-        # callers reached page.evaluate directly).
+        # invoke from any thread (chat-runner main, provider callbacks),
+        # all Playwright work runs on a dedicated browser thread; public
+        # methods drop commands onto _chat_queue and block on a per-call
+        # result queue.
         self._chat_queue: queue.Queue = queue.Queue()
         self._browser_thread: threading.Thread | None = None
         self._leave_event = threading.Event()
@@ -388,10 +385,9 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive = threading.Event()
         self._browser_closed = threading.Event()
         # Audio pipeline (14.20.4) — populated by _start_audio_pipeline()
-        # after meeting entry. Stays None on Linux (mac-only helper) or
-        # when the helper binary hasn't been built. set_caption_callback
-        # may be invoked before or after join(); the late-bound callback
-        # path matches macos_adapter's contract.
+        # after meeting entry. Stays None when the helper binary hasn't
+        # been built. set_caption_callback may be invoked before or after
+        # join(); the callback is late-bound when set post-join.
         self._caption_callback = None
         self._audio_helper_proc: subprocess.Popen | None = None
         self._audio_processors: dict[bytes, "object"] = {}
@@ -409,10 +405,7 @@ class AttachAdapter(MeetingConnector):
         and successes both surface via `self.join_status` (callers wait
         on `join_status.ready`). The previous design ran Playwright on
         the calling thread and raised SlipAttachError synchronously,
-        which meant any off-thread caller (PermissionChatHandler on the
-        provider's pump thread, heartbeat daemon, etc.) hit greenlet
-        errors. Mirrors the contract already in MacOSAdapter /
-        LinuxAdapter.
+        which meant any off-thread caller hit greenlet errors.
 
         Synchronous validation is kept on the calling thread because
         these checks don't touch Playwright and surfacing them through
@@ -580,8 +573,7 @@ class AttachAdapter(MeetingConnector):
                     break
                 # page.wait_for_timeout is the browser-thread-safe sleep —
                 # it parks the greenlet without breaking sync_playwright's
-                # event loop. Plain time.sleep would also work but stays
-                # consistent with MacOSAdapter's main loop.
+                # event loop.
                 try:
                     self._page.wait_for_timeout(200)
                 except Exception:
@@ -602,18 +594,15 @@ class AttachAdapter(MeetingConnector):
     def set_caption_callback(self, fn):
         """Register fn(speaker, text, timestamp) for finalized utterances.
 
-        Mirrors macos_adapter contract — may be called before OR after
-        join(). The audio pipeline buffers utterances internally and
-        delivers them through whichever callback is registered at the
-        moment the utterance finalizes; late-bind is fine. Pass None to
-        unregister.
+        May be called before OR after join(). The audio pipeline buffers
+        utterances internally and delivers them through whichever
+        callback is registered at the moment the utterance finalizes;
+        late-bind is fine. Pass None to unregister.
 
         AttachAdapter's "captions" are local Whisper transcriptions of
         the helper's two PCM streams (system + mic), not Meet's caption
         DOM. Each call delivers one finalized utterance — no streaming
-        partials, so callers don't need TranscriptFinalizer's silence /
-        prefix-strip logic. dial wires this through TranscriptFinalizer;
-        slip wires a direct write into MeetingRecord.
+        partials. Slip wires this directly into MeetingRecord.
         """
         self._caption_callback = fn
 
@@ -741,15 +730,15 @@ class AttachAdapter(MeetingConnector):
                     pass
 
     def _do_send_chat(self, page, message, prepend_prefix: bool = True):
-        """Browser-thread implementation. Mirrors MacOSAdapter._do_send_chat:
-        snapshot existing IDs, fill the textarea, send, poll every 50 ms
-        (up to 1 s) for one new ID. Returns the new `data-message-id`
-        or None on timeout (caller falls back to text-match dedup).
+        """Browser-thread send. Snapshot existing IDs, fill the textarea,
+        send, poll every 50 ms (up to 1 s) for one new ID. Returns the
+        new `data-message-id` or None on timeout (caller falls back to
+        text-match dedup).
 
-        slip-mode quirk: the message is prefixed with self._reply_prefix
-        (e.g. '[🤖 Claude] ') so the room can distinguish claude's words
-        from the user's own typing. Empty prefix (dial/deploy) means no
-        marker. Prefix value lives in `bridges/claude.py:REPLY_PREFIX_SLIP`.
+        The message is prefixed with self._reply_prefix (default
+        '[🤖 Claude] ') so the room can distinguish claude's words from
+        the user's own typing. Prefix lives in
+        `bridges/claude.py:REPLY_PREFIX_SLIP`.
 
         `prepend_prefix=False` is used by `send_chat_raw` for operator-voice
         status messages — they carry their own `[☎️ Operator] ` prefix and
@@ -806,9 +795,10 @@ class AttachAdapter(MeetingConnector):
         follows under normal Meet delivery; we accept the rare
         canonical-never-arrives case (network drop) as silent message
         loss rather than risk a double turn on every user message.
-        Other adapters (dial/deploy/Linux) don't hit this because the
-        bot is a separate participant observing only server-confirmed
-        traffic, so this filter lives here, not in chat_runner.
+        Slip is the only mode that hits this — the bot reads the user's
+        own typing path, where Meet's optimistic placeholder fires
+        before server confirmation; a separate-participant observer
+        wouldn't see the placeholder at all.
         """
         self._ensure_chat_open(page)
         self._install_chat_observer(page)
@@ -909,8 +899,7 @@ class AttachAdapter(MeetingConnector):
         about to open chat anyway, so waiting for the chat button is in
         the spirit of the detector.
 
-        Polls every 1s, matching the cadence in macos_adapter._wait_for
-        _admission. No timeout — lobby admission can take many minutes
+        Polls every 1s. No timeout — lobby admission can take many minutes
         (host on another call, large meetings with multiple admits,
         etc.). User-paced waits shouldn't have a clock; the user can
         Ctrl+C anytime if they want to abort. The only fatal signal is
@@ -963,11 +952,9 @@ class AttachAdapter(MeetingConnector):
         return False
 
     def _ensure_chat_open(self, page):
-        """Open the chat panel if it isn't already.
-
-        Mirrors MacOSAdapter._ensure_chat_open exactly — same Meet DOM,
-        same selectors, same debug-screenshot fallback. Idempotent.
-        """
+        """Open the chat panel if it isn't already. Idempotent — clicks the
+        chat button only when the textarea isn't already visible. Drops a
+        debug screenshot if the button can't be located."""
         try:
             textarea = page.locator('textarea[aria-label="Send a message"]')
             if textarea.count() > 0 and textarea.is_visible():
@@ -995,7 +982,7 @@ class AttachAdapter(MeetingConnector):
                 pass
 
     def _install_chat_observer(self, page):
-        """Inject the MutationObserver. Mirrors MacOSAdapter._install_chat_observer."""
+        """Inject the chat-panel MutationObserver."""
         if self._observer_installed:
             return
         try:

@@ -9,10 +9,10 @@ hierarchy natively when the binary spawns. What remains is:
   1. The runtime tuning block (timeouts, paths) that callers across
      pipeline/ and connectors/ read by name. Hardcoded; edit here to
      change runtime behavior globally.
-  2. A small set of claude-bridge constants (AGENT_NAME, TRIGGER_PHRASE,
-     HISTORY_MESSAGES) that LLMClient and ChatRunner read by name.
-     Inlined here for now; when a second bridge (codex/gemini) lands,
-     callers will pick the right bridge module instead.
+  2. A small set of claude-bridge constants (AGENT_NAME, TRIGGER_PHRASE)
+     that LLMClient and ChatRunner read by name. Inlined here for now;
+     when a second bridge (codex/gemini) lands, callers will pick the
+     right bridge module instead.
 """
 
 import os
@@ -35,7 +35,6 @@ from _1_800_operator.bridges import claude as _claude_bridge
 
 AGENT_NAME       = "Claude"
 TRIGGER_PHRASE   = _claude_bridge.TRIGGER_PHRASE  # "@claude"
-HISTORY_MESSAGES = 40
 
 
 # ── INTERNAL TUNING ───────────────────────────────────────────────────────
