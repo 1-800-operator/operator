@@ -5,6 +5,8 @@ running the meeting.
 
 Usage:
     operator slip claude <url>    Attach claude to a slip Chrome session
+    operator status               Is operator currently in a meeting?
+    operator hangup               Gracefully disconnect the running slip session
     operator doctor               Diagnostic check — is the world ready?
     operator                      Print usage
 """
@@ -92,6 +94,8 @@ def _kill_orphaned_children():
 def _print_usage():
     print("Usage:")
     print("  operator slip claude <url>      Attach claude to a slip Chrome session")
+    print("  operator status                 Is operator currently in a meeting?")
+    print("  operator hangup                 Gracefully disconnect the running slip session")
     print("  operator doctor                 Diagnostic check — is the world ready?")
     print()
     print("Flags:")
@@ -121,6 +125,20 @@ def main():
             return 2
         from _1_800_operator.pipeline.doctor import run_doctor
         return run_doctor()
+
+    if first == "status":
+        if len(argv) != 1:
+            print("Usage: operator status\n")
+            _print_usage()
+            return 2
+        return _run_status()
+
+    if first == "hangup":
+        if len(argv) != 1:
+            print("Usage: operator hangup\n")
+            _print_usage()
+            return 2
+        return _run_hangup()
 
     if first == "slip":
         if len(argv) < 2:
@@ -156,6 +174,90 @@ def _consume_yolo(args):
     """
     yolo = "--yolo" in args
     return [a for a in args if a != "--yolo"], yolo
+
+
+def _run_status():
+    """Print whether operator is currently in a meeting.
+
+    Reads the ~/.operator/.current_meeting marker written by _run_slip at
+    join and deleted at shutdown. If the marker exists and points at a
+    JSONL whose meta line carries meet_url, print "in meeting <url>";
+    otherwise "not in a meeting". No --verbose flavor — the plugin's
+    status skill just wants a one-liner.
+    """
+    import json
+    marker = Path.home() / ".operator" / ".current_meeting"
+    if not marker.exists():
+        print("not in a meeting")
+        return 0
+    try:
+        jsonl_path = Path(marker.read_text(encoding="utf-8").strip())
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            first = f.readline()
+        meta = json.loads(first) if first else {}
+        url = meta.get("meet_url")
+    except (OSError, json.JSONDecodeError):
+        url = None
+    if url:
+        print(f"in meeting {url}")
+    else:
+        print("in meeting")
+    return 0
+
+
+def _run_hangup():
+    """Send SIGTERM to any running `operator slip` process.
+
+    The slip process's signal handler does the graceful teardown:
+    ChatRunner.stop(), connector.leave() (CDP detach — does NOT quit
+    Chrome or close the chat panel, per spec), and clears the
+    .current_meeting marker. If no slip process is running but the
+    marker is stale, clean it up so `operator status` doesn't lie.
+    """
+    import signal as _sig
+    import time as _time
+    marker = Path.home() / ".operator" / ".current_meeting"
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "operator slip"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"hangup: could not query running processes: {e}", file=sys.stderr)
+        return 2
+    pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+    pids = [p for p in pids if p != os.getpid()]
+    if not pids:
+        if marker.exists():
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+        print("not in a meeting")
+        return 0
+    for pid in pids:
+        try:
+            os.kill(pid, _sig.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # Brief wait so the slip process can run its shutdown handler
+    # (connector.leave waits up to 10s for the browser thread). We poll
+    # only for ~3s — long enough to confirm exit on the happy path, not
+    # so long that the plugin skill feels stuck.
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive:
+            break
+        _time.sleep(0.2)
+    print(f"hung up ({len(pids)} session{'s' if len(pids) != 1 else ''})")
+    return 0
 
 
 def _run_slip(name, rest):
