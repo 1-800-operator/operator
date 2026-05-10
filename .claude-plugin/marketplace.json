@@ -1,0 +1,27 @@
+{
+  "name": "1-800-operator",
+  "description": "Self-hosted marketplace for the operator plugin — sends Claude Code into a Google Meet.",
+  "owner": {
+    "name": "1-800-Operator",
+    "url": "https://1-800-operator.com"
+  },
+  "plugins": [
+    {
+      "name": "operator",
+      "source": {
+        "source": "github",
+        "repo": "1-800-operator/operator-plugin",
+        "ref": "main"
+      },
+      "description": "Send Claude Code into a Google Meet. Slash commands to join, check status, hang up, and run diagnostics against an installed operator CLI.",
+      "version": "0.1.0",
+      "author": {
+        "name": "1-800-Operator",
+        "url": "https://1-800-operator.com"
+      },
+      "homepage": "https://1-800-operator.com",
+      "license": "MIT",
+      "keywords": ["meet", "google-meet", "meeting", "operator", "voice", "chat"]
+    }
+  ]
+}
