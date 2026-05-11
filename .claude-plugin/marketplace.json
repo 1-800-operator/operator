@@ -14,7 +14,7 @@
         "ref": "main"
       },
       "description": "Send Claude Code into a Google Meet. Slash commands to join, check status, hang up, and run diagnostics against an installed operator CLI.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "1-800-Operator",
         "url": "https://1-800-operator.com"
