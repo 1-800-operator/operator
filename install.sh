@@ -150,8 +150,43 @@ if command -v claude >/dev/null 2>&1; then
   fi
   echo
 else
-  warn "Claude Code CLI not found on PATH — skipping transcript MCP registration."
+  warn "Claude Code CLI not found on PATH — skipping transcript MCP + plugin registration."
   warn "Install it from https://claude.ai/code, run \`claude login\`, then re-run install.sh."
+  echo
+fi
+
+# -- 7.5. Install operator plugin (user-scope slash commands) ---------------
+
+# The plugin ships /operator:slip, /operator:status, /operator:hangup,
+# /operator:doctor — the user-facing surface that lets you type slash
+# commands into a Claude Code session. Without it, the operator CLI works
+# but there's no way to bridge a live Claude Code session ID into a
+# meeting (the slip skill body does the ${CLAUDE_SESSION_ID} substitution
+# at dispatch time, which is the load-bearing handoff between Claude Code
+# and the operator subprocess).
+#
+# The plugin is sourced from a self-hosted marketplace.json at the root of
+# this CLI's GitHub repo, which references github.com/1-800-operator/operator-plugin.
+# Both subcommands run non-interactively (stdin redirected from /dev/null)
+# and write to user-scope settings, so the plugin is enabled in every
+# subsequent Claude Code session until the user uninstalls it. Soft-skip
+# if `claude` is missing (step 7's warning already covered that case).
+
+if command -v claude >/dev/null 2>&1; then
+  bold "Installing operator plugin (slash commands)..."
+  # Idempotent: clear any prior state before re-adding. Errors swallowed
+  # because remove/uninstall raise when the target doesn't exist.
+  claude plugin uninstall operator </dev/null >/dev/null 2>&1 || true
+  claude plugin marketplace remove 1-800-operator </dev/null >/dev/null 2>&1 || true
+  if claude plugin marketplace add 1-800-operator/operator </dev/null >/dev/null; then
+    if claude plugin install operator@1-800-operator </dev/null >/dev/null; then
+      info "Installed operator plugin (user-scope). Slash commands /operator:* are now available in Claude Code."
+    else
+      err "Failed to install operator plugin — re-run install.sh after the issue is resolved."
+    fi
+  else
+    err "Failed to add operator marketplace — re-run install.sh after the issue is resolved."
+  fi
   echo
 fi
 
@@ -238,7 +273,11 @@ bold "Next:"
 printf '  Verify your install:\n'
 printf '    %s\033[1;95moperator doctor\033[0m\n' "${PATH_PREFIX}"
 echo
-printf '  Then attach claude to a meeting:\n'
+printf '  Open Claude Code and send it into a meeting:\n'
+printf '    \033[1;95m/operator:slip\033[0m \033[2m<meet-url>\033[0m\n'
+printf '    \033[2m(the operator plugin is already enabled — your meeting brain inherits this Claude Code session)\033[0m\n'
+echo
+printf '  Or attach directly from a terminal (no session bridge):\n'
 printf '    %s\033[1;95moperator slip claude\033[0m \033[2m<meet-url>\033[0m\n' "${PATH_PREFIX}"
 echo
 info "Operator drives the Claude Code CLI for its LLM brain. If you haven't already:"
