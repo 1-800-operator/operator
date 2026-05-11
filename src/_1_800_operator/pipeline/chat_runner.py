@@ -283,7 +283,7 @@ class ChatRunner:
 
         log.info("ChatRunner: joined")
         trigger = config.TRIGGER_PHRASE
-        ui.ok(f"Listening for @{trigger} — claude only replies when addressed.")
+        ui.ok(f"Listening for {trigger} — claude only replies when addressed.")
         log.info("ChatRunner: starting chat loop")
         self._loop()
 
