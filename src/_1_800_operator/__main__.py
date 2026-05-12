@@ -182,7 +182,8 @@ def main():
                 argv.insert(1, inferred)
                 name = inferred
         if name not in KNOWN_BOTS:
-            print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
+            supported = ", ".join(sorted(KNOWN_BOTS))
+            print(f"Unknown bot: {name!r}. Supported: {supported}.\n")
             _print_usage()
             return 2
         rest, yolo = _consume_yolo(argv[2:])
