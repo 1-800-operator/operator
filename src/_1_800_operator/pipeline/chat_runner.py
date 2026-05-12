@@ -10,6 +10,7 @@ import queue
 import re
 import threading
 import time
+from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_quoteattr
 
 from _1_800_operator import config
 from _1_800_operator.bridges.claude import REPLY_PREFIX_OPERATOR
@@ -250,6 +251,19 @@ class ChatRunner:
                 return str(val)[:100]
         return "(" + ", ".join(tool_input.keys())[:80] + ")"
 
+    @staticmethod
+    def _wrap_meet_chat(text: str, sender: str) -> str:
+        # Surface marker for the inner-claude subprocess: this turn came
+        # from meeting chat, not from the user's Claude Code chat. Wire-
+        # only — the meeting JSONL and chat panel store the raw text;
+        # the envelope is added at forward time. XML framing rather than
+        # a bracketed prefix because the model attends to XML structurally
+        # and is far less likely to echo the wrapper back into a reply.
+        body = _xml_escape(text)
+        if sender:
+            return f"<meet_chat from={_xml_quoteattr(sender)}>\n{body}\n</meet_chat>"
+        return f"<meet_chat>\n{body}\n</meet_chat>"
+
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
         log.info(f"ChatRunner: joining {meeting_url}")
@@ -482,11 +496,11 @@ class ChatRunner:
             if self._record is not None:
                 self._record.append(sender=sender, text=text, kind="chat")
 
-            self._dispatch_user_message(text)
+            self._dispatch_user_message(text, sender=sender)
 
         self._own_messages -= own_matched
 
-    def _dispatch_user_message(self, text: str):
+    def _dispatch_user_message(self, text: str, sender: str = ""):
         """Trigger-check a chat message and route it to the LLM if addressed.
 
         Pure routing — message persistence and seen-id tracking happen
@@ -501,7 +515,7 @@ class ChatRunner:
             '', text, count=1, flags=re.IGNORECASE,
         ).strip()
         if prompt:
-            self._handle_message(prompt)
+            self._handle_message(prompt, sender=sender)
 
     def _emit_turn_done(self, *, failed: bool = False):
         """Close out the per-turn stdout heartbeat.
@@ -519,7 +533,7 @@ class ChatRunner:
         else:
             ui.ok(f"Replied — {elapsed:.1f}s")
 
-    def _handle_message(self, text):
+    def _handle_message(self, text, sender: str = ""):
         """Process a single chat message via LLM."""
         self._turn_count += 1
         self._turn_start_ts = time.time()
@@ -528,9 +542,10 @@ class ChatRunner:
         # any prior turn's denial dedup doesn't leak.
         self._last_tool_narration_ts = 0.0
         self._denied_tool_ids_in_turn.clear()
+        wrapped = self._wrap_meet_chat(text, sender)
         try:
             result = self._llm.ask(
-                text, on_paragraph=self._streaming_callback(),
+                wrapped, on_paragraph=self._streaming_callback(),
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
