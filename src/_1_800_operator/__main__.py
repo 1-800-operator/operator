@@ -200,6 +200,63 @@ def main():
     return 2
 
 
+def _daemonize_and_announce(url):
+    """Self-daemonize so the caller gets synchronous feedback.
+
+    The Bash tool's response captures the foreground command's stdout
+    up to exit. When the model fires `operator slip claude <url> &` the
+    foreground exits with no output before operator has a chance to
+    print anything, so the model sees "Bash completed with no output"
+    and has no synchronous signal of success or failure. Same problem
+    when the model omits the `&` — operator's long-running work blocks
+    the tool call until the meeting ends, which is worse.
+
+    Self-daemonize fixes both. After all synchronous validation passes
+    (arg parse, singleton guard, claude preflight), fork. The parent
+    prints one informative line to stdout and exits 0; the Bash tool
+    captures that line as the command's response. The child detaches
+    from the controlling session (setsid), redirects its stdio to
+    /dev/null, and continues with the actual meeting work. The
+    operator log (/tmp/operator.log) keeps detailed activity; the
+    Bash response stays a single clean line.
+
+    Only fires when stdout is captured (non-TTY). Terminal-direct
+    users (someone running `operator slip claude <url>` in iTerm)
+    keep their live console banners — isatty() == True takes the
+    pre-existing in-process path. This preserves the debug-friendly
+    foreground mode for development without sacrificing the desktop-
+    app UX.
+    """
+    import os as _os
+    if sys.stdout.isatty():
+        return  # in-terminal: keep live banners, no fork
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = _os.fork()
+    if pid > 0:
+        # Parent — emit the synchronous status line and exit clean.
+        # The Bash tool's stdout capture closes at this exit, so the
+        # model gets exactly this line as the command's response.
+        print(
+            f"operator: joining {url} (pid {pid}) — "
+            f"use /operator:status to check, /operator:hangup to end early"
+        )
+        sys.stdout.flush()
+        _os._exit(0)
+    # Child — detach from the controlling terminal/session so the
+    # shell that spawned us (or its parent, in the Bash-tool case)
+    # can exit without sending SIGHUP to us. Redirect stdio to
+    # /dev/null since nothing should read them now — operator's own
+    # log handler writes to /tmp/operator.log.
+    _os.setsid()
+    devnull = _os.open(_os.devnull, _os.O_RDWR)
+    _os.dup2(devnull, 0)
+    _os.dup2(devnull, 1)
+    _os.dup2(devnull, 2)
+    if devnull > 2:
+        _os.close(devnull)
+
+
 def _infer_bot_from_surface():
     """Return the bot implied by the surface that invoked operator, or None.
 
@@ -469,6 +526,12 @@ def _run_slip(name, rest):
             file=sys.stderr,
         )
         return 2
+
+    # All synchronous validation has passed. Hand the caller (Bash tool,
+    # shell, etc.) a one-line success acknowledgement, then detach so
+    # the long-running meeting work doesn't block the response. See
+    # _daemonize_and_announce docstring for why.
+    _daemonize_and_announce(url)
 
     import logging
     import signal
