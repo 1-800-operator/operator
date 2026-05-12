@@ -260,6 +260,48 @@ def _run_hangup():
     return 0
 
 
+def _discover_session_from_claude_tmp(window_seconds: float = 2.0):
+    """Find the desktop-app Claude Code session UUID by scanning Claude's
+    bash-task temp dir.
+
+    Claude desktop writes background-task stdout to
+    /private/tmp/claude-{uid}/-{cwd-encoded}/{session-uuid}/tasks/{task-id}.output
+    starting the instant a Bash tool spawns its subshell. Operator launches
+    ~ms after that, so a session dir whose newest .output file is younger
+    than `window_seconds` is almost certainly the one that spawned us.
+
+    Requires exactly one match — bails to None if zero or multiple match,
+    so we never bridge to the wrong conversation.
+    """
+    import glob
+    import time as _time
+
+    uid = os.getuid()
+    pattern = f"/private/tmp/claude-{uid}/-*/*/tasks"
+    now = _time.time()
+    candidates = []
+    for tasks_dir in glob.glob(pattern):
+        try:
+            entries = os.listdir(tasks_dir)
+        except OSError:
+            continue
+        outputs = []
+        for fname in entries:
+            if not fname.endswith(".output"):
+                continue
+            try:
+                outputs.append(os.path.getmtime(os.path.join(tasks_dir, fname)))
+            except OSError:
+                continue
+        if not outputs:
+            continue
+        if now - max(outputs) <= window_seconds:
+            candidates.append(os.path.basename(os.path.dirname(tasks_dir)))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _run_slip(name, rest):
     """slip mode — launch a dedicated Chrome window for the meeting and
     CDP-attach claude to it.
@@ -272,12 +314,13 @@ def _run_slip(name, rest):
     Caller must have already filtered for `name == "claude"` (the main
     dispatcher does this at argv parse time).
     """
-    # `--resume-session <id>` bridges an existing Claude Code session into
-    # the meeting. The plugin's slash command always passes this
-    # (substituted from `${CLAUDE_SESSION_ID}` at execution time) so the
-    # meeting brain rehydrates the user's pre-meeting context on the first
-    # @mention. Terminal-direct invocation omits it; a fresh session is
-    # born on first @mention and re-used thereafter.
+    # Resume-session resolution has three tiers (see logic below):
+    #   1. --resume-session <id> on the command line.
+    #   2. CLAUDE_CODE_SESSION_ID env var (terminal Claude Code sets this).
+    #   3. Scan /private/tmp/claude-{uid}/.../UUID/tasks/ for a task .output
+    #      mtime within the last 2s (desktop app — no env var exposed).
+    # The skill body no longer passes --resume-session because the desktop-app
+    # model rewrites/mangles flags; tiers 2/3 catch that case.
     url = None
     resume_session_id = None
     i = 0
@@ -313,6 +356,29 @@ def _run_slip(name, rest):
 
     if sys.platform != "darwin":
         print("slip mode is currently macOS-only.", file=sys.stderr)
+        return 2
+
+    # Singleton guard — refuse to start if another operator slip is already
+    # running. Without this, the desktop app can stack operators on the same
+    # slip Chrome (e.g. when the model retries a failed dispatch), each
+    # spawning its own audio helper and writing to the same meeting JSONL.
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "operator slip claude"],
+            capture_output=True, text=True, timeout=3,
+        )
+        other_pids = [
+            int(p) for p in result.stdout.strip().split("\n")
+            if p.strip() and int(p) != os.getpid()
+        ]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        other_pids = []  # fail open if pgrep unavailable
+    if other_pids:
+        print(
+            f"operator slip is already running (pid {other_pids[0]}). "
+            f"Run `operator hangup` (or `/operator:hangup`) first, then retry.",
+            file=sys.stderr,
+        )
         return 2
 
     # claude binary preflight — fail loud and early; no browser dance,
@@ -360,10 +426,28 @@ def _run_slip(name, rest):
     slug = slug_from_url(url)
     meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
 
+    # Three-tier resume-session resolution (see docstring at top of _run_slip).
+    resume_source = None
+    if resume_session_id:
+        resume_source = "flag"
+    if not resume_session_id:
+        resume_session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+        if resume_session_id:
+            resume_source = "env"
+    if not resume_session_id:
+        resume_session_id = _discover_session_from_claude_tmp()
+        if resume_session_id:
+            resume_source = "tmp-scan"
+
     llm = LLMClient(build_provider(resume_session_id=resume_session_id))
     llm.set_record(meeting_record)
     if resume_session_id:
-        log.info(f"slip: bridging existing Claude Code session {resume_session_id} into meeting")
+        log.info(
+            f"slip: bridging existing Claude Code session {resume_session_id} "
+            f"into meeting (source={resume_source})"
+        )
+    else:
+        log.info("slip: no resume session — starting fresh")
 
     # Active-meeting marker — useful for any static-config MCPs that need
     # the active meeting JSONL path.
