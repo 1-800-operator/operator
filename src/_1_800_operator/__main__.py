@@ -260,46 +260,66 @@ def _run_hangup():
     return 0
 
 
-def _discover_session_from_claude_tmp(window_seconds: float = 2.0):
-    """Find the desktop-app Claude Code session UUID by scanning Claude's
-    bash-task temp dir.
+def _discover_session_from_claude_state(window_seconds: float = 300.0):
+    """Find the active desktop-app Claude Code session UUID by reading
+    Claude desktop's per-conversation state files.
 
-    Claude desktop writes background-task stdout to
-    /private/tmp/claude-{uid}/-{cwd-encoded}/{session-uuid}/tasks/{task-id}.output
-    starting the instant a Bash tool spawns its subshell. Operator launches
-    ~ms after that, so a session dir whose newest .output file is younger
-    than `window_seconds` is almost certainly the one that spawned us.
+    Claude desktop writes a JSON state file per conversation at
+    ~/Library/Application Support/Claude/claude-code-sessions/<agent>/<workspace>/local_<msg>.json
+    and rewrites it as turns complete. Each file carries `cliSessionId`
+    (the Claude Code session UUID we want as --resume-session).
 
-    Requires exactly one match — bails to None if zero or multiple match,
-    so we never bridge to the wrong conversation.
+    Algorithm: pick the most-recently-modified state file (filesystem
+    mtime, not the in-file `lastActivityAt`) whose mtime falls within
+    `window_seconds`. We use mtime instead of the JSON field because the
+    field is what the desktop app wrote on its *last* completed turn —
+    when operator runs tier 3 ~1-2s into startup, the current turn's
+    file update may not have landed yet. mtime catches the actual disk
+    write the instant it happens; both will converge but mtime is at
+    least as fresh. Window is 5 min because (a) the firing conversation
+    will usually update during operator's startup window, (b) failing
+    that, its mtime from its prior turn is still recent enough to
+    identify it as the active conversation, (c) wider windows risk
+    bridging to a stale conversation that hasn't been touched in hours.
+
+    Earlier versions scanned /private/tmp/claude-{uid}/.../tasks/*.output
+    instead, but that signal is fragile: foreground commands (no &) don't
+    create .output files at all, and even backgrounded ones have mtime
+    races against operator's import-time startup latency. The state file
+    is updated by the desktop app independently of the bash task
+    subsystem, which makes it the reliable signal.
     """
     import glob
+    import json as _json
     import time as _time
 
-    uid = os.getuid()
-    pattern = f"/private/tmp/claude-{uid}/-*/*/tasks"
+    home = os.path.expanduser("~")
+    pattern = (
+        f"{home}/Library/Application Support/Claude/claude-code-sessions/"
+        f"*/*/local_*.json"
+    )
     now = _time.time()
-    candidates = []
-    for tasks_dir in glob.glob(pattern):
+    cutoff = now - window_seconds
+
+    best_path = None
+    best_mtime = 0.0
+    for path in glob.glob(pattern):
         try:
-            entries = os.listdir(tasks_dir)
+            mtime = os.path.getmtime(path)
         except OSError:
             continue
-        outputs = []
-        for fname in entries:
-            if not fname.endswith(".output"):
-                continue
-            try:
-                outputs.append(os.path.getmtime(os.path.join(tasks_dir, fname)))
-            except OSError:
-                continue
-        if not outputs:
+        if mtime < cutoff or mtime <= best_mtime:
             continue
-        if now - max(outputs) <= window_seconds:
-            candidates.append(os.path.basename(os.path.dirname(tasks_dir)))
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+        best_path = path
+        best_mtime = mtime
+
+    if not best_path:
+        return None
+    try:
+        with open(best_path, "r", encoding="utf-8") as fh:
+            return _json.load(fh).get("cliSessionId") or None
+    except (OSError, _json.JSONDecodeError):
+        return None
 
 
 def _run_slip(name, rest):
@@ -317,8 +337,9 @@ def _run_slip(name, rest):
     # Resume-session resolution has three tiers (see logic below):
     #   1. --resume-session <id> on the command line.
     #   2. CLAUDE_CODE_SESSION_ID env var (terminal Claude Code sets this).
-    #   3. Scan /private/tmp/claude-{uid}/.../UUID/tasks/ for a task .output
-    #      mtime within the last 2s (desktop app — no env var exposed).
+    #   3. Read cliSessionId from the most-recently-active desktop-app
+    #      session state file under ~/Library/Application Support/Claude/
+    #      claude-code-sessions/ (desktop app — no env var exposed).
     # The skill body no longer passes --resume-session because the desktop-app
     # model rewrites/mangles flags; tiers 2/3 catch that case.
     url = None
@@ -435,9 +456,9 @@ def _run_slip(name, rest):
         if resume_session_id:
             resume_source = "env"
     if not resume_session_id:
-        resume_session_id = _discover_session_from_claude_tmp()
+        resume_session_id = _discover_session_from_claude_state()
         if resume_session_id:
-            resume_source = "tmp-scan"
+            resume_source = "state-scan"
 
     llm = LLMClient(build_provider(resume_session_id=resume_session_id))
     llm.set_record(meeting_record)
