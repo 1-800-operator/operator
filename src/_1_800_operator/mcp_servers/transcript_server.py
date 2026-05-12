@@ -1,6 +1,7 @@
 """Transcript MCP server — exposes the live meeting JSONL as tools.
 
-Three verbs are exposed:
+Live-meeting tools (operate on the currently-attached meeting via the
+.current_meeting marker / OPERATOR_MEETING_RECORD_PATH env):
 
   - search_captions(query, speaker?, start_minutes_ago?, end_minutes_ago?,
                     context_lines=0, limit=20)
@@ -17,6 +18,25 @@ Three verbs are exposed:
   - list_speakers()
         Speakers heard so far this session, with caption counts and
         time-since-last-spoke.
+
+Post-meeting recall tools (operate on any meeting in ~/.operator/history/
+by slug, or default to the most recent — read-anywhere semantics so a
+Claude Code session that wasn't the one running the meeting can still
+recall what happened):
+
+  - list_meetings(limit=20)
+        Recent meetings, newest first, with slug + date + duration +
+        event count. Use the slug as input to the other recall tools.
+
+  - list_meeting_record(meeting_slug?, kinds?, start_minutes_ago?,
+                        end_minutes_ago?, last_n?, limit=200)
+        Unified chronological stream of chat + captions + operator
+        narration for a meeting. Default kinds exclude captions
+        (they're noisy due to Whisper hallucinations on silence).
+
+  - search_meeting_record(query, meeting_slug?, kinds?, context_lines=0,
+                          limit=20)
+        Keyword search across a meeting's chat + captions + narration.
 
 All tools return plain-text empty-state prose rather than raising, so
 the model can relay them. A byte ceiling is enforced on every result so
@@ -54,6 +74,7 @@ from mcp.server.fastmcp import FastMCP
 
 ENV_PATH = "OPERATOR_MEETING_RECORD_PATH"
 MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+HISTORY_DIR = Path.home() / ".operator" / "history"
 
 RESULT_BYTE_CEILING = 12000
 DEFAULT_LIST_LIMIT = 100
@@ -420,6 +441,312 @@ def list_speakers() -> str:
         lines.append(f"  {name} — {counts[name]} captions, last spoke {ago_str}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Post-meeting recall — operates on ~/.operator/history/*.jsonl by slug or
+# defaults to the most recent. Read-anywhere semantics: any Claude Code
+# session with this MCP registered can recall any past meeting, not just
+# the live one. Built to fix the asymmetry where the desktop app's
+# in-memory session state goes stale during a meeting and can't see the
+# meeting's @-mention turns afterward — recall via this tool sidesteps
+# session-tree branching entirely.
+# ---------------------------------------------------------------------------
+
+DEFAULT_RECORD_KINDS = ["chat", "operator_status"]
+DEFAULT_SEARCH_KINDS = ["chat", "caption", "operator_status"]
+DEFAULT_RECORD_LIMIT = 200
+
+
+def _list_meeting_files() -> list[Path]:
+    """Return meeting JSONL paths in the history dir, newest first by mtime."""
+    if not HISTORY_DIR.exists():
+        return []
+    try:
+        return sorted(
+            HISTORY_DIR.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+
+def _resolve_meeting_path(slug: str | None) -> tuple[Path | None, str | None]:
+    """Resolve a meeting JSONL by slug, or return the most recent.
+
+    Returns (path, error_msg). Exactly one is non-None.
+    """
+    if slug:
+        candidate = HISTORY_DIR / f"{slug}.jsonl"
+        if candidate.exists():
+            return candidate, None
+        return None, (
+            f"No meeting record at {candidate}. Use list_meetings to see "
+            f"available slugs."
+        )
+    files = _list_meeting_files()
+    if not files:
+        return None, (
+            "No meeting records found in ~/.operator/history/. Operator may "
+            "not have joined a meeting yet."
+        )
+    return files[0], None
+
+
+def _read_all_events(path: Path) -> list[dict]:
+    """Return all parsed JSONL events from a meeting file, oldest first.
+
+    Unlike _read_captions, this does NOT scope to the last session_start
+    — recall tools want the whole meeting across operator reconnects.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    parsed: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return parsed
+
+
+def _format_event(entry: dict, marker: str = "") -> str:
+    """Format an event line as '{marker}[HH:MM:SS kind/speaker] text'."""
+    kind = entry.get("kind", "?")
+    ts = entry.get("timestamp")
+    if isinstance(ts, (int, float)):
+        clock = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+    else:
+        clock = "??:??:??"
+    speaker = entry.get("sender") or "-"
+    text = (entry.get("text") or "").strip()
+    return f"{marker}[{clock} {kind}/{speaker}] {text}"
+
+
+def _meeting_summary_line(path: Path) -> str:
+    """One-line summary of a meeting file: slug, date, duration, counts."""
+    events = _read_all_events(path)
+    meta = next((e for e in events if e.get("kind") == "meta"), {})
+    slug = meta.get("slug") or path.stem
+    mode = meta.get("mode") or "?"
+    timed = [e for e in events if isinstance(e.get("timestamp"), (int, float))]
+    if timed:
+        first_ts = timed[0]["timestamp"]
+        last_ts = timed[-1]["timestamp"]
+        date_str = datetime.fromtimestamp(first_ts).strftime("%Y-%m-%d %H:%M")
+        duration_min = max(0, int((last_ts - first_ts) / 60))
+        duration_str = f"{duration_min}min" if duration_min else "<1min"
+    else:
+        date_str = "?"
+        duration_str = "?"
+    chat_count = sum(1 for e in events if e.get("kind") == "chat")
+    caption_count = sum(1 for e in events if e.get("kind") == "caption")
+    return (
+        f"  {slug} — {date_str}, {duration_str}, "
+        f"{chat_count} chat / {caption_count} caption events ({mode})"
+    )
+
+
+@mcp.tool()
+def list_meetings(limit: int = 20) -> str:
+    """List recent operator meetings the user has been in.
+
+    Use this when the user asks "what meetings did I have?" or as a
+    first step before list_meeting_record / search_meeting_record when
+    you don't know the slug. Newest first by file mtime.
+
+    Args:
+        limit: Max meetings to return. Default 20.
+
+    Returns:
+        Plain-text list, one meeting per line:
+        "  <slug> — YYYY-MM-DD HH:MM, <duration>min,
+           <chat_count> chat / <caption_count> caption events (<mode>)".
+    """
+    files = _list_meeting_files()
+    if not files:
+        return (
+            "No meeting records found — operator hasn't been in a meeting "
+            "yet, or ~/.operator/history/ is empty."
+        )
+    shown = files[: max(1, limit)]
+    header = f"Recent meetings ({len(shown)} of {len(files)} total, newest first):"
+    body = [_meeting_summary_line(p) for p in shown]
+    return "\n".join([header, *body])
+
+
+@mcp.tool()
+def list_meeting_record(
+    meeting_slug: str | None = None,
+    kinds: list[str] | None = None,
+    start_minutes_ago: float | None = None,
+    end_minutes_ago: float | None = None,
+    last_n: int | None = None,
+    limit: int = DEFAULT_RECORD_LIMIT,
+) -> str:
+    """Return a meeting's chat + captions + operator-narration record.
+
+    Use this when the user asks "what happened in the meeting?", "give
+    me a recap", "what did we discuss?", "summarize my last call". For
+    a targeted keyword lookup, prefer search_meeting_record instead.
+
+    The desktop Claude Code app cannot see meeting @-mention turns
+    inside its in-memory session state because the operator subprocess
+    writes to the session file on a separate tree branch — this tool
+    is the canonical way to recall what happened in a meeting from any
+    Claude Code session (desktop, terminal, new, resumed).
+
+    Args:
+        meeting_slug: Meeting slug to fetch. Omit for the most recent
+            meeting in ~/.operator/history/. Use list_meetings first to
+            see what's available.
+        kinds: Event kinds to include. Default ["chat", "operator_status"]
+            (chat panel messages + operator's tool-use narration). Add
+            "caption" to include spoken audio — note Whisper captions
+            can be noisy (silence often gets transcribed as repeated
+            phrases like "I'm going to get some food").
+        start_minutes_ago: Older time boundary, measured from now. Omit
+            for full meeting.
+        end_minutes_ago: Newer time boundary, measured from now. Omit
+            for "up to end of meeting".
+        last_n: Return only the last N events in the filtered set.
+        limit: Hard cap on events returned. Default 200. Byte ceiling
+            on response is a separate, additional cap.
+
+    Returns:
+        Plain-text events, chronological, one per line:
+        "[HH:MM:SS kind/speaker] text".
+    """
+    path, err = _resolve_meeting_path(meeting_slug)
+    if err is not None:
+        return err
+
+    events = _read_all_events(path)
+    if not events:
+        return f"Meeting record at {path} is empty."
+
+    if kinds is None:
+        kinds = DEFAULT_RECORD_KINDS
+    kinds_set = {k.lower() for k in kinds}
+    filtered = [e for e in events if (e.get("kind") or "").lower() in kinds_set]
+
+    windowed = _apply_time_window(filtered, start_minutes_ago, end_minutes_ago)
+    if isinstance(windowed, str):
+        return windowed
+
+    if not windowed:
+        slug_label = meeting_slug or path.stem
+        return f"No events of kinds {sorted(kinds_set)} in meeting {slug_label}."
+
+    full_count = len(windowed)
+    if last_n is not None and last_n > 0:
+        windowed = windowed[-last_n:]
+    if limit is not None and limit > 0 and len(windowed) > limit:
+        windowed = windowed[-limit:]
+
+    lines = [_format_event(e) for e in windowed]
+    if len(windowed) < full_count:
+        lines.append("")
+        lines.append(
+            f"(showing {len(windowed)} of {full_count} events in scope — "
+            f"raise last_n/limit, narrow the time window, or filter kinds.)"
+        )
+    return _enforce_byte_ceiling(lines, total_count=full_count)
+
+
+@mcp.tool()
+def search_meeting_record(
+    query: str,
+    meeting_slug: str | None = None,
+    kinds: list[str] | None = None,
+    context_lines: int = 0,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> str:
+    """Search a meeting record for a keyword across chat + captions + narration.
+
+    Use for targeted lookups against a past or current meeting:
+    "did anyone mention the deadline?", "what did the team decide
+    about X?". Case-insensitive substring match.
+
+    Args:
+        query: Keyword or phrase. Case-insensitive substring.
+        meeting_slug: Meeting slug to search. Omit for the most recent.
+        kinds: Event kinds to search. Default ["chat", "caption",
+            "operator_status"] (everything except meta/session_start).
+        context_lines: Events to include before AND after each match
+            (like grep -A/-B).
+        limit: Max match lines (not total output). Default 20.
+
+    Returns:
+        Plain-text matches with ±N context, one event per line. "> "
+        prefix marks match lines, "  " marks context lines.
+    """
+    if not query or not query.strip():
+        return "search_meeting_record requires a non-empty query."
+
+    path, err = _resolve_meeting_path(meeting_slug)
+    if err is not None:
+        return err
+
+    events = _read_all_events(path)
+    if not events:
+        return f"Meeting record at {path} is empty."
+
+    if kinds is None:
+        kinds = DEFAULT_SEARCH_KINDS
+    kinds_set = {k.lower() for k in kinds}
+    filtered = [e for e in events if (e.get("kind") or "").lower() in kinds_set]
+
+    if not filtered:
+        slug_label = meeting_slug or path.stem
+        return f"No events of kinds {sorted(kinds_set)} in meeting {slug_label}."
+
+    needle = query.lower()
+    match_indices = [
+        i for i, e in enumerate(filtered) if needle in (e.get("text") or "").lower()
+    ]
+    if not match_indices:
+        slug_label = meeting_slug or path.stem
+        return f"No events match query '{query}' in meeting {slug_label}."
+
+    total_matches = len(match_indices)
+    capped = match_indices[:limit]
+    truncated = total_matches > limit
+
+    context_lines = max(0, int(context_lines))
+    include_idx: set[int] = set()
+    for mi in capped:
+        for j in range(
+            max(0, mi - context_lines),
+            min(len(filtered), mi + context_lines + 1),
+        ):
+            include_idx.add(j)
+
+    sorted_idx = sorted(include_idx)
+    lines: list[str] = []
+    prev = None
+    match_set = set(capped)
+    for idx in sorted_idx:
+        if prev is not None and idx != prev + 1:
+            lines.append("")
+        marker = "> " if idx in match_set else "  "
+        lines.append(_format_event(filtered[idx], marker=marker))
+        prev = idx
+
+    if truncated:
+        lines.append("")
+        lines.append(
+            f"(showing {len(capped)} of {total_matches} matches — raise "
+            f"limit, narrow kinds, or specify meeting_slug.)"
+        )
+    return _enforce_byte_ceiling(lines, total_count=len(sorted_idx))
 
 
 def main():
