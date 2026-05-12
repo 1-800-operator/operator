@@ -15,6 +15,25 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Bot names operator's slip dispatch accepts as the first positional after
+# `slip`. v1 ships claude only; a future codex bridge would add "codex"
+# here. Keeping the set explicit (vs. checking against a registry import)
+# keeps the dispatcher self-contained and makes the surface-inference
+# behavior easy to reason about.
+KNOWN_BOTS = {"claude"}
+
+# Maps surface-marker env vars → the bot that surface implies. When the
+# user (or, more often, a model improvising) invokes `operator slip <url>`
+# without an explicit bot positional, the first env var present here
+# selects the bot. Explicit positional always wins — surface inference
+# only fires when the bot slot is missing AND the next arg looks like a
+# meet URL (typos like `operator slip cluade <url>` still error cleanly).
+# Adding codex later means one new row here (e.g. {"CODEX_RUNNER": "codex"})
+# alongside one new entry in KNOWN_BOTS.
+SURFACE_BOTS = {
+    "CLAUDECODE": "claude",
+}
+
 
 # ── Prevent Ctrl+C from killing child processes ────────────────────
 # Playwright's Node.js driver and Chrome are child processes in our
@@ -146,7 +165,23 @@ def main():
             _print_usage()
             return 2
         name = argv[1]
-        if name != "claude":
+        # Surface-detect inference: the desktop-app model regularly
+        # drops the `claude` positional and invokes `operator slip <url>`
+        # because in single-bot v1 it reads as ceremony. Instead of
+        # fighting that improvisation in skill prose (we've tried — it
+        # loses), absorb it here: if the bot slot is missing AND the
+        # next arg looks like a URL AND we can identify the invoking
+        # surface from an env var, insert the surface's implied bot.
+        # Explicit positional always wins; this branch never fires when
+        # the user/model supplied a bot. Typos like `slip cluade <url>`
+        # fall through to the "Unknown bot" error because `cluade` doesn't
+        # look URL-shaped.
+        if name not in KNOWN_BOTS and name.startswith(("http://", "https://")):
+            inferred = _infer_bot_from_surface()
+            if inferred:
+                argv.insert(1, inferred)
+                name = inferred
+        if name not in KNOWN_BOTS:
             print(f"Unknown bot: {name!r} — only `claude` is supported in v1.\n")
             _print_usage()
             return 2
@@ -163,6 +198,23 @@ def main():
     print(f"Unknown subcommand: {first!r}\n")
     _print_usage()
     return 2
+
+
+def _infer_bot_from_surface():
+    """Return the bot implied by the surface that invoked operator, or None.
+
+    Walks SURFACE_BOTS in order and returns the first match. The slip
+    dispatcher calls this only when the user (most often, a model) omitted
+    the bot positional AND the next arg looks like a meet URL — so a hit
+    here cleanly absorbs the model's most common improvisation
+    (`operator slip <url>` without `claude`). When more than one surface
+    env is set simultaneously (e.g. nested invocations), the dict's
+    iteration order picks the winner — deterministic on CPython 3.7+.
+    """
+    for env_var, bot in SURFACE_BOTS.items():
+        if os.environ.get(env_var):
+            return bot
+    return None
 
 
 def _consume_yolo(args):
