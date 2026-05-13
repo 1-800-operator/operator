@@ -30,9 +30,8 @@ recall what happened):
 
   - list_meeting_record(meeting_slug?, kinds?, start_minutes_ago?,
                         end_minutes_ago?, last_n?, limit=200)
-        Unified chronological stream of chat + captions + operator
-        narration for a meeting. Default kinds exclude captions
-        (they're noisy due to Whisper hallucinations on silence).
+        Unified chronological stream of chat + captions + tool-use
+        narration for a meeting. Default kinds include all three.
 
   - search_meeting_record(query, meeting_slug?, kinds?, context_lines=0,
                           limit=20)
@@ -219,10 +218,9 @@ def _enforce_byte_ceiling(lines: list[str], total_count: int) -> str:
     kept.reverse()
     dropped = total_count - len(kept)
     notice = (
-        f"(truncated to fit response size — showing the most recent "
-        f"{len(kept)} of {total_count} captions; {dropped} older captions "
-        f"omitted. Narrow the time window, add a speaker filter, or use "
-        f"search_captions for a specific keyword.)"
+        f"(showing the most recent {len(kept)} of {total_count} events — "
+        f"{dropped} older events omitted to fit response size. "
+        f"Narrow the time window or use a search tool for a specific keyword.)"
     )
     return notice + "\n" + "\n".join(kept)
 
@@ -400,8 +398,8 @@ def list_captions(
     if len(windowed) < full_count:
         lines.append("")
         lines.append(
-            f"(showing {len(windowed)} of {full_count} captions in scope — "
-            f"raise last_n/limit, or narrow filters to see different captions.)"
+            f"(showing the most recent {len(windowed)} of {full_count} captions in scope — "
+            f"raise last_n/limit or narrow filters to see earlier captions.)"
         )
 
     return _enforce_byte_ceiling(lines, total_count=full_count)
@@ -465,7 +463,7 @@ def list_speakers() -> str:
 # session-tree branching entirely.
 # ---------------------------------------------------------------------------
 
-DEFAULT_RECORD_KINDS = ["chat", "operator_status"]
+DEFAULT_RECORD_KINDS = ["chat", "caption", "operator_status"]
 DEFAULT_SEARCH_KINDS = ["chat", "caption", "operator_status"]
 DEFAULT_RECORD_LIMIT = 200
 
@@ -619,11 +617,9 @@ def list_meeting_record(
         meeting_slug: Meeting slug to fetch. Omit for the most recent
             meeting in ~/.operator/history/. Use list_meetings first to
             see what's available.
-        kinds: Event kinds to include. Default ["chat", "operator_status"]
-            (chat panel messages + operator's tool-use narration). Add
-            "caption" to include spoken audio — note Whisper captions
-            can be noisy (silence often gets transcribed as repeated
-            phrases like "I'm going to get some food").
+        kinds: Event kinds to include. Default ["chat", "caption",
+            "operator_status"] — chat panel messages, spoken audio, and
+            tool-use narration.
         start_minutes_ago: Older time boundary, measured from now. Omit
             for full meeting.
         end_minutes_ago: Newer time boundary, measured from now. Omit
@@ -667,8 +663,8 @@ def list_meeting_record(
     if len(windowed) < full_count:
         lines.append("")
         lines.append(
-            f"(showing {len(windowed)} of {full_count} events in scope — "
-            f"raise last_n/limit, narrow the time window, or filter kinds.)"
+            f"(showing the most recent {len(windowed)} of {full_count} events — "
+            f"older events omitted. Raise last_n/limit, narrow the time window, or filter kinds to see earlier events.)"
         )
     return _enforce_byte_ceiling(lines, total_count=full_count)
 
