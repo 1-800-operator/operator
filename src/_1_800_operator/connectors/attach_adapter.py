@@ -816,16 +816,16 @@ class AttachAdapter(MeetingConnector):
         self._ensure_chat_open(page)
         self._install_chat_observer(page)
         try:
-            # If the textarea has disappeared (Meet closed the panel, user
-            # toggled it, DOM reload), clear the flag so _ensure_chat_open
-            # will reopen it on the next poll rather than assuming it's fine.
-            try:
-                ta = page.locator('textarea[aria-label="Send a message"]')
-                if ta.count() == 0 or not ta.is_visible():
-                    self._chat_panel_open = False
-                    self._observer_installed = False
-            except Exception:
-                pass
+            # NOTE: auto-reopen on manual close disabled pending send-without-
+            # open validation. If validated, remove _ensure_chat_open from the
+            # send path too and drop the _chat_panel_open flag entirely.
+            # try:
+            #     ta = page.locator('textarea[aria-label="Send a message"]')
+            #     if ta.count() == 0 or not ta.is_visible():
+            #         self._chat_panel_open = False
+            #         self._observer_installed = False
+            # except Exception:
+            #     pass
             messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
             # t_drained) separately from Python-side processing (t_drained →
