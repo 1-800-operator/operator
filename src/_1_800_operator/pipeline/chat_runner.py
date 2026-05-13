@@ -19,7 +19,14 @@ from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL = 0.5  # seconds between read_chat() calls
+# Seconds between read_chat() calls. Dropped from 0.5 → 0.1 after S220
+# instrumentation showed a consistent ~500ms `poll_lag_ms` on every turn —
+# the DOM MutationObserver fires the instant a participant hits send, but
+# the adapter only drains the JS-side queue once per POLL_INTERVAL. At
+# 0.1s the lag ceiling falls to 100ms (5× more CDP page.evaluate calls,
+# but each empty drain is sub-ms on localhost CDP). Participant-count
+# checks remain on their own 3s cadence (PARTICIPANT_CHECK_INTERVAL).
+POLL_INTERVAL = 0.1
 PARTICIPANT_CHECK_INTERVAL = 3  # seconds between participant count checks
 
 # Min wall-clock spacing between streamed paragraph posts. Two reasons:
