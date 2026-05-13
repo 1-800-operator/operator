@@ -1,78 +1,68 @@
-# Session 218 handoff (2026-05-12) — Live-test 0.1.9, then 14.22.9.8 + plugin auto-update friction
+# Session 219 handoff (2026-05-12) — Root-caused the /slip double-Bash + lockfile guard shipped
 
-## What landed in S218
+## What landed in S219
 
-Four plugin versions and five operator commits shipped to close the **model-improvisation feedback loop** identified at the end of S217. The arc went: input-side absorption layers caught specific improvisations one at a time, but the model kept inventing new variants — until the user spotted that the actual root cause was on the **output side**. `operator slip claude <url> &` returned `Bash completed with no output`, so the model had no synchronous ground truth and defaulted to recovery flows. Self-daemonize fixed that; the model now gets either a `operator: joining <url> (pid N) …` success line or a clean actionable error on every spawn.
+S219 closed the singleton-guard fragility that S218 had left flagged AND root-caused the desktop-app "operator slip is already running" error pattern that had been intermittent across S217/S218 live tests. Two complementary fixes shipped:
 
-Five shipped pieces, in order:
+- **Operator `6b67e1f`** (origin + public) — replaces the pgrep cmdline-grep singleton guard with a `~/.operator/slip.pid` lockfile. O_CREAT|O_EXCL atomic acquire; holder-PID liveness via `kill(pid,0)` + identity check via `ps -o command=` argv match (handles PID reuse); stale-lock auto-reclaim; ownership-aware release (only the recorded PID deletes the file — so the daemonize parent's release is a no-op and only the daemon child reaps it on graceful shutdown); `_run_hangup` rewritten to read the lockfile instead of pgrep. Smoke-tested across three reclaim scenarios + verified end-to-end in a real meeting.
+- **Plugin `caf1cfd` (0.1.10)** on `1-800-operator/operator-plugin` — rewrites SKILL.md to remove the "**Action — run this immediately.** Invoke the Bash tool with the command in the `!` block below…" prose directive. New SKILL.md leads with the `!` block and follows with prose framing the output as already-produced and explicitly forbidding a second invocation. Marketplace bumped to 0.1.10.
 
-- **0.1.6** (operator `5a011bf` + plugin `414b2c7`) — `<meet_chat from="...">…</meet_chat>` envelope on forwarded meeting chat + SKILL.md scoping (post-spawn note is "one-time in this Claude Code surface only, do not repeat"). Fixed the in-meeting claude parroting "Operator should be joining your Meet shortly" on the first `@claude` mention.
-- **0.1.7** (operator `f462033` + plugin `2085214`) — `run.sh` stub (`exec operator slip claude "$@"`) absorbs the model's persistent "skill = sourceable entrypoint" hallucination. Reframed SKILL.md as "both equivalent."
-- **operator `22e4ef9`** (14.22.9.10) — surface-detect bot inference via `CLAUDECODE` env. When the bot slot is missing AND argv[1] looks URL-shaped AND env says Claude Code, insert `claude`. Explicit positional always wins. `KNOWN_BOTS`/`SURFACE_BOTS` sets staged at module level so adding codex is one row each.
-- **0.1.8** (operator `3e8dcdd` + plugin `db15b10`) — operator self-daemonizes after preflight. Parent prints synchronous status line and exits 0; child detaches via `setsid`, redirects stdio to /dev/null, continues. SKILL.md `!`-block collapses to bare `operator slip claude $ARGUMENTS` — no nohup, no `&`, no redirect (nothing left for the model to drop).
-- **0.1.9** (operator `fc84747` + plugin `3d925a3`) — derive `Unknown bot` error from `KNOWN_BOTS` (`Supported: claude.`) so it auto-updates when codex/gemini land. Snapshot-prose tech debt eliminated; user flagged this as a recurring behavior pattern, saved as `feedback_avoid_snapshot_prose.md`.
+Plus a docs sweep at session end (this commit): roadmap status line + 14.22.9.12 row, agent-context Current Status converted to Prior + fresh S219 entry, two new Hard Won Knowledge entries (JSONL forensic methodology + `!`-block pre-execution mechanics), and this handoff file.
 
-Three new Hard Won Knowledge entries in `agent-context.md` and one new feedback memory.
+The root-cause discovery is captured in the second Hard Won Knowledge entry: the Claude Code desktop-app harness pre-executes ` ```! ``` ` blocks at SKILL-load time and **inlines the command's stdout into the SKILL.md text replacing the original command** before the model ever sees it. Prior SKILL.md prose also instructed the model to invoke Bash, causing a redundant second Bash call where the model reconstructed argv from context (dropping `claude`). Proven by JSONL transcript inspection at `~/.claude/projects/-Users-jojo/<session-id>.jsonl` — first lesson learned: **read the transcript before guessing.**
+
+A separate hypothesis from earlier in the session — that Playwright page handles silently re-target during Meet's green-room → in-call transition — was DISPROVED by live-test instrumentation. No prophylactic fix was needed; DIAG instrumentation was added and then stripped before commit.
 
 ---
 
-## Next session (S219): live-test 0.1.9 + three carryover items
+## Next session (S220): three carryover items
 
 ### Prereqs (verify, <2 min)
 
 ```bash
-git rev-parse HEAD                                              # should be fc84747 or the docs-sweep commit on top
+git rev-parse HEAD                                              # should be the docs-sweep commit
 gh api repos/1-800-operator/operator/commits/main --jq .sha     # should match
-claude plugin list | grep operator                              # should show operator@1-800-operator v0.1.9 enabled
-ls ~/.claude/plugins/cache/1-800-operator/operator/             # should include 0.1.9/
-ls ~/.claude/plugins/cache/1-800-operator/operator/0.1.9/skills/slip/  # should show SKILL.md + run.sh
-pgrep -lf "operator slip" || echo "clean"                       # should print clean; if pid lingers, /operator:hangup it
+claude plugin list | grep operator                              # may still show 0.1.9 — desktop app doesn't auto-update
+ls ~/.claude/plugins/cache/1-800-operator/operator/             # should include 0.1.10/ after `claude plugin update operator@1-800-operator`
+cat ~/.operator/slip.pid 2>&1                                   # should print "No such file" (clean state)
+pgrep -lf "operator slip" || echo "clean"                       # should print clean
 ```
 
-Then restart Claude Code so the desktop app picks up 0.1.9.
+If the desktop app is still showing 0.1.9 in `claude plugin list`, run `claude plugin marketplace update 1-800-operator && claude plugin update operator@1-800-operator` and restart Claude Code. This is itself the plugin-auto-update friction item from S218 carryover — still unresolved.
 
-### Item 1 — Live-test the synchronous status line + post-spawn UX (~10 min)
+### Item 1 — 14.22.9.8: ship the desktop-app allowlist into install.sh (~30 min)
 
-This is THE thing to validate. From a fresh desktop-app conversation, `/operator:slip <real-meet-url>`. Expectations:
+The most-carried item across S217 → S218 → S219. Every new desktop-app user hits the silent-fail wall on first `/operator:slip` until we ship this. Spec unchanged: small Python one-liner inline in install.sh that merges `Bash(operator:*)` + `Bash(nohup operator:*)` into `~/.claude/settings.json` `permissions.allow`. Merge-in (preserve existing user entries), idempotent (skip if both already present), soft-skip if file missing or invalid JSON. Live-test on a clean machine if possible; otherwise restore current settings.json after a smoke test.
 
-- Single Bash call. No `bash run.sh` improvisation, no `&` workaround, no recovery dance. The model should fire the bare `operator slip claude <url>` from SKILL.md's `!`-block.
-- The Bash response should carry the synchronous line — `operator: joining <url> (pid N) — use /operator:status to check, /operator:hangup to end early`.
-- The model's reply to you should relay either that success line + the three-line post-spawn note, OR the error line verbatim if anything failed.
-- Open meeting, `@claude hi`. Verify the envelope is wrapping (check `/tmp/operator.log` `LLM message: <meet_chat from=...>`) and the reply is surface-appropriate (no parroting of operator-launch prose).
-- If anything regresses, capture the trace and the relevant `/tmp/operator.log` lines.
+### Item 2 — Plugin auto-update friction (~1-2 hr depending on path)
 
-### Item 2 — 14.22.9.8: ship the desktop-app allowlist into install.sh (~30 min)
+Also a multi-session carryover. The desktop app doesn't notify users when a new plugin version exists; they sit on stale versions. Two options from the S218 framing:
 
-Still the silent-fail wall for new desktop-app users on first `/operator:slip`. Every new desktop-app user hits this until we ship. Spec is unchanged from S217 handoff: small Python one-liner inline in install.sh, merge-in (preserve existing user allowlist entries), idempotent (skip if both patterns present), soft-skip if `~/.claude/settings.json` missing or invalid JSON. Patterns: `Bash(operator:*)` and `Bash(nohup operator:*)`. Live-test on a clean machine if possible; otherwise restore current settings.json after a smoke test.
+- **Ship an `/operator:update` skill.** Bundles the two CLI commands (`claude plugin marketplace update 1-800-operator` + `claude plugin update operator@1-800-operator`) + a "restart Claude Code" note. ~30 min. Solves execution, not discovery.
+- **Build version-stale detection into operator.** On every slip start, operator fetches the marketplace `marketplace.json` from GitHub, compares with `~/.claude/plugins/installed_plugins.json`, and if newer posts a one-time `[☎️ Operator] A new operator version (X.Y.Z) is available — run /operator:update to upgrade.` chat line. ~1-2 hr. Solves both.
 
-### Item 3 — Plugin auto-update friction (~1-2 hr depending on path)
+Best paired: option 1 makes option 2's chat line actionable. **Recommend shipping both this session if time allows.**
 
-No in-app notification when a new plugin version exists; users sit on stale versions until they manually run `claude plugin marketplace update 1-800-operator` + `claude plugin update operator@1-800-operator` + relaunch. Two real options (unchanged from S217 framing):
+### Item 3 — Optional: deeper live-test coverage
 
-- **Ship an `/operator:update` skill.** Bundles the two CLI commands + a "restart the desktop app" note. ~30 min. Solves execution, not discovery.
-- **Build version-stale detection into operator.** On every slip start, operator fetches the marketplace `marketplace.json` from GitHub, compares with `~/.claude/plugins/installed_plugins.json`, and if there's a newer version posts a one-time `[☎️ Operator] A new operator version (X.Y.Z) is available — run /operator:update to upgrade.` chat line. ~1-2 hr. Discoverability + execution.
-
-Best paired: ship option 1 so option 2's chat line can suggest a concrete user action.
-
-### Item 4 — Optional follow-up: deeper live-test coverage
-
-The carryover items from S217's runbook (audio + transcript MCP recall on real speech, prompt-cache hit on 2nd @mention, terminal-direct path with `operator slip claude <url>` and no env-bridge) are still untested behaviorally. If S219 has time after the three items above, this is the cleanup pass.
+S218 handoff's "Item 4" deferred items still untested: audio + transcript MCP recall on real speech, prompt-cache hit on second @mention, terminal-direct path (`operator slip claude <url>` without env bridge). If S220 has time after Items 1 + 2, this is the cleanup pass.
 
 ---
 
 ## Open questions / blockers
 
-- **None blocking.** All three unresolved items are scope-clear and well-bounded.
-- **The model-improvisation arc is essentially closed.** Five absorption layers ship now (run.sh stub, surface-detect inference, singleton guard, self-daemonize synchronous response, KNOWN_BOTS-derived error). Any new improvisation surfaced in S219 live-test should be diagnosable in minutes — the framework is well-rehearsed at this point.
+- **None blocking.** S219 closed the model-improvisation feedback loop that S218 had narrowed; the remaining items are scope-clear and well-bounded.
+- **The same-URL absorption I proposed mid-session as a "fix" for the double-Bash error is now correctly deferred** — the SKILL.md rewrite addresses the actual root cause. If the desktop-app model ever regresses (or a different surface duplicates the call for unrelated reasons), the absorption is a known-good belt-and-suspenders we can return to.
+- **The harness-pre-executes-`!`-blocks behavior is uncertain in scope.** We proved it for `/operator:slip` specifically. Whether it applies to all SKILL types (skill-creator-built, command, etc.) or all desktop-app surfaces is not established. If we author future SKILL.md files with `!` blocks, follow the new author rule (don't double-instruct) until/unless we have more data.
 
 ---
 
 ## Gotchas / don't forget
 
-- **Zero unpushed commits.** Operator: `5a011bf`, `f462033`, `22e4ef9`, `3e8dcdd`, `fc84747`, plus this docs-sweep commit. All pushed to both `origin` and `public`. Plugin: `414b2c7` (0.1.6), `2085214` (0.1.7), `db15b10` (0.1.8), `3d925a3` (0.1.9). `git push origin main && git push public main` after every commit going forward.
-- **Three-step plugin publish flow still load-bearing.** Any future plugin bump needs: (1) bump operator-plugin's `plugin.json` + push; (2) bump operator's `marketplace.json` + push to both `origin` and `public`; (3) `cd ~/.claude/plugins/marketplaces/1-800-operator && git pull --ff-only origin main` to refresh the local cache. See `memory/project_plugin_publish_two_steps.md`.
-- **Allowlist edit still manual on this machine** (`~/.claude/settings.json` has `Bash(operator:*)` + `Bash(nohup operator:*)` from S216). Until 14.22.9.8 ships, fresh-machine installs need this applied manually OR will hit the silent-fail wall.
-- **Three Chrome windows from S218 smoke tests** may still be open on slip Chrome instances showing "Invalid call" pages (fake URLs `test-fake-url`, `foo-bar-baz`). Cosmetic only; safe to close.
-- **`operator slip` not running at end of session** (verified `pgrep -lf "operator slip"` clean). Slip Chrome instance under `~/.operator/slip_profile/` may still be open from S218 testing — also harmless, just close it.
-- **Snapshot-prose discipline now in place.** Saved as `feedback_avoid_snapshot_prose.md`. User's shortcut callout going forward: **"snapshot prose"** — flags any user-facing string containing "v1," "currently," "for now," "only X," "coming soon," "still," "not yet." Capability framing ("Supported: X") beats status framing ("only X in v1") because it scales without string-hunting.
-- **The S218 architectural lesson**: operator-side absorption beats prose steering, on both the input side (run.sh stub, surface-detect, KNOWN_BOTS-derived error, singleton guard) and the output side (self-daemonize so the model has synchronous ground truth). When the model keeps improvising, the first question is "did operator give it what it needed?" — not "how can we make SKILL.md stronger?"
+- **Zero unpushed commits** at handoff time (after the docs-sweep commit). Operator: `6b67e1f` + docs-sweep. Plugin: `caf1cfd`. All pushed.
+- **Three-step plugin publish flow still load-bearing.** Future plugin bumps: (1) bump operator-plugin's `plugin.json` + push; (2) bump operator's `marketplace.json` + push to both `origin` and `public`; (3) `cd ~/.claude/plugins/marketplaces/1-800-operator && git pull --ff-only origin main` to refresh the local cache. See `memory/project_plugin_publish_two_steps.md`.
+- **README.md is dirty** in operator repo with pre-existing user work on billing-protection wording. NOT mine — left untouched. User to commit when ready.
+- **DIAG instrumentation was added then stripped** within this session. The page-handle re-resolution hypothesis was disproved; no code change shipped from that hypothesis. The invocations.log diagnostic in `__main__.py` was useful forensically but not shipped — it was stripped before commit.
+- **`/tmp/operator.log` was rotated to 5GB** at session start; rotated to `/tmp/operator.log.s218` and `/tmp/operator.log.preS219test3` before tests. Still no logrotate / size cap on the live log; worth a follow-up pass eventually.
+- **Plugin auto-update friction is the second-most-aged carryover** behind 14.22.9.8 — flag for fresh action in S220.
+- **The S219 architectural lesson:** when investigating a model's behavior, JSONL transcripts at `~/.claude/projects/<cwd-slug>/<session-id>.jsonl` are forensic ground truth — read them BEFORE forming hypotheses. The cost of speculation is rounds; the cost of reading the actual transcript is minutes.
