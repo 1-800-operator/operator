@@ -326,6 +326,7 @@ class AttachAdapter(MeetingConnector):
         self._page = None
         self._chrome_proc = None
         self._observer_installed = False
+        self._chat_panel_open = False
         # Browser thread + chat command queue. Playwright's sync API is
         # single-threaded by contract: only the thread that opened the
         # context may call its methods. To keep AttachAdapter safe to
@@ -419,6 +420,7 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive.clear()
         self._browser_closed.clear()
         self._observer_installed = False
+        self._chat_panel_open = False
         self._slip_start_at = time.monotonic()
         self._meeting_entry_at = None
         # Pre-warm the whisper model in parallel with everything else the
@@ -814,6 +816,16 @@ class AttachAdapter(MeetingConnector):
         self._ensure_chat_open(page)
         self._install_chat_observer(page)
         try:
+            # If the textarea has disappeared (Meet closed the panel, user
+            # toggled it, DOM reload), clear the flag so _ensure_chat_open
+            # will reopen it on the next poll rather than assuming it's fine.
+            try:
+                ta = page.locator('textarea[aria-label="Send a message"]')
+                if ta.count() == 0 or not ta.is_visible():
+                    self._chat_panel_open = False
+                    self._observer_installed = False
+            except Exception:
+                pass
             messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
             # t_drained) separately from Python-side processing (t_drained →
@@ -1028,11 +1040,17 @@ class AttachAdapter(MeetingConnector):
     def _ensure_chat_open(self, page):
         """Open the chat panel if it isn't already. Idempotent — clicks the
         chat button only when the textarea isn't already visible. Drops a
-        debug screenshot if the button can't be located."""
+        debug screenshot if the button can't be located. Sets
+        _chat_panel_open on success so the polling loop doesn't re-check
+        on every tick (the button is a toggle — calling it while the panel
+        is open would close it)."""
+        if self._chat_panel_open:
+            return
         try:
             textarea = page.locator('textarea[aria-label="Send a message"]')
             if textarea.count() > 0 and textarea.is_visible():
-                return  # already open
+                self._chat_panel_open = True
+                return
         except Exception:
             pass
         try:
@@ -1043,6 +1061,7 @@ class AttachAdapter(MeetingConnector):
             page.locator('textarea[aria-label="Send a message"]').wait_for(
                 state="visible", timeout=2000
             )
+            self._chat_panel_open = True
             log.info("AttachAdapter: chat panel open")
         except Exception as e:
             log.debug(f"AttachAdapter: could not open chat panel: {e}")
