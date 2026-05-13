@@ -210,7 +210,16 @@ if command -v claude >/dev/null 2>&1; then
   ALLOWLIST_RESULT="$(python3 - <<'PY' 2>&1
 import json, os, sys
 path = os.path.expanduser("~/.claude/settings.json")
-entry = "Bash(operator:*)"
+# Entries needed for operator plugin skills to work in the desktop
+# app without silent-fail. Bash(operator:*) covers slip/status/hangup/
+# doctor/recap. The two claude plugin entries cover /operator:update.
+# (Avoid apostrophes in this heredoc body — bash command-substitution
+# parses quotes inside heredoc bodies and an unbalanced "'" breaks it.)
+entries = [
+    "Bash(operator:*)",
+    "Bash(claude plugin marketplace update:*)",
+    "Bash(claude plugin update operator:*)",
+]
 try:
     with open(path) as f:
         cfg = json.load(f)
@@ -226,20 +235,24 @@ if not isinstance(perms, dict):
 allow = perms.setdefault("allow", [])
 if not isinstance(allow, list):
     print("skip:allow-not-a-list"); sys.exit(0)
-if entry in allow:
+added = []
+for e in entries:
+    if e not in allow:
+        allow.append(e)
+        added.append(e)
+if not added:
     print("present"); sys.exit(0)
-allow.append(entry)
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
-print("added")
+print(f"added:{','.join(added)}")
 PY
 )" || ALLOWLIST_RESULT="skip:python-failed"
   case "${ALLOWLIST_RESULT}" in
-    added)   info "Added Bash(operator:*) to ~/.claude/settings.json permissions.allow." ;;
-    present) info "Bash(operator:*) already present in ~/.claude/settings.json — leaving untouched." ;;
-    skip:*)  warn "Could not update ~/.claude/settings.json (${ALLOWLIST_RESULT#skip:}) — desktop-app users may need to add Bash(operator:*) to permissions.allow manually." ;;
+    added:*) info "Added to ~/.claude/settings.json permissions.allow: ${ALLOWLIST_RESULT#added:}" ;;
+    present) info "operator allowlist entries already present in ~/.claude/settings.json — leaving untouched." ;;
+    skip:*)  warn "Could not update ~/.claude/settings.json (${ALLOWLIST_RESULT#skip:}) — desktop-app users may need to add Bash(operator:*) + Bash(claude plugin marketplace update:*) + Bash(claude plugin update operator:*) to permissions.allow manually." ;;
     *)       warn "Unexpected allowlist result: ${ALLOWLIST_RESULT}" ;;
   esac
   echo

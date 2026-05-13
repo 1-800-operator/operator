@@ -319,6 +319,11 @@ class ChatRunner:
         # every successful turn on its own).
         if self._provider is not None:
             threading.Thread(target=self._provider.pre_warm, daemon=True).start()
+        # Fire-and-forget plugin update check. If a newer version is on
+        # the marketplace, post a single operator-voice hint to chat.
+        # Network-bound (one HTTPS GET, 5s timeout); silent on failure.
+        # Daemon thread so the join return isn't delayed.
+        threading.Thread(target=self._post_update_hint_if_newer, daemon=True).start()
         trigger = config.TRIGGER_PHRASE
         ui.ok(f"Listening for {trigger} — claude only replies when addressed.")
         log.info("ChatRunner: starting chat loop")
@@ -659,6 +664,25 @@ class ChatRunner:
             self._narrate_failure(
                 "something came back I couldn't render — try @mentioning again",
             )
+
+    def _post_update_hint_if_newer(self):
+        """Daemon-thread worker: query the marketplace, post a hint if
+        a newer plugin version exists. Off-thread routing through
+        _send_queue (we're not the main thread) so the polling loop
+        drains it on its next tick.
+        """
+        try:
+            from _1_800_operator.pipeline.update_check import check_for_newer_plugin
+            hint = check_for_newer_plugin()
+        except Exception as e:
+            log.debug(f"ChatRunner: update check raised: {e}")
+            return
+        if not hint:
+            return
+        try:
+            self._send(REPLY_PREFIX_OPERATOR + hint, kind="operator_status", raw=True)
+        except Exception as e:
+            log.warning(f"ChatRunner: failed to post update hint: {e}")
 
     def _narrate_failure(self, message: str):
         """Post an operator-voice failure line and close the turn.
