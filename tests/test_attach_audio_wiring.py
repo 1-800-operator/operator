@@ -26,7 +26,7 @@ from _1_800_operator.connectors.attach_adapter import (
     _FRAME_TAG_MIC,
     _FRAME_TAG_SYSTEM,
     _SPEAKER_OTHER,
-    _SPEAKER_USER,
+    _SPEAKER_USER_FALLBACK,
 )
 
 
@@ -95,7 +95,7 @@ def test_utterance_loop_fires_callback_with_speaker_label():
 
     call_count = {"n": 0}
 
-    def fake_capture():
+    def fake_capture(**_):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return "hello world"
@@ -115,7 +115,7 @@ def test_utterance_loop_fires_callback_with_speaker_label():
 
     t = threading.Thread(
         target=adapter._audio_utterance_loop,
-        args=(_FRAME_TAG_MIC, _SPEAKER_USER),
+        args=(_FRAME_TAG_MIC, _SPEAKER_USER_FALLBACK),
         daemon=True,
     )
     t.start()
@@ -123,7 +123,7 @@ def test_utterance_loop_fires_callback_with_speaker_label():
     assert not t.is_alive(), "utterance loop didn't exit when capturing flipped False"
     assert len(callback_calls) == 1, f"expected 1 callback, got {len(callback_calls)}"
     speaker, text, ts = callback_calls[0]
-    assert speaker == _SPEAKER_USER, f"wrong speaker: {speaker}"
+    assert speaker == _SPEAKER_USER_FALLBACK, f"wrong speaker: {speaker}"
     assert text == "hello world", f"wrong text: {text!r}"
     assert ts > 0
     print("OK utterance_loop_fires_callback_with_speaker_label")
@@ -145,7 +145,7 @@ def test_other_speaker_label():
 
     seen = []
 
-    def fake_capture():
+    def fake_capture(**_):
         if not seen:
             seen.append(1)
             return "remote talker"

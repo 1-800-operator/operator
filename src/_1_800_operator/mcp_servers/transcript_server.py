@@ -236,11 +236,15 @@ def search_captions(
     context_lines: int = 0,
     limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> str:
-    """Search the spoken-caption transcript for a keyword.
+    """Search the live meeting's spoken-caption transcript for a keyword.
 
-    Use this for targeted lookups: "what did Alice say about the
-    migration?", "did anyone mention Sentry?", "find where I said
-    Mohammed". The match is case-insensitive substring.
+    Call this BEFORE answering whenever a meeting-chat message asks
+    about anything that was *spoken* in the current meeting — "what
+    did Alice say about the migration?", "did anyone mention Sentry?",
+    "find where I said Mohammed", "what did jojo just say?". Spoken
+    audio is captured by operator's whisper pipeline and is NOT in
+    your conversation memory; this tool is the only way to recall it.
+    The match is case-insensitive substring.
 
     Args:
         query: Keyword or phrase to search for (case-insensitive substring).
@@ -332,12 +336,17 @@ def list_captions(
     speaker: str | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
 ) -> str:
-    """Return spoken captions in chronological order.
+    """Return the live meeting's spoken captions in chronological order.
 
-    Use this for browse-style queries: "what did we just say?",
-    "what were we discussing 30 minutes ago?", "everything Alice said".
-    For a keyword lookup, prefer search_captions instead — it's faster
-    to read and won't blow context on a long meeting.
+    Call this BEFORE answering whenever a meeting-chat message asks
+    what was said, what was just discussed, or to recap/summarize the
+    spoken conversation — "what did we just say?", "what were we
+    discussing 30 minutes ago?", "everything Alice said", "what did
+    jojo say in this meeting?". Spoken audio is captured by operator's
+    whisper pipeline and is NOT in your conversation memory; this tool
+    is the only way to recall it. For a keyword lookup prefer
+    search_captions — it's faster to read and won't blow context on a
+    long meeting.
 
     Args:
         start_minutes_ago: Older boundary of the time window (e.g. 30
@@ -400,11 +409,14 @@ def list_captions(
 
 @mcp.tool()
 def list_speakers() -> str:
-    """Return the speakers heard so far this meeting session.
+    """Return the speakers heard so far in the live meeting session.
 
-    Useful before applying a speaker filter on search_captions or
-    list_captions — speaker names are case-insensitive substrings; this
-    tool shows you what's actually in the data.
+    Call this BEFORE answering whenever a meeting-chat message asks
+    who has spoken, who is in the meeting talking, or before applying
+    a speaker filter on search_captions / list_captions. Spoken-audio
+    speaker labels come from operator's whisper pipeline and are NOT
+    in your conversation memory. Speaker names are case-insensitive
+    substrings; this tool shows you what's actually in the data.
 
     Returns:
         Plain-text list, one speaker per line, formatted as

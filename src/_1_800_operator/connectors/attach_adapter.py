@@ -60,8 +60,11 @@ from _1_800_operator import config
 from .base import MeetingConnector
 from .chat_dom_js import (
     DRAIN_CHAT_QUEUE_JS,
+    DRAIN_SPEAKING_QUEUE_JS,
     GET_PARTICIPANT_NAMES_JS,
+    GET_SELF_NAME_JS,
     INSTALL_CHAT_OBSERVER_JS,
+    INSTALL_SPEAKING_OBSERVER_JS,
     OBSERVER_ATTACHED_CHECK_JS,
     SNAPSHOT_MESSAGE_IDS_JS,
 )
@@ -103,11 +106,13 @@ _FRAME_TAG_SYSTEM = b"S"
 _FRAME_TAG_MIC = b"M"
 _FRAME_HEADER_LEN = 5  # 1 byte tag + 4 byte BE u32 length
 
-# Speaker labels written into the meeting record. "user" matches what
-# transcript_server.py / llm.py expect for the local-side speaker; the
-# remote side gets "other" (we don't have per-participant attribution
-# from system audio — Whisper alone can't diarize Meet's mixed stream).
-_SPEAKER_USER = "user"
+# Speaker labels written into the meeting record. The mic leg gets the
+# local user's Meet display name when we can scrape it from the self
+# tile (data-self-name); falls back to "user" if the scrape fails. The
+# system-audio leg gets "other" — that channel is one mixed PCM stream
+# across all remote participants, so per-speaker attribution would need
+# diarization (Whisper alone can't do it).
+_SPEAKER_USER_FALLBACK = "user"
 _SPEAKER_OTHER = "other"
 
 
@@ -359,6 +364,16 @@ class AttachAdapter(MeetingConnector):
         # Both monotonic clocks; the deltas land on the observer-install log.
         self._slip_start_at: float | None = None
         self._meeting_entry_at: float | None = None
+        # Speaking-indicator state. Browser thread drains the DOM speaking
+        # queue every _process_chat_queue cycle and updates these. Audio
+        # utterance loops read them from their own threads — protected by
+        # _speaking_lock. _last_s_speaker is the most-recent named speaker
+        # on the system-audio leg; used to attribute [S] utterances even
+        # when the DOM speaking indicator has already cleared by the time
+        # Whisper finalizes (Whisper waits for silence, DOM clears sooner).
+        self._speaking_lock = threading.Lock()
+        self._speaking_participants: dict[str, str] = {}  # pid → name
+        self._last_s_speaker: str = ""
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -500,6 +515,7 @@ class AttachAdapter(MeetingConnector):
             # the panel closes mid-meeting; both are idempotent.
             self._ensure_chat_open(self._page)
             self._install_chat_observer(self._page)
+            self._install_speaking_observer(self._page)
 
             # Signal join success the moment the chat observer is watching.
             # ChatRunner blocks on join_status.ready before starting its
@@ -657,6 +673,22 @@ class AttachAdapter(MeetingConnector):
         except queue.Empty:
             return []
 
+    def get_self_name(self):
+        """Return the local user's Meet display name via the browser thread.
+
+        Empty string if the scrape fails (browser dead, tile not yet
+        rendered, Meet DOM shape changed). Callers degrade to a
+        generic label.
+        """
+        if not self._browser_alive.is_set():
+            return ""
+        result_q: queue.Queue = queue.Queue()
+        self._chat_queue.put(("self_name", None, result_q))
+        try:
+            return result_q.get(timeout=5) or ""
+        except queue.Empty:
+            return ""
+
     def is_connected(self):
         """Cross-thread-safe liveness check.
 
@@ -671,6 +703,7 @@ class AttachAdapter(MeetingConnector):
 
     def _process_chat_queue(self, page):
         """Drain the chat command queue. Called from the browser thread."""
+        self._drain_speaking_queue(page)
         while True:
             try:
                 cmd, args, result_q = self._chat_queue.get_nowait()
@@ -687,6 +720,8 @@ class AttachAdapter(MeetingConnector):
                     result_q.put(self._do_get_participant_count(page))
                 elif cmd == "participant_names":
                     result_q.put(self._do_get_participant_names(page))
+                elif cmd == "self_name":
+                    result_q.put(self._do_get_self_name(page))
                 else:
                     log.warning(f"AttachAdapter: unknown chat-queue command {cmd!r}")
                     result_q.put(None)
@@ -696,7 +731,9 @@ class AttachAdapter(MeetingConnector):
                 # value its public wrapper expects on error.
                 log.warning(f"AttachAdapter: chat-queue command {cmd!r} raised: {e}")
                 fallback = [] if cmd in ("read", "participant_names") else (
-                    0 if cmd == "participant_count" else None
+                    0 if cmd == "participant_count"
+                    else "" if cmd == "self_name"
+                    else None
                 )
                 try:
                     result_q.put(fallback)
@@ -822,6 +859,50 @@ class AttachAdapter(MeetingConnector):
         except Exception as e:
             log.warning(f"AttachAdapter: get_participant_names failed: {e}")
             return []
+
+    def _do_get_self_name(self, page):
+        try:
+            return page.evaluate(GET_SELF_NAME_JS) or ""
+        except Exception as e:
+            log.warning(f"AttachAdapter: get_self_name failed: {e}")
+            return ""
+
+    def _install_speaking_observer(self, page):
+        """Install the tile speaking-indicator MutationObserver. Browser thread only."""
+        try:
+            count = page.evaluate(INSTALL_SPEAKING_OBSERVER_JS)
+            log.info(f"AttachAdapter: speaking observer installed on {count} tile(s)")
+        except Exception as e:
+            log.warning(f"AttachAdapter: speaking observer install failed: {e}")
+
+    def _drain_speaking_queue(self, page):
+        """Drain the DOM speaking-event queue and update _speaking_participants.
+
+        Called from _process_chat_queue on the browser thread every ~200ms.
+        Updates _last_s_speaker with the most-recent named speaker so
+        _audio_utterance_loop can attribute [S] utterances even after the
+        DOM indicator has cleared.
+        """
+        try:
+            events = page.evaluate(DRAIN_SPEAKING_QUEUE_JS) or []
+        except Exception:
+            return
+        if not events:
+            return
+        with self._speaking_lock:
+            for ev in events:
+                pid = ev.get("participant_id") or ""
+                name = (ev.get("name") or "").strip()
+                speaking = ev.get("speaking", False)
+                if not name:
+                    continue
+                if speaking:
+                    self._speaking_participants[pid] = name
+                    self._last_s_speaker = name
+                    log.debug(f"AttachAdapter: speaking start — {name!r}")
+                else:
+                    self._speaking_participants.pop(pid, None)
+                    log.debug(f"AttachAdapter: speaking stop  — {name!r}")
 
     def leave(self):
         """Disconnect from CDP, then close the slip Chrome process.
@@ -1115,8 +1196,10 @@ class AttachAdapter(MeetingConnector):
 
         Layout of the spawned pipeline:
           helper stdout --> _audio_reader_loop --> processors[tag].feed_audio
-          processors['S']     --> _audio_utterance_loop("other") --> caption_callback
-          processors['M']     --> _audio_utterance_loop("user")  --> caption_callback
+          processors['S']     --> _audio_utterance_loop("other")    --> caption_callback
+          processors['M']     --> _audio_utterance_loop(<self-name>) --> caption_callback
+                                                       (falls back to "user" if the
+                                                        Meet self-tile scrape fails)
         """
         if sys.platform != "darwin":
             return
@@ -1160,6 +1243,19 @@ class AttachAdapter(MeetingConnector):
             log.info("AttachAdapter: leave requested during audio warmup — skipping helper spawn")
             return
 
+        # Debug WAV dumps: set OPERATOR_AUDIO_DEBUG=1 to write every utterance
+        # as a WAV file before STT. Files land in /tmp/operator_audio_debug/S/
+        # and /tmp/operator_audio_debug/M/. Bleed-suppressed utterances are
+        # written then renamed with a BLEED_ prefix so you can hear what was
+        # gated out and compare it to what passed.
+        if os.environ.get("OPERATOR_AUDIO_DEBUG"):
+            _debug_root = "/tmp/operator_audio_debug"
+            for _tag, _proc in self._audio_processors.items():
+                _tag_str = _tag.decode() if isinstance(_tag, bytes) else str(_tag)
+                _proc.debug_dir = os.path.join(_debug_root, _tag_str)
+                os.makedirs(_proc.debug_dir, exist_ok=True)
+            log.info(f"AttachAdapter: OPERATOR_AUDIO_DEBUG → {_debug_root}")
+
         # Helper stderr → /tmp/operator.log (append). Same destination as
         # operator's own logs so users have one place to look. Health line
         # ("10s health: [S]=… cb / [M]=… cb"), TCC fatals, and shutdown
@@ -1202,13 +1298,30 @@ class AttachAdapter(MeetingConnector):
         reader.start()
         self._audio_threads.append(reader)
 
+        # Resolve the mic-leg speaker label by scraping the local user's
+        # Meet display name from the self tile. Best-effort; falls back
+        # to a generic "user" string when the scrape returns empty (slip
+        # hasn't fully rendered the participant panel yet, Meet DOM
+        # shifted, etc.). Done here rather than at join() because the
+        # self tile reliably exists once we're past meeting-entry and
+        # the audio pipeline is what consumes the value.
+        mic_label = self.get_self_name() or _SPEAKER_USER_FALLBACK
+        log.info(f"AttachAdapter: mic-leg speaker label = {mic_label!r}")
+
+        s_proc = self._audio_processors.get(_FRAME_TAG_SYSTEM)
         for tag, label in (
             (_FRAME_TAG_SYSTEM, _SPEAKER_OTHER),
-            (_FRAME_TAG_MIC, _SPEAKER_USER),
+            (_FRAME_TAG_MIC, mic_label),
         ):
+            # Pass the system-audio processor as far_end only for the mic leg.
+            # capture_next_utterance uses it as a reference signal: if [S] had
+            # active speech when [M]'s VAD first triggered, the utterance is
+            # dropped as speaker bleed (remote audio playing through speakers
+            # bleeding into the mic).
+            far_end = s_proc if tag == _FRAME_TAG_MIC else None
             t = threading.Thread(
                 target=self._audio_utterance_loop,
-                args=(tag, label),
+                args=(tag, label, far_end),
                 name=f"AttachAdapter-utterance-{label}",
                 daemon=True,
             )
@@ -1257,20 +1370,24 @@ class AttachAdapter(MeetingConnector):
         except Exception as e:
             log.warning(f"AttachAdapter: audio reader loop crashed: {e}")
 
-    def _audio_utterance_loop(self, tag: bytes, speaker_label: str) -> None:
+    def _audio_utterance_loop(self, tag: bytes, speaker_label: str, far_end=None) -> None:
         """Drain finalized utterances from one processor, fire caption callback.
 
         Loop exits when the processor flips capturing=False (set by
         _stop_audio_pipeline). Each utterance is delivered exactly once;
         the callback is captured by reference at call time so a late
         set_caption_callback also works.
+
+        far_end: the system-audio AudioProcessor, passed only for the mic leg.
+        When provided, capture_next_utterance drops utterances whose VAD was
+        triggered while far-end speech was active (speaker bleed suppression).
         """
         proc = self._audio_processors.get(tag)
         if proc is None:
             return
         while proc.capturing and not self._audio_stop.is_set():
             try:
-                text = proc.capture_next_utterance()
+                text = proc.capture_next_utterance(far_end=far_end)
             except Exception as e:
                 log.warning(f"AttachAdapter: utterance loop ({speaker_label}) raised: {e}")
                 continue
@@ -1280,8 +1397,22 @@ class AttachAdapter(MeetingConnector):
             if cb is None:
                 log.debug(f"AttachAdapter: utterance dropped (no callback) [{speaker_label}] {text!r}")
                 continue
+            # For the system-audio leg, use the DOM speaking-indicator to
+            # attribute the utterance to a named participant. Prefer the
+            # currently-speaking participant if exactly one is active; fall
+            # back to the last known speaker (DOM clears before Whisper
+            # finalizes, so _last_s_speaker survives the gap).
+            effective_label = speaker_label
+            if tag == _FRAME_TAG_SYSTEM:
+                with self._speaking_lock:
+                    active = list(self._speaking_participants.values())
+                    last = self._last_s_speaker
+                if len(active) == 1:
+                    effective_label = active[0]
+                elif last:
+                    effective_label = last
             try:
-                cb(speaker_label, text, time.time())
+                cb(effective_label, text, time.time())
             except Exception as e:
                 log.warning(f"AttachAdapter: caption callback raised: {e}")
 

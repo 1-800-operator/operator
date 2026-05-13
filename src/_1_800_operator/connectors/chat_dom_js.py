@@ -117,33 +117,105 @@ DRAIN_CHAT_QUEUE_JS = """() => {
 }"""
 
 
-# Best-effort participant name scrape via tile DOM. Meet renders one
-# tile per participant with `data-requested-participant-id`; we try a
-# few selectors per tile because Meet's class names rotate, plus a
-# textContent fallback. Returns a deduped list of plausible names;
-# callers must degrade gracefully on [].
+# Participant name scrape via tile DOM. Meet renders one tile per
+# participant with `data-requested-participant-id`; the display name
+# lives in a `span.notranslate` leaf inside each tile. Returns a
+# deduped list; callers must degrade gracefully on [].
 GET_PARTICIPANT_NAMES_JS = """() => {
     const tiles = document.querySelectorAll('[data-requested-participant-id]');
     const names = [];
     const seen = new Set();
-    tiles.forEach(t => {
-        let name = '';
-        const labelled = t.querySelector('[data-self-name]');
-        if (labelled) name = (labelled.textContent || '').trim();
-        if (!name) {
-            const aria = t.getAttribute('aria-label') || '';
-            if (aria && !aria.includes('More options') && !aria.includes('Menu')) {
-                name = aria.trim();
-            }
-        }
-        if (!name) {
-            const txt = (t.textContent || '').trim();
-            if (txt && txt.length < 60) name = txt;
-        }
+    tiles.forEach(function(tile) {
+        const span = tile.querySelector('span.notranslate');
+        const name = span ? (span.textContent || '').trim() : '';
         if (name && !seen.has(name)) {
             seen.add(name);
             names.push(name);
         }
     });
     return names;
+}"""
+
+
+# Return the operator-runner's Meet display name from the slip Chrome.
+# The slip Chrome's LOCAL tile (the bot itself) has camera-control
+# buttons with a data-idom-class attribute. Remote participant tiles
+# don't. The operator-runner joins the meeting from their own device,
+# so their tile is remote from the slip Chrome's perspective. Skip the
+# local bot tile, return span.notranslate from the first remote tile.
+# Returns "" on failure — caller falls back to a generic label.
+GET_SELF_NAME_JS = """() => {
+    const tiles = document.querySelectorAll('[data-requested-participant-id]');
+    for (const tile of tiles) {
+        if (tile.querySelector('button[data-idom-class]')) continue;
+        const span = tile.querySelector('span.notranslate');
+        if (span) {
+            const name = (span.textContent || '').trim();
+            if (name) return name;
+        }
+    }
+    return '';
+}"""
+
+
+# Install a MutationObserver on every participant tile that fires when
+# the speaking-indicator class (BlxGDf) appears or disappears on any
+# descendant element. Pushes {participant_id, name, speaking, t} events
+# to window.__operatorSpeakingQueue; Python drains it via
+# DRAIN_SPEAKING_QUEUE_JS. Idempotent — disconnects any prior observers
+# before reinstalling. Returns the number of tiles observed.
+INSTALL_SPEAKING_OBSERVER_JS = """() => {
+    if (window.__operatorSpeakingObservers) {
+        window.__operatorSpeakingObservers.forEach(function(o) { o.disconnect(); });
+    }
+    window.__operatorSpeakingQueue = [];
+    window.__operatorSpeakingObservers = [];
+
+    function getName(tile) {
+        var span = tile.querySelector('span.notranslate');
+        return span ? (span.textContent || '').trim() : '';
+    }
+
+    function hasSpeakingClass(tile) {
+        var els = tile.querySelectorAll('*');
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].classList.contains('BlxGDf')) return true;
+        }
+        return false;
+    }
+
+    var tiles = document.querySelectorAll('[data-requested-participant-id]');
+    var speakingState = {};
+
+    tiles.forEach(function(tile) {
+        var id = tile.getAttribute('data-requested-participant-id');
+        speakingState[id] = hasSpeakingClass(tile);
+
+        var obs = new MutationObserver(function() {
+            var now = hasSpeakingClass(tile);
+            if (now !== speakingState[id]) {
+                speakingState[id] = now;
+                window.__operatorSpeakingQueue.push({
+                    participant_id: id,
+                    name: getName(tile),
+                    speaking: now,
+                    t: Date.now()
+                });
+            }
+        });
+        obs.observe(tile, {attributes: true, attributeFilter: ['class'], subtree: true});
+        window.__operatorSpeakingObservers.push(obs);
+    });
+
+    return tiles.length;
+}"""
+
+
+# Drain window.__operatorSpeakingQueue and reset it to []. Returns the
+# list of speaking-state events. Safe to call before the observer
+# installs — returns [] when the queue doesn't exist yet.
+DRAIN_SPEAKING_QUEUE_JS = """() => {
+    var q = window.__operatorSpeakingQueue || [];
+    window.__operatorSpeakingQueue = [];
+    return q;
 }"""
