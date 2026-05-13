@@ -819,8 +819,9 @@ class ClaudeCLIProvider(LLMProvider):
         )
 
         if subtype == "error_during_execution":
+            err_detail = result_evt.get("error") or "; ".join(result_evt.get("errors") or [])
             raise ClaudeCLIProtocolError(
-                f"claude reported error_during_execution: {result_evt.get('error', '')}"
+                f"claude reported error_during_execution: {err_detail}"
             )
 
         return ProviderResponse(
@@ -938,8 +939,13 @@ class ClaudeCLIProvider(LLMProvider):
         )
 
         if result_evt is not None and result_evt.get("subtype") == "error_during_execution":
+            # claude emits the failure text in either `error` (singular) or
+            # `errors` (plural array) depending on the failure mode. Read
+            # both so the surfaced exception is actually diagnostic — e.g.
+            # "No conversation found with session ID: …" lands in `errors`.
+            err_detail = result_evt.get("error") or "; ".join(result_evt.get("errors") or [])
             raise ClaudeCLIProtocolError(
-                f"claude reported error_during_execution: {result_evt.get('error', '')}"
+                f"claude reported error_during_execution: {err_detail}"
             )
 
         final_text = "".join(full_text_parts).strip()

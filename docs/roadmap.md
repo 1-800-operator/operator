@@ -938,6 +938,14 @@ Audio quality, TTS 3-tier architecture, latency masking, STT accuracy (mlx-whisp
 
 *Everything below was scoped out of the 7-day MVP window. Prioritize based on user feedback after launch.*
 
+### Gate `operator slip` behind the plugin (deprecate terminal entry)
+
+**Origin: Session 224 (2026-05-13).** Today's debugging surfaced the state-scan footgun: when `operator slip` runs from a terminal without `--resume-session` and without `CLAUDE_CODE_SESSION_ID`, operator falls through to "state-scan" — grabbing the most recently modified entry out of the desktop app's `claude-code-sessions/` catalog. That catalog can desync from the CLI's actual conversation store (claude returns "No conversation found with session ID: …"), and operator's auto-retry re-uses the same stale id and also fails. The slash-command flow doesn't have this problem because it always passes a live `--resume-session <id>`.
+
+**Proposal:** delete the bare `operator slip` terminal entry point. The slash command becomes the only way to enter a meeting. State-scan and `_discover_session_from_claude_state` become dead code and get deleted with it. Audio-debug toggle moves off `OPERATOR_AUDIO_DEBUG=1` env-var prefix onto a file marker (e.g. `~/.operator/.audio_debug`) so the slash-command flow can use it.
+
+**Why post-MVP:** ergonomics; helpful for the imminent debugging cycle to keep both entry points available. Deferred until current chat-panel / audio-attribution work stabilizes.
+
 ### MCP Enhancements
 
 

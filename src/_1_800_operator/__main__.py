@@ -523,68 +523,6 @@ def _run_hangup():
     return 0
 
 
-def _discover_session_from_claude_state(window_seconds: float = 300.0):
-    """Find the active desktop-app Claude Code session UUID by reading
-    Claude desktop's per-conversation state files.
-
-    Claude desktop writes a JSON state file per conversation at
-    ~/Library/Application Support/Claude/claude-code-sessions/<agent>/<workspace>/local_<msg>.json
-    and rewrites it as turns complete. Each file carries `cliSessionId`
-    (the Claude Code session UUID we want as --resume-session).
-
-    Algorithm: pick the most-recently-modified state file (filesystem
-    mtime, not the in-file `lastActivityAt`) whose mtime falls within
-    `window_seconds`. We use mtime instead of the JSON field because the
-    field is what the desktop app wrote on its *last* completed turn —
-    when operator runs tier 3 ~1-2s into startup, the current turn's
-    file update may not have landed yet. mtime catches the actual disk
-    write the instant it happens; both will converge but mtime is at
-    least as fresh. Window is 5 min because (a) the firing conversation
-    will usually update during operator's startup window, (b) failing
-    that, its mtime from its prior turn is still recent enough to
-    identify it as the active conversation, (c) wider windows risk
-    bridging to a stale conversation that hasn't been touched in hours.
-
-    Earlier versions scanned /private/tmp/claude-{uid}/.../tasks/*.output
-    instead, but that signal is fragile: foreground commands (no &) don't
-    create .output files at all, and even backgrounded ones have mtime
-    races against operator's import-time startup latency. The state file
-    is updated by the desktop app independently of the bash task
-    subsystem, which makes it the reliable signal.
-    """
-    import glob
-    import json as _json
-    import time as _time
-
-    home = os.path.expanduser("~")
-    pattern = (
-        f"{home}/Library/Application Support/Claude/claude-code-sessions/"
-        f"*/*/local_*.json"
-    )
-    now = _time.time()
-    cutoff = now - window_seconds
-
-    best_path = None
-    best_mtime = 0.0
-    for path in glob.glob(pattern):
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            continue
-        if mtime < cutoff or mtime <= best_mtime:
-            continue
-        best_path = path
-        best_mtime = mtime
-
-    if not best_path:
-        return None
-    try:
-        with open(best_path, "r", encoding="utf-8") as fh:
-            return _json.load(fh).get("cliSessionId") or None
-    except (OSError, _json.JSONDecodeError):
-        return None
-
-
 def _run_slip(name, rest):
     """slip mode — launch a dedicated Chrome window for the meeting and
     CDP-attach claude to it.
@@ -597,14 +535,21 @@ def _run_slip(name, rest):
     Caller must have already filtered for `name == "claude"` (the main
     dispatcher does this at argv parse time).
     """
-    # Resume-session resolution has three tiers (see logic below):
+    # Resume-session resolution has two tiers (see logic below):
     #   1. --resume-session <id> on the command line.
-    #   2. CLAUDE_CODE_SESSION_ID env var (terminal Claude Code sets this).
-    #   3. Read cliSessionId from the most-recently-active desktop-app
-    #      session state file under ~/Library/Application Support/Claude/
-    #      claude-code-sessions/ (desktop app — no env var exposed).
-    # The skill body no longer passes --resume-session because the desktop-app
-    # model rewrites/mangles flags; tiers 2/3 catch that case.
+    #   2. CLAUDE_CODE_SESSION_ID env var (set by both terminal Claude Code
+    #      and the desktop app — verified S224 with CLAUDE_CODE_ENTRYPOINT=
+    #      claude-desktop). Neither → spawn fresh; the inner-claude inherits
+    #      no prior context, which is the predictable safe default.
+    # An older third tier scanned the desktop app's
+    # ~/Library/Application Support/Claude/claude-code-sessions/ catalog for
+    # a recent cliSessionId. It was load-bearing in S217 when the desktop
+    # app neither propagated the env var nor honored the slash command's
+    # --resume-session flag. Both of those have since started working, so
+    # the scan became dead weight — and a footgun (S224 stale-session bug:
+    # the catalog kept pointing at a conversation the CLI store no longer
+    # had, and every meeting silently failed with `error_during_execution`
+    # until we tracked it down).
     # See comment block on user-facing errors in main(): pre-daemonize
     # rejections exit 0 to stdout so the desktop-app harness surfaces them.
     url = None
@@ -722,7 +667,7 @@ def _run_slip(name, rest):
     slug = slug_from_url(url)
     meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
 
-    # Three-tier resume-session resolution (see docstring at top of _run_slip).
+    # Two-tier resume-session resolution (see comment block at top of _run_slip).
     resume_source = None
     if resume_session_id:
         resume_source = "flag"
@@ -730,10 +675,6 @@ def _run_slip(name, rest):
         resume_session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
         if resume_session_id:
             resume_source = "env"
-    if not resume_session_id:
-        resume_session_id = _discover_session_from_claude_state()
-        if resume_session_id:
-            resume_source = "state-scan"
 
     provider = build_provider(resume_session_id=resume_session_id)
     # Fire pre_warm now, before the join sequence (Chrome attach + lobby
