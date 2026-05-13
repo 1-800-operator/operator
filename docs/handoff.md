@@ -1,68 +1,63 @@
-# Session 219 handoff (2026-05-12) — Root-caused the /slip double-Bash + lockfile guard shipped
+# Session 220 handoff (2026-05-12) — Turn-latency win + plugin 0.1.11
 
-## What landed in S219
+## What landed in S220
 
-S219 closed the singleton-guard fragility that S218 had left flagged AND root-caused the desktop-app "operator slip is already running" error pattern that had been intermittent across S217/S218 live tests. Two complementary fixes shipped:
+The headline: **per-turn latency dropped from ~5s to ~2s (60% reduction)** via eager pre-spawn warming, validated live with `warm=1` and `cli_init ≤21ms` on every turn. Seven operator commits + one plugin release, all pushed to origin (+ public for the main repo); plugin marketplace cache refreshed locally.
 
-- **Operator `6b67e1f`** (origin + public) — replaces the pgrep cmdline-grep singleton guard with a `~/.operator/slip.pid` lockfile. O_CREAT|O_EXCL atomic acquire; holder-PID liveness via `kill(pid,0)` + identity check via `ps -o command=` argv match (handles PID reuse); stale-lock auto-reclaim; ownership-aware release (only the recorded PID deletes the file — so the daemonize parent's release is a no-op and only the daemon child reaps it on graceful shutdown); `_run_hangup` rewritten to read the lockfile instead of pgrep. Smoke-tested across three reclaim scenarios + verified end-to-end in a real meeting.
-- **Plugin `caf1cfd` (0.1.10)** on `1-800-operator/operator-plugin` — rewrites SKILL.md to remove the "**Action — run this immediately.** Invoke the Bash tool with the command in the `!` block below…" prose directive. New SKILL.md leads with the `!` block and follows with prose framing the output as already-produced and explicitly forbidding a second invocation. Marketplace bumped to 0.1.10.
+Earlier in the session (pre-latency arc, already on `origin/main` from a separate end-session pass): three UX polish commits — `ce1ed1c` (consolidated `[🤖 Claude]` prefix everywhere), `13c954e` (audio helper `LSUIElement=true` to suppress dock icon, helper rebuilt + signed + notarized), `ac21359` (audio pipeline stops on meeting leave).
 
-Plus a docs sweep at session end (this commit): roadmap status line + 14.22.9.12 row, agent-context Current Status converted to Prior + fresh S219 entry, two new Hard Won Knowledge entries (JSONL forensic methodology + `!`-block pre-execution mechanics), and this handoff file.
+Then the latency arc (in order):
 
-The root-cause discovery is captured in the second Hard Won Knowledge entry: the Claude Code desktop-app harness pre-executes ` ```! ``` ` blocks at SKILL-load time and **inlines the command's stdout into the SKILL.md text replacing the original command** before the model ever sees it. Prior SKILL.md prose also instructed the model to invoke Bash, causing a redundant second Bash call where the model reconstructed argv from context (dropping `claude`). Proven by JSONL transcript inspection at `~/.claude/projects/-Users-jojo/<session-id>.jsonl` — first lesson learned: **read the transcript before guessing.**
+- **`e3ba9a0`** — 14.22.9.8: install.sh §7.6 ships the desktop-app allowlist (`Bash(operator:*)`). Long-aged carryover finally shipped. Single entry, not two, because S219's self-daemonize removed the `nohup` wrapper. Inline-Python merge, idempotent, soft-skips on missing claude or unparseable JSON, preserves existing user entries.
+- **`3fe3bb7`** — end-to-end TIMING breadcrumbs across the receive path. JS observer stamps `t_dom=Date.now()` on each queued msg; adapter stamps `t_drained` per batch; `ChatRunner._send` stamps `t_first_visible` on the first chat post; `_emit_turn_done` emits a summary `TIMING turn_complete` line.
+- **`d4857b8`** — `POLL_INTERVAL` 0.5 → 0.1s. Receive-side saving of ~400ms median per turn.
+- **`a5d45a9`** — split `ttft` into `spawn` / `cli_init` / `api_ttft` + log `cache_input`, `cache_creation`, `cache_read` from the result event. **Disproved my JSONL-tail-growth hypothesis**: cache_read=~32K every turn, cache_input=3 — `claude --resume` is fine.
+- **`1071ad9` + `ac14b63`** — eager pre-spawn warm subprocess in `ClaudeCLIProvider`. New `pre_warm()` slots a `claude -p --resume <id>` subprocess; `_run_one_turn` claims it if alive (proc.poll fallback to cold spawn). Called from `ChatRunner.run()` after join (turn 1) and `complete_streaming`'s tail-on-success via daemon thread (turns 2+). The `ac14b63` follow-up dropped the init-wait after empirical finding that claude emits zero events until stdin input (see Hard Won Knowledge entry in agent-context).
+- **`e720f72` + plugin `a02e378` (0.1.11)** — version-stale chat hint + new `/operator:update` skill. `pipeline/update_check.py` does a best-effort remote-vs-local marketplace comparison; `ChatRunner._post_update_hint_if_newer` posts a `[🤖 Claude]` hint via daemon thread after join when newer plugin exists. install.sh §7.6 extended with `Bash(claude plugin marketplace update:*)` and `Bash(claude plugin update operator:*)`.
 
-A separate hypothesis from earlier in the session — that Playwright page handles silently re-target during Meet's green-room → in-call transition — was DISPROVED by live-test instrumentation. No prophylactic fix was needed; DIAG instrumentation was added and then stripped before commit.
+Plugin 0.1.11 also rewrites `slip/SKILL.md` from a verbatim three-line script into in-your-own-words guidance covering: operator is dialing claude in / `@claude` anywhere in a meeting message / context flows / the three slash commands / `--yolo`.
 
 ---
 
-## Next session (S220): three carryover items
+## Next session (S221): three small carryover items
 
 ### Prereqs (verify, <2 min)
 
 ```bash
-git rev-parse HEAD                                              # should be the docs-sweep commit
-gh api repos/1-800-operator/operator/commits/main --jq .sha     # should match
-claude plugin list | grep operator                              # may still show 0.1.9 — desktop app doesn't auto-update
-ls ~/.claude/plugins/cache/1-800-operator/operator/             # should include 0.1.10/ after `claude plugin update operator@1-800-operator`
-cat ~/.operator/slip.pid 2>&1                                   # should print "No such file" (clean state)
-pgrep -lf "operator slip" || echo "clean"                       # should print clean
+git rev-parse HEAD                                              # docs-sweep commit
+gh api repos/1-800-operator/operator/commits/main --jq .sha     # should match (after push)
+gh api repos/1-800-operator/operator-plugin/commits/main --jq .sha  # should match a02e378
+claude plugin list | grep operator                              # may still show 0.1.10 until restart + /operator:update
+grep '"version"' ~/.claude/plugins/marketplaces/1-800-operator/.claude-plugin/marketplace.json  # 0.1.11
 ```
 
-If the desktop app is still showing 0.1.9 in `claude plugin list`, run `claude plugin marketplace update 1-800-operator && claude plugin update operator@1-800-operator` and restart Claude Code. This is itself the plugin-auto-update friction item from S218 carryover — still unresolved.
+### Item 1 — Live-test the /operator:update flow end-to-end (~15 min)
 
-### Item 1 — 14.22.9.8: ship the desktop-app allowlist into install.sh (~30 min)
+The version-stale chat hint compiles and unit-tests cleanly but hasn't been exercised against an actual stale local cache. To force it: temporarily roll back `~/.claude/plugins/marketplaces/1-800-operator/.claude-plugin/marketplace.json` to 0.1.10 (or any version < remote), restart Claude Code, `/operator:slip <meet-url>` — should see the `[🤖 Claude] A newer operator version (0.1.11) is available — type /operator:update in Claude Code to upgrade.` line in meeting chat. Then `/operator:update` from Claude Code should run both `claude plugin marketplace update` and `claude plugin update operator@1-800-operator`. After restart, confirm the version-stale hint no longer fires.
 
-The most-carried item across S217 → S218 → S219. Every new desktop-app user hits the silent-fail wall on first `/operator:slip` until we ship this. Spec unchanged: small Python one-liner inline in install.sh that merges `Bash(operator:*)` + `Bash(nohup operator:*)` into `~/.claude/settings.json` `permissions.allow`. Merge-in (preserve existing user entries), idempotent (skip if both already present), soft-skip if file missing or invalid JSON. Live-test on a clean machine if possible; otherwise restore current settings.json after a smoke test.
+### Item 2 — Read the overnight idle-timeout probe results
 
-### Item 2 — Plugin auto-update friction (~1-2 hr depending on path)
+Script + run instructions are at `~/Desktop/run_overnight_probe.md` and `debug/claude_idle_overnight/probe.sh`. Expected output: `tail -50 /tmp/claude_idle_overnight/probe_*.log`. What we'd love to see: `verification result=ok` after multiple hours idle, confirming the warm-at-join path survives even very long lobby waits. If `DEATH: claude exited at elapsed=Xs` shows up, document the timeout — pre-warm should already handle this gracefully via `proc.poll()` fallback, but knowing the actual threshold helps reason about how often warm slots get refreshed.
 
-Also a multi-session carryover. The desktop app doesn't notify users when a new plugin version exists; they sit on stale versions. Two options from the S218 framing:
+### Item 3 — Optional: deeper latency micro-optimization
 
-- **Ship an `/operator:update` skill.** Bundles the two CLI commands (`claude plugin marketplace update 1-800-operator` + `claude plugin update operator@1-800-operator`) + a "restart Claude Code" note. ~30 min. Solves execution, not discovery.
-- **Build version-stale detection into operator.** On every slip start, operator fetches the marketplace `marketplace.json` from GitHub, compares with `~/.claude/plugins/installed_plugins.json`, and if newer posts a one-time `[☎️ Operator] A new operator version (X.Y.Z) is available — run /operator:update to upgrade.` chat line. ~1-2 hr. Solves both.
-
-Best paired: option 1 makes option 2's chat line actionable. **Recommend shipping both this session if time allows.**
-
-### Item 3 — Optional: deeper live-test coverage
-
-S218 handoff's "Item 4" deferred items still untested: audio + transcript MCP recall on real speech, prompt-cache hit on second @mention, terminal-direct path (`operator slip claude <url>` without env bridge). If S220 has time after Items 1 + 2, this is the cleanup pass.
+The `to_first_visible − ttft` send-side cost (100-170ms) was explicitly de-prioritized this session — diminishing returns and the `SNAPSHOT_MESSAGE_IDS_JS` pre-send call serves robustness, not optimization. Removing it would introduce a foreign-participant-ID race. If S221 has cycles after Items 1+2, consider this CLOSED unless there's a new bottleneck.
 
 ---
 
 ## Open questions / blockers
 
-- **None blocking.** S219 closed the model-improvisation feedback loop that S218 had narrowed; the remaining items are scope-clear and well-bounded.
-- **The same-URL absorption I proposed mid-session as a "fix" for the double-Bash error is now correctly deferred** — the SKILL.md rewrite addresses the actual root cause. If the desktop-app model ever regresses (or a different surface duplicates the call for unrelated reasons), the absorption is a known-good belt-and-suspenders we can return to.
-- **The harness-pre-executes-`!`-blocks behavior is uncertain in scope.** We proved it for `/operator:slip` specifically. Whether it applies to all SKILL types (skill-creator-built, command, etc.) or all desktop-app surfaces is not established. If we author future SKILL.md files with `!` blocks, follow the new author rule (don't double-instruct) until/unless we have more data.
+- **None blocking.** All commits pushed to origin (+ public for operator). Local marketplace cache refreshed. Audio helper rebuilt and live-tested. The only "test deferred" items are the two listed in S221 carryover, both low-effort.
+- **One observed behavior to confirm**: in the post-fix live test, turn 1 was `warm=1` because the join-time pre_warm landed ~9s before the user's first @mention (bot joined at 19:05:14, first message arrived at 19:05:23). For users who @mention immediately after the bot's "Operator is dialing claude in" reply, pre_warm may not have completed in time → turn 1 is cold. Acceptable; turn 2+ always warm.
 
 ---
 
 ## Gotchas / don't forget
 
-- **Zero unpushed commits** at handoff time (after the docs-sweep commit). Operator: `6b67e1f` + docs-sweep. Plugin: `caf1cfd`. All pushed.
-- **Three-step plugin publish flow still load-bearing.** Future plugin bumps: (1) bump operator-plugin's `plugin.json` + push; (2) bump operator's `marketplace.json` + push to both `origin` and `public`; (3) `cd ~/.claude/plugins/marketplaces/1-800-operator && git pull --ff-only origin main` to refresh the local cache. See `memory/project_plugin_publish_two_steps.md`.
-- **README.md is dirty** in operator repo with pre-existing user work on billing-protection wording. NOT mine — left untouched. User to commit when ready.
-- **DIAG instrumentation was added then stripped** within this session. The page-handle re-resolution hypothesis was disproved; no code change shipped from that hypothesis. The invocations.log diagnostic in `__main__.py` was useful forensically but not shipped — it was stripped before commit.
-- **`/tmp/operator.log` was rotated to 5GB** at session start; rotated to `/tmp/operator.log.s218` and `/tmp/operator.log.preS219test3` before tests. Still no logrotate / size cap on the live log; worth a follow-up pass eventually.
-- **Plugin auto-update friction is the second-most-aged carryover** behind 14.22.9.8 — flag for fresh action in S220.
-- **The S219 architectural lesson:** when investigating a model's behavior, JSONL transcripts at `~/.claude/projects/<cwd-slug>/<session-id>.jsonl` are forensic ground truth — read them BEFORE forming hypotheses. The cost of speculation is rounds; the cost of reading the actual transcript is minutes.
+- **Plugin publish 3-step flow still load-bearing.** This session followed it: (1) bumped operator-plugin's `plugin.json` to 0.1.11 + pushed; (2) bumped operator's `marketplace.json` to 0.1.11 + pushed to origin AND public; (3) `cd ~/.claude/plugins/marketplaces/1-800-operator && git pull --ff-only origin main` to refresh the local cache. The new `/operator:update` skill automates step (3) plus the `claude plugin update` install step.
+- **README.md is dirty in operator repo** with the user's billing-protection wording. NOT mine, left untouched (per S219 carryover convention). User to commit on their own timeline.
+- **`debug/claude_idle_overnight/`** is untracked — the script for the overnight probe. Not committed because it's a transient diagnostic; user is running it tonight outside the session.
+- **The S220 architectural lesson:** when investigating latency, **add the cache-hit metric to the log line before forming a theory**. My JSONL-tail-growth hypothesis was wrong; the actual bottleneck (claude CLI startup) was invisible until I split `ttft` into `spawn/cli_init/api_ttft`. Five minutes of instrumentation saved several rounds of speculative architecture changes.
+- **Three new Hard Won Knowledge entries** added to `docs/agent-context.md`: claude-emits-nothing-pre-stdin, prompt-cache-is-hitting-don't-touch, heredoc-apostrophe-inside-command-substitution.
+- **The audio helper binary** at `~/.operator/bin/operator-audio-capture.app` is the LSUIElement=true rebuilt artifact from earlier in S220. Not version-tracked; if the user runs `install.sh --reinstall` it will be re-copied from the package's `swift/operator-audio-capture.app`.
+- **Anti-detection invariant preserved.** Eager pre-spawn does not change the spawn command shape (still naked `claude -p --resume <id>`) and generates zero API traffic while parked. The only Anthropic-visible delta is the auth handshake landing earlier — indistinguishable from a user who runs `claude --resume <id>` and grabs coffee. Long-lived multi-turn `stream-json` sessions (option #1 from the latency discussion) were explicitly avoided as they WOULD have changed the detection surface.
