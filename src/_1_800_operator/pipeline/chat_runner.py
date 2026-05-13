@@ -311,6 +311,14 @@ class ChatRunner:
                 return
 
         log.info("ChatRunner: joined")
+        # Kick off an eager pre-spawn so the first @mention doesn't pay
+        # the ~2.6s claude-CLI startup cost. Fires on a daemon thread so
+        # the join return isn't delayed; if the first @mention arrives
+        # before pre_warm finishes, _run_one_turn cold-spawns and the
+        # warm slot gets used for turn 2 (the provider re-warms after
+        # every successful turn on its own).
+        if self._provider is not None:
+            threading.Thread(target=self._provider.pre_warm, daemon=True).start()
         trigger = config.TRIGGER_PHRASE
         ui.ok(f"Listening for {trigger} — claude only replies when addressed.")
         log.info("ChatRunner: starting chat loop")

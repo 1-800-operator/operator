@@ -55,7 +55,7 @@ from _1_800_operator.pipeline.providers.base import (
 log = logging.getLogger(__name__)
 
 
-def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token):
+def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, warm=False):
     """Format the per-stage TTFT breakdown for the TIMING log line.
 
     Splits the pre-first-token time into three observable stages so a
@@ -67,18 +67,41 @@ def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token):
       api_ttft_ms — system_init → first content_block_delta (the actual
                     API call to claude.ai)
 
+    When `warm=True` the subprocess was claimed from the pre-warm slot:
+    spawn was a slot-claim (zero-cost), cli_init was paid earlier during
+    pre_warm (shown as `warm`), and api_ttft starts from t_run_start
+    since the subprocess was already past init. The `warm=1|0` flag at
+    the end of the fragment makes turn-vs-turn comparison greppable.
+
     Any stage with no captured stamp shows as `n/a`. Returns a single
     space-separated fragment ready to drop into the TIMING line.
     """
+    def _f(v):
+        return f"{v}ms" if v is not None else "n/a"
+
+    if warm:
+        # spawn_done equals run_start (no real spawn). cli_init was
+        # paid during pre_warm — label it "warm" instead of n/a so the
+        # log makes the win obvious. api_ttft measures from t_run_start
+        # because the warm subprocess emits no init event in-turn.
+        spawn_ms = 0
+        cli_init_label = "warm"
+        api_ttft_ms = int((t_first_token - t_run_start) * 1000) if t_first_token else None
+        return (
+            f"spawn={_f(spawn_ms)} "
+            f"cli_init={cli_init_label} "
+            f"api_ttft={_f(api_ttft_ms)} "
+            f"warm=1"
+        )
+
     spawn_ms = int((t_spawn_done - t_run_start) * 1000) if t_spawn_done else None
     cli_init_ms = int((t_init - t_spawn_done) * 1000) if (t_init and t_spawn_done) else None
     api_ttft_ms = int((t_first_token - t_init) * 1000) if (t_first_token and t_init) else None
-    def _f(v):
-        return f"{v}ms" if v is not None else "n/a"
     return (
         f"spawn={_f(spawn_ms)} "
         f"cli_init={_f(cli_init_ms)} "
-        f"api_ttft={_f(api_ttft_ms)}"
+        f"api_ttft={_f(api_ttft_ms)} "
+        f"warm=0"
     )
 
 
@@ -203,6 +226,21 @@ class ClaudeCLIProvider(LLMProvider):
         # so a SIGINT-triggered subprocess kill doesn't race in a
         # fresh spawn after the rest of operator has torn down.
         self._stopping = False
+        # Eager pre-spawn slot. pre_warm() spawns a `claude -p --resume <id>`
+        # subprocess and consumes its system_init event (validating auth +
+        # capturing session_id) ahead of any user turn. The next turn
+        # claims this slot in _run_one_turn and skips the ~2.6s
+        # cli_init cost. Two callers fire pre_warm: (a) ChatRunner.run()
+        # after a successful meeting join (covers turn 1) and (b) the
+        # tail of complete_streaming on success (covers turns 2+).
+        # `_warm_in_progress` is a dedup latch so overlapping callers
+        # don't spawn twice. The slow spawn happens OUTSIDE the lock so
+        # a turn arriving mid-prewarm doesn't serialize on it.
+        self._warm_proc = None
+        self._warm_out_q: Queue | None = None
+        self._warm_stderr_buf: deque[str] | None = None
+        self._warm_lock = threading.Lock()
+        self._warm_in_progress = False
 
     # --- callback wiring (set by ChatRunner._wire_provider) -----------
 
@@ -250,17 +288,108 @@ class ClaudeCLIProvider(LLMProvider):
     def stop(self):
         """Mark the provider as shutting down.
 
-        With the per-@mention shape there is no persistent subprocess
-        to terminate — any in-flight spawn is owned by the
-        complete_streaming() call frame and will tear down via its own
-        finally block. Setting `_stopping` makes the EOF retry path
-        bail rather than spawning a zombie replacement after a SIGINT-
-        triggered kill of the live spawn. Idempotent.
+        Per-@mention spawns are owned by their complete_streaming()
+        call frame and tear down via its finally block. Pre-warmed
+        subprocesses are owned by the provider, so this method
+        terminates any warm slot inhabitant. Setting `_stopping` makes
+        the EOF retry path bail rather than spawning a zombie
+        replacement after a SIGINT-triggered kill. Idempotent.
         """
         if self._stopping:
             return
         log.info("ClaudeCLI stop() called")
         self._stopping = True
+        # Terminate the warm subprocess if any. Hold the lock so a
+        # concurrent _run_one_turn doesn't claim a doomed subprocess
+        # mid-shutdown.
+        with self._warm_lock:
+            if self._warm_proc is not None:
+                self._terminate(self._warm_proc)
+                self._warm_proc = None
+                self._warm_out_q = None
+                self._warm_stderr_buf = None
+
+    def pre_warm(self):
+        """Spawn a `claude -p --resume <id>` subprocess ahead of demand
+        and park it idle.
+
+        Drains the system_init event so the subprocess is fully booted,
+        auth-validated, and session-rehydrated; the next user turn just
+        writes its envelope to stdin and goes straight to API. This
+        elides the ~2.6s cli_init cost on the turn that consumes the
+        warm slot.
+
+        Callers should invoke this:
+          - Once after a successful meeting join (covers turn 1).
+          - Once at the tail of a successful complete_streaming (covers
+            the next turn).
+
+        Idempotent: returns immediately if a healthy warm subprocess
+        already sits in the slot, or if another pre_warm is already
+        spawning. Safe to call from any thread. Best-effort: failures
+        log a warning and leave the slot empty, so the next turn falls
+        back to a cold spawn.
+        """
+        if self._stopping:
+            return
+        with self._warm_lock:
+            if self._warm_proc is not None and self._warm_proc.poll() is None:
+                return  # already warm and alive
+            if self._warm_in_progress:
+                return  # another pre_warm is mid-spawn
+            self._warm_in_progress = True
+
+        proc = None
+        try:
+            proc, out_q, stderr_buf = self._spawn_one()
+            self._drain_until_init(out_q, stderr_buf, timeout=15.0)
+        except Exception as exc:
+            log.warning(f"ClaudeCLI: pre_warm failed: {exc}")
+            if proc is not None:
+                self._terminate(proc)
+            with self._warm_lock:
+                self._warm_in_progress = False
+            return
+
+        # Subprocess is up and init-validated. Slot it under the lock so
+        # a racing _run_one_turn either claims it or doesn't, atomically.
+        with self._warm_lock:
+            if self._stopping:
+                self._terminate(proc)
+            else:
+                self._warm_proc = proc
+                self._warm_out_q = out_q
+                self._warm_stderr_buf = stderr_buf
+                log.info("ClaudeCLI: warm subprocess slotted, ready for next turn")
+            self._warm_in_progress = False
+
+    def _drain_until_init(self, out_q, stderr_buf, timeout=15.0):
+        """Drain the event queue until the system_init event arrives.
+
+        Validates apiKeySource and captures session_id (same checks the
+        in-turn drain would do). Raises ClaudeCLIProtocolError if the
+        subprocess EOFs or doesn't emit init within the timeout — the
+        caller (pre_warm) catches and skips slotting.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                kind, payload = out_q.get(timeout=0.5)
+            except Empty:
+                continue
+            if kind == "eof":
+                stderr_tail = "".join(list(stderr_buf)[-20:]) if stderr_buf else "(empty)"
+                raise ClaudeCLIProtocolError(
+                    f"claude subprocess exited before init. stderr tail:\n{stderr_tail}"
+                )
+            if kind != "event":
+                continue
+            if payload.get("type") == "system" and payload.get("subtype") == "init":
+                self._validate_init_event(payload)
+                return
+        raise ClaudeCLIProtocolError(
+            f"claude subprocess did not emit system_init within {timeout}s"
+        )
 
     # --- spawn helpers ------------------------------------------------
 
@@ -563,7 +692,9 @@ class ClaudeCLIProvider(LLMProvider):
         new_user_text = last.get("content") or ""
 
         try:
-            return self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
+            result = self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
+            self._schedule_pre_warm()
+            return result
         except ClaudeCLIProtocolError as exc:
             if self._stopping:
                 log.info("ClaudeCLI: streaming turn aborted during shutdown — propagating")
@@ -576,10 +707,22 @@ class ClaudeCLIProvider(LLMProvider):
             self._fire_connection("dropped")
             self._fire_connection("reconnecting")
             try:
-                return self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
+                result = self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
+                self._schedule_pre_warm()
+                return result
             except ClaudeCLIProtocolError as exc2:
                 self._fire_connection("failed")
                 raise exc2
+
+    def _schedule_pre_warm(self):
+        """Fire pre_warm on a daemon thread so the caller doesn't block
+        for the ~2.6s claude CLI startup. The next turn will claim the
+        warm slot if it arrives after pre_warm finishes; otherwise it
+        cold-spawns and pre_warm slots a fresh one for the turn after.
+        """
+        if self._stopping:
+            return
+        threading.Thread(target=self.pre_warm, daemon=True).start()
 
     def warmup(self, model):
         """No-op for the per-@mention shape.
@@ -603,12 +746,40 @@ class ClaudeCLIProvider(LLMProvider):
         streaming mode (text from stream_event content_block_delta
         payloads, with per-paragraph flush).
 
-        Captures wall-time bookends (t_run_start, t_spawn_done) so the
-        drain methods can split ttft into per-stage costs in their
-        TIMING log lines (spawn / claude-CLI-init / API-TTFT).
+        Claims the warm-slot subprocess (slotted by `pre_warm`) if one
+        is alive; otherwise spawns fresh. When warm, the subprocess has
+        already consumed its system_init event during pre_warm, so the
+        drain methods will not see one — that's expected.
+
+        Captures wall-time bookends (t_run_start, t_spawn_done, warm)
+        so the drain methods can split ttft into per-stage costs in
+        their TIMING log lines (spawn / cli_init / api_ttft) and
+        attribute the win when warm=1.
         """
         t_run_start = time.monotonic()
-        proc, out_q, stderr_buf = self._spawn_one()
+        proc = None
+        out_q = None
+        stderr_buf = None
+        was_warm = False
+        with self._warm_lock:
+            if self._warm_proc is not None and self._warm_proc.poll() is None:
+                proc = self._warm_proc
+                out_q = self._warm_out_q
+                stderr_buf = self._warm_stderr_buf
+                self._warm_proc = None
+                self._warm_out_q = None
+                self._warm_stderr_buf = None
+                was_warm = True
+            elif self._warm_proc is not None:
+                # Slot held a dead subprocess (idle timeout, crash, etc.).
+                # Clean it up and fall through to cold spawn.
+                self._terminate(self._warm_proc)
+                self._warm_proc = None
+                self._warm_out_q = None
+                self._warm_stderr_buf = None
+
+        if not was_warm:
+            proc, out_q, stderr_buf = self._spawn_one()
         t_spawn_done = time.monotonic()
         try:
             envelope = {
@@ -624,7 +795,11 @@ class ClaudeCLIProvider(LLMProvider):
                     f"claude subprocess stdin closed unexpectedly: {exc}\nstderr tail:\n{stderr_tail}"
                 ) from exc
 
-            timing = {"t_run_start": t_run_start, "t_spawn_done": t_spawn_done}
+            timing = {
+                "t_run_start": t_run_start,
+                "t_spawn_done": t_spawn_done,
+                "warm": was_warm,
+            }
             if on_paragraph is None:
                 return self._drain_non_streaming(out_q, stderr_buf, timing)
             return self._drain_streaming(out_q, stderr_buf, on_paragraph, timing)
@@ -677,7 +852,7 @@ class ClaudeCLIProvider(LLMProvider):
         subtype = result_evt.get("subtype") if result_evt else None
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
-            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, None)} "
+            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, None, warm=timing.get('warm', False))} "
             f"{_format_cache_stats(result_evt)} "
             f"result.subtype={subtype} text_chars={sum(len(p) for p in text_parts)}"
         )
@@ -796,7 +971,7 @@ class ClaudeCLIProvider(LLMProvider):
         flush_str = f"{first_flush:.1f}s" if first_flush is not None else "n/a"
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s ttft={ttft_str} first_flush={flush_str} streamed=1 "
-            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token)} "
+            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, warm=timing.get('warm', False))} "
             f"{_format_cache_stats(result_evt)} "
             f"result.subtype={result_evt.get('subtype') if result_evt else 'n/a'}"
         )
