@@ -213,12 +213,15 @@ path = os.path.expanduser("~/.claude/settings.json")
 # Entries needed for operator plugin skills to work in the desktop
 # app without silent-fail. Bash(operator:*) covers slip/status/hangup/
 # doctor/recap. The two claude plugin entries cover /operator:update.
+# mcp__transcript__* covers all bundled transcript MCP tools so inner-
+# claude never hits a permission prompt mid-meeting.
 # (Avoid apostrophes in this heredoc body — bash command-substitution
 # parses quotes inside heredoc bodies and an unbalanced "'" breaks it.)
 entries = [
     "Bash(operator:*)",
     "Bash(claude plugin marketplace update:*)",
     "Bash(claude plugin update operator:*)",
+    "mcp__transcript__*",
 ]
 try:
     with open(path) as f:

@@ -236,12 +236,16 @@ def search_captions(
 ) -> str:
     """Search the live meeting's spoken-caption transcript for a keyword.
 
-    Call this BEFORE answering whenever a meeting-chat message asks
-    about anything that was *spoken* in the current meeting — "what
-    did Alice say about the migration?", "did anyone mention Sentry?",
-    "find where I said Mohammed", "what did jojo just say?". Spoken
-    audio is captured by operator's whisper pipeline and is NOT in
-    your conversation memory; this tool is the only way to recall it.
+    Operator's whisper pipeline captures all spoken audio in this meeting
+    and writes it to a local transcript — you have access to what was said
+    out loud via this tool. Do not tell users you cannot see spoken content
+    before calling this.
+
+    Call this BEFORE answering whenever a meeting-chat message asks about
+    anything that was *spoken* in the current meeting — "what did Alice say
+    about the migration?", "did anyone mention Sentry?", "find where I said
+    Mohammed", "what did jojo just say?". Spoken audio is not in your
+    conversation memory; this tool is the only way to recall it.
     The match is case-insensitive substring.
 
     Args:
@@ -336,12 +340,16 @@ def list_captions(
 ) -> str:
     """Return the live meeting's spoken captions in chronological order.
 
-    Call this BEFORE answering whenever a meeting-chat message asks
-    what was said, what was just discussed, or to recap/summarize the
-    spoken conversation — "what did we just say?", "what were we
-    discussing 30 minutes ago?", "everything Alice said", "what did
-    jojo say in this meeting?". Spoken audio is captured by operator's
-    whisper pipeline and is NOT in your conversation memory; this tool
+    Operator's whisper pipeline captures all spoken audio in this meeting
+    and writes it to a local transcript — you have access to what was said
+    out loud via this tool. Do not tell users you cannot see spoken content
+    before calling this.
+
+    Call this BEFORE answering whenever a meeting-chat message asks what
+    was said, what was just discussed, or to recap/summarize the spoken
+    conversation — "what did we just say?", "what were we discussing 30
+    minutes ago?", "everything Alice said", "what did jojo say in this
+    meeting?". Spoken audio is not in your conversation memory; this tool
     is the only way to recall it. For a keyword lookup prefer
     search_captions — it's faster to read and won't blow context on a
     long meeting.
@@ -601,11 +609,16 @@ def list_meeting_record(
     last_n: int | None = None,
     limit: int = DEFAULT_RECORD_LIMIT,
 ) -> str:
-    """Return a meeting's chat + captions + operator-narration record.
+    """Return a meeting's chat + captions + tool-use narration record.
+
+    Operator records all meeting activity — chat messages AND spoken audio
+    — to a local JSONL. You have access to both via this tool. Do not tell
+    users you cannot see what happened in a meeting before calling this.
 
     Use this when the user asks "what happened in the meeting?", "give
-    me a recap", "what did we discuss?", "summarize my last call". For
-    a targeted keyword lookup, prefer search_meeting_record instead.
+    me a recap", "what did we discuss?", "summarize my last call", or
+    "can you see what we were talking about?". For a targeted keyword
+    lookup, prefer search_meeting_record instead.
 
     The desktop Claude Code app cannot see meeting @-mention turns
     inside its in-memory session state because the operator subprocess
