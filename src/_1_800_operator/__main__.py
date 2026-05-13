@@ -242,11 +242,19 @@ def main():
 
     first = argv[0]
 
+    # User-facing argv errors exit 0 to stdout (rather than the natural
+    # exit 2 to stderr). The Claude Code desktop-app harness classifies
+    # any `!` block exiting non-zero as "Shell command failed" and wraps
+    # the output in a DO-NOT-RESPOND caveat — invisible to the user.
+    # stdout + exit 0 lets the message reach claude; the SKILL.md body
+    # already discriminates success vs error by output shape, not exit
+    # code. Trades terminal scriptability of $? for desktop-app visibility,
+    # which is the primary surface.
     if first == "doctor":
         if len(argv) != 1:
             print("Usage: operator doctor\n")
             _print_usage()
-            return 2
+            return 0
         from _1_800_operator.pipeline.doctor import run_doctor
         return run_doctor()
 
@@ -254,21 +262,21 @@ def main():
         if len(argv) != 1:
             print("Usage: operator status\n")
             _print_usage()
-            return 2
+            return 0
         return _run_status()
 
     if first == "hangup":
         if len(argv) != 1:
             print("Usage: operator hangup\n")
             _print_usage()
-            return 2
+            return 0
         return _run_hangup()
 
     if first == "slip":
         if len(argv) < 2:
             print("Usage: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>\n")
             _print_usage()
-            return 2
+            return 0
         name = argv[1]
         # Surface-detect inference: the desktop-app model regularly
         # drops the `claude` positional and invokes `operator slip <url>`
@@ -290,7 +298,7 @@ def main():
             supported = ", ".join(sorted(KNOWN_BOTS))
             print(f"Unknown bot: {name!r}. Supported: {supported}.\n")
             _print_usage()
-            return 2
+            return 0
         rest, yolo = _consume_yolo(argv[2:])
         if yolo:
             os.environ["OPERATOR_YOLO"] = "1"
@@ -299,11 +307,11 @@ def main():
     if first.startswith("-"):
         print(f"Unknown option: {first}\n")
         _print_usage()
-        return 2
+        return 0
 
     print(f"Unknown subcommand: {first!r}\n")
     _print_usage()
-    return 2
+    return 0
 
 
 def _daemonize_and_announce(url):
@@ -395,6 +403,28 @@ def _consume_yolo(args):
     """
     yolo = "--yolo" in args
     return [a for a in args if a != "--yolo"], yolo
+
+
+def _read_current_meeting_url():
+    """Return the meet URL of the currently-active slip session, or None.
+
+    Reads the .current_meeting marker (written at meeting-join, deleted at
+    leave). Used by the singleton-guard error message so the user sees
+    *which* meeting operator is in rather than just "already running (pid
+    X)". Returns None on any error — the caller falls back to the pid form.
+    """
+    import json
+    marker = Path.home() / ".operator" / ".current_meeting"
+    if not marker.exists():
+        return None
+    try:
+        jsonl_path = Path(marker.read_text(encoding="utf-8").strip())
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            first = f.readline()
+        meta = json.loads(first) if first else {}
+        return meta.get("meet_url")
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _run_status():
@@ -575,6 +605,8 @@ def _run_slip(name, rest):
     #      claude-code-sessions/ (desktop app — no env var exposed).
     # The skill body no longer passes --resume-session because the desktop-app
     # model rewrites/mangles flags; tiers 2/3 catch that case.
+    # See comment block on user-facing errors in main(): pre-daemonize
+    # rejections exit 0 to stdout so the desktop-app harness surfaces them.
     url = None
     resume_session_id = None
     i = 0
@@ -582,8 +614,8 @@ def _run_slip(name, rest):
         arg = rest[i]
         if arg == "--resume-session":
             if i + 1 >= len(rest):
-                print("--resume-session requires a session id", file=sys.stderr)
-                return 2
+                print("--resume-session requires a session id")
+                return 0
             resume_session_id = rest[i + 1]
             i += 2
             continue
@@ -592,38 +624,52 @@ def _run_slip(name, rest):
             i += 1
             continue
         if arg.startswith("-"):
-            print(f"Unknown flag: {arg}", file=sys.stderr)
-            return 2
+            print(f"Unknown flag: {arg}")
+            return 0
         if url is None:
             url = arg
             i += 1
             continue
-        print(f"Unexpected argument: {arg}", file=sys.stderr)
-        return 2
+        print(f"Unexpected argument: {arg}")
+        return 0
 
     if not url:
         print(
-            "slip requires a Meet URL: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>",
-            file=sys.stderr,
+            "slip requires a Meet URL: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>"
         )
-        return 2
+        return 0
 
     if sys.platform != "darwin":
-        print("slip mode is currently macOS-only.", file=sys.stderr)
-        return 2
+        print("slip mode is currently macOS-only.")
+        return 0
 
     # Singleton guard — refuse to start if another operator slip is already
     # running. Without this, the desktop app can stack operators on the same
     # slip Chrome (e.g. when the model retries a failed dispatch), each
     # spawning its own audio helper and writing to the same meeting JSONL.
+    #
+    # Output goes to STDOUT and exits 0 on purpose. The Claude Code desktop-
+    # app harness classifies any `!` block that exits non-zero as "Shell
+    # command failed" and wraps the output in a DO-NOT-RESPOND caveat — so
+    # exit-2-to-stderr (the natural CLI shape) makes the rejection invisible
+    # to the user. stdout + exit 0 lets the harness inject the message
+    # normally, and the SKILL.md's "Error" branch matches by the line shape
+    # ("operator slip is already running…") regardless of exit code. The
+    # success-path output shape is what callers parse anyway.
     other_pid = _acquire_slip_lock()
     if other_pid is not None:
-        print(
-            f"operator slip is already running (pid {other_pid}). "
-            f"Run `operator hangup` (or `/operator:hangup`) first, then retry.",
-            file=sys.stderr,
-        )
-        return 2
+        existing_url = _read_current_meeting_url()
+        if existing_url:
+            print(
+                f"operator slip is already running — already in {existing_url}. "
+                f"Use /operator:hangup to leave that meeting first, then retry."
+            )
+        else:
+            print(
+                f"operator slip is already running (pid {other_pid}). "
+                f"Use /operator:hangup to leave that meeting first, then retry."
+            )
+        return 0
 
     # claude binary preflight — fail loud and early; no browser dance,
     # no config load if claude isn't installed or logged in.
@@ -634,13 +680,12 @@ def _run_slip(name, rest):
     if not ok:
         _release_slip_lock()
         print(
-            f"\nslip claude requires the Claude Code CLI.\n"
+            f"slip claude requires the Claude Code CLI.\n"
             f"  {reason}\n"
-            f"\nInstall Claude Code (https://claude.ai/code) and run "
-            f"`claude login`, then re-run.\n",
-            file=sys.stderr,
+            f"Install Claude Code (https://claude.ai/code) and run "
+            f"`claude login`, then re-run."
         )
-        return 2
+        return 0
 
     # All synchronous validation has passed. Hand the caller (Bash tool,
     # shell, etc.) a one-line success acknowledgement, then detach so
@@ -690,7 +735,17 @@ def _run_slip(name, rest):
         if resume_session_id:
             resume_source = "state-scan"
 
-    llm = LLMClient(build_provider(resume_session_id=resume_session_id))
+    provider = build_provider(resume_session_id=resume_session_id)
+    # Fire pre_warm now, before the join sequence (Chrome attach + lobby
+    # wait + whisper model load — typically ~30s). claude in stream-json
+    # mode emits no events pre-stdin, so we can't observe init completion;
+    # the longer the parked window before the first @mention, the more of
+    # claude's Node boot + MCP attach + --resume JSONL parse lands while
+    # we're still mid-join. Without this, a user who @mentions within ~2s
+    # of meeting entry pays a cli_init=~2s cold-init tax (observed S221).
+    import threading as _threading
+    _threading.Thread(target=provider.pre_warm, daemon=True).start()
+    llm = LLMClient(provider)
     llm.set_record(meeting_record)
     if resume_session_id:
         log.info(
@@ -726,6 +781,14 @@ def _run_slip(name, rest):
         connector.join(url)
     except SlipAttachError as e:
         ui.err(str(e))
+        # Reap the pre-warmed claude subprocess — this fail path bypasses
+        # _shutdown(), so without an explicit stop() the parked subprocess
+        # would survive the parent's exit (start_new_session=True children
+        # are not killed on parent death).
+        try:
+            provider.stop()
+        except Exception:
+            pass
         return 2
 
     log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")

@@ -311,14 +311,13 @@ class ChatRunner:
                 return
 
         log.info("ChatRunner: joined")
-        # Kick off an eager pre-spawn so the first @mention doesn't pay
-        # the ~2.6s claude-CLI startup cost. Fires on a daemon thread so
-        # the join return isn't delayed; if the first @mention arrives
-        # before pre_warm finishes, _run_one_turn cold-spawns and the
-        # warm slot gets used for turn 2 (the provider re-warms after
-        # every successful turn on its own).
-        if self._provider is not None:
-            threading.Thread(target=self._provider.pre_warm, daemon=True).start()
+        # pre_warm is fired upstream in __main__.py right after the
+        # provider is built, so claude's Node boot + MCP attach +
+        # --resume JSONL parse can land in parallel with the ~30s join
+        # sequence (Chrome attach + lobby wait + whisper warm). By the
+        # time we reach this point the warm slot is typically already
+        # populated; a re-fire here would be a no-op (pre_warm is
+        # idempotent under its _warm_lock).
         # Fire-and-forget plugin update check. If a newer version is on
         # the marketplace, post a single operator-voice hint to chat.
         # Network-bound (one HTTPS GET, 5s timeout); silent on failure.

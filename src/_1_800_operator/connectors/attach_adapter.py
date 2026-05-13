@@ -347,6 +347,18 @@ class AttachAdapter(MeetingConnector):
         self._audio_processors: dict[bytes, "object"] = {}
         self._audio_threads: list[threading.Thread] = []
         self._audio_stop = threading.Event()
+        # Pre-warm thread for mlx-whisper-base. Spawned at join() start so
+        # the 3-20s cold model load runs in parallel with Chrome launch +
+        # lobby wait; _start_audio_pipeline joins this thread before
+        # spawning the helper. None until first join().
+        self._whisper_warmup_thread: threading.Thread | None = None
+        # Latency anchors for the TIMING listening_ready line:
+        #   _slip_start_at    — set at join() entry (≈ when operator slip fired)
+        #   _meeting_entry_at — set when the in-call DOM appears (≈ when
+        #                       participants see operator in the meeting)
+        # Both monotonic clocks; the deltas land on the observer-install log.
+        self._slip_start_at: float | None = None
+        self._meeting_entry_at: float | None = None
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -392,6 +404,21 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive.clear()
         self._browser_closed.clear()
         self._observer_installed = False
+        self._slip_start_at = time.monotonic()
+        self._meeting_entry_at = None
+        # Pre-warm the whisper model in parallel with everything else the
+        # join sequence does (Chrome eviction + launch + CDP attach + lobby
+        # wait). The synchronous warm inside _start_audio_pipeline used to
+        # gate the audio pipeline — and therefore the chat MutationObserver
+        # install — for 3-20 seconds after meeting entry. Moving it here
+        # means the model is usually already loaded by the time
+        # _start_audio_pipeline runs, so listening latency drops to ~1s.
+        self._whisper_warmup_thread = threading.Thread(
+            target=self._warm_whisper,
+            daemon=True,
+            name="AttachAdapter-whisper-warm",
+        )
+        self._whisper_warmup_thread.start()
         self._browser_thread = threading.Thread(
             target=self._browser_session,
             args=(meeting_url,),
@@ -459,11 +486,42 @@ class AttachAdapter(MeetingConnector):
                 js.signal_failure("chrome_closed_before_entry")
                 return
 
-            # Audio is best-effort — meeting entry already succeeded, so
-            # failure to spawn the helper must NOT fail the join.
-            self._start_audio_pipeline()
+            # Open the chat panel and install the MutationObserver
+            # IMMEDIATELY after meeting entry — before audio pipeline,
+            # before anything else. The observer's seed loop marks every
+            # message already in the chat panel DOM as "already seen"
+            # (so we don't re-reply to historical @claudes on rejoin), so
+            # any user @-mention sent in the window between admission and
+            # observer install is silently dropped. Pre-S221 that window
+            # was 20s+ because the observer install was gated on audio
+            # pipeline start (and whisper model load). Doing it here
+            # collapses the window to ~300ms (chat-button click + textarea
+            # render). read_chat still calls these defensively in case
+            # the panel closes mid-meeting; both are idempotent.
+            self._ensure_chat_open(self._page)
+            self._install_chat_observer(self._page)
 
+            # Signal join success the moment the chat observer is watching.
+            # ChatRunner blocks on join_status.ready before starting its
+            # polling loop.
             js.signal_success()
+
+            # Audio pipeline spawns off-thread so the browser thread can
+            # enter the chat-queue processing loop immediately. The audio
+            # path joins the whisper-warm thread (which can still be
+            # mid-load) before spawning the helper subprocess; doing that
+            # on the browser thread blocked _process_chat_queue, so even
+            # though ChatRunner unblocked above, its read_chat() calls
+            # piled up in _chat_queue waiting for the browser thread to
+            # be free. S221 22:05 turn 1 showed poll_lag_ms=6573 from
+            # exactly this. The audio-spawn thread is daemon so process
+            # exit reaps it; _start_audio_pipeline checks _leave_event
+            # before spawning the helper to avoid spawning into shutdown.
+            threading.Thread(
+                target=self._start_audio_pipeline,
+                daemon=True,
+                name="AttachAdapter-audio-spawn",
+            ).start()
 
             # Main loop: drain queued chat commands, watch for browser
             # death. 200 ms cadence balances responsiveness for queued
@@ -766,14 +824,23 @@ class AttachAdapter(MeetingConnector):
             return []
 
     def leave(self):
-        """Disconnect from CDP. Does NOT quit Chrome — the user's browser
-        keeps running with all its tabs (including the Meet tab claude
-        was attached to). Idempotent.
+        """Disconnect from CDP, then close the slip Chrome process.
+        Idempotent.
 
         Signals the browser thread to exit and waits briefly for clean
         teardown. Audio pipeline shutdown + Playwright teardown happen
         inside the browser thread's finally block so all Playwright
-        calls stay on the thread that owns them.
+        calls stay on the thread that owns them. After Playwright is
+        down we evict whatever Chrome is on CDP_PORT — that's the slip
+        Chrome we launched (the user's main Chrome doesn't expose CDP).
+
+        Closing slip Chrome on shutdown is intentional: leftover slip
+        Chrome from a previous operator run held the Meet pre-join
+        screen in a stuck state across sessions, producing 60s+ lobby
+        waits on the next slip (S221 21:41 run repro'd this). The next
+        slip evicts whatever's on 9222 anyway, but eviction-during-leave
+        means the user sees the Chrome window close when operator does,
+        matching user mental model.
         """
         if self._leave_event.is_set():
             return
@@ -794,7 +861,11 @@ class AttachAdapter(MeetingConnector):
             # tear down beyond what the failure path already cleaned.
             self._stop_audio_pipeline()
             self._teardown_playwright()
-        log.info("AttachAdapter: detached from Chrome (Chrome left running)")
+        evicted = _evict_other_chrome_on_cdp_port()
+        if evicted:
+            log.info("AttachAdapter: slip Chrome closed")
+        else:
+            log.info("AttachAdapter: detached from Chrome (Chrome already gone)")
 
     # ------------------------------------------------------------------
     # Internals
@@ -845,6 +916,7 @@ class AttachAdapter(MeetingConnector):
                     chat_btn.count() > 0 and chat_btn.first.is_visible()
                 )
                 if leave_visible and chat_visible:
+                    self._meeting_entry_at = time.monotonic()
                     log.info("AttachAdapter: meeting entry detected")
                     print("Joined — claude is listening.\n", file=sys.stderr, flush=True)
                     return True
@@ -912,6 +984,23 @@ class AttachAdapter(MeetingConnector):
             if attached:
                 self._observer_installed = True
                 log.info("AttachAdapter: chat MutationObserver installed")
+                # The observer is the first thing that lets operator notice
+                # a new @mention. Log the two latencies a participant cares
+                # about: (a) how long after the bot became visible in-call
+                # (`_meeting_entry_at`) it can hear them, and (b) total
+                # cold-start from /operator:slip firing.
+                now = time.monotonic()
+                parts = []
+                if self._meeting_entry_at is not None:
+                    parts.append(
+                        f"ms_since_meeting_entry={int((now - self._meeting_entry_at) * 1000)}"
+                    )
+                if self._slip_start_at is not None:
+                    parts.append(
+                        f"ms_since_slip_start={int((now - self._slip_start_at) * 1000)}"
+                    )
+                if parts:
+                    log.info(f"TIMING listening_ready {' '.join(parts)}")
             else:
                 log.warning("AttachAdapter: chat observer not attached (textarea or panel container not in DOM) — will retry next poll")
         except Exception as e:
@@ -979,6 +1068,39 @@ class AttachAdapter(MeetingConnector):
     # Audio pipeline (14.20.4)
     # ------------------------------------------------------------------
 
+    def _warm_whisper(self) -> None:
+        """Pre-load mlx-whisper-base ahead of meeting entry.
+
+        Fired on a daemon thread at join() start so the 3-20s cold model
+        load runs in parallel with Chrome launch + lobby admission rather
+        than gating the audio pipeline (and therefore the chat observer
+        install) the moment the user admits the bot. Populates
+        self._audio_processors; _start_audio_pipeline joins this thread
+        and reuses whatever it finished loading.
+
+        Best-effort: silent on non-mac, missing helper, or import failures
+        — _start_audio_pipeline retries the warm synchronously in those
+        cases (and surfaces the warning then).
+        """
+        if sys.platform != "darwin":
+            return
+        if _resolve_audio_helper() is None:
+            return
+        try:
+            from _1_800_operator.pipeline.audio import AudioProcessor
+        except ImportError:
+            return
+        try:
+            log.info("AudioProcessor: warming mlx-whisper-base (async, one-time per process)…")
+            self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
+            self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
+        except Exception as e:
+            log.warning(
+                f"AttachAdapter: async whisper warm failed ({e}) — "
+                f"_start_audio_pipeline will retry"
+            )
+            self._audio_processors.clear()
+
     def _start_audio_pipeline(self) -> None:
         """Spawn operator-audio-capture and wire it through two AudioProcessors.
 
@@ -1012,13 +1134,30 @@ class AttachAdapter(MeetingConnector):
             log.warning(f"AttachAdapter: AudioProcessor import failed ({e}) — chat-only mode")
             return
 
-        try:
-            log.info("AudioProcessor: warming mlx-whisper-base (one-time per process)…")
-            self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
-            self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
-        except Exception as e:
-            log.warning(f"AttachAdapter: AudioProcessor warmup failed ({e}) — chat-only mode")
-            self._audio_processors.clear()
+        # Wait for the async warm started in join(). If it succeeded,
+        # self._audio_processors is already populated and we skip the
+        # synchronous warm below. If it failed (or the warm thread was
+        # never started — leave-before-join paths), fall through and warm
+        # here.
+        if self._whisper_warmup_thread is not None:
+            self._whisper_warmup_thread.join(timeout=30)
+
+        if not self._audio_processors:
+            try:
+                log.info("AudioProcessor: warming mlx-whisper-base (one-time per process)…")
+                self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
+                self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
+            except Exception as e:
+                log.warning(f"AttachAdapter: AudioProcessor warmup failed ({e}) — chat-only mode")
+                self._audio_processors.clear()
+                return
+
+        # Operator may have entered teardown while we were warming the
+        # whisper model (cold load can take ~20s). Spawning the helper
+        # after _leave_event is set would orphan a subprocess that
+        # _stop_audio_pipeline can't see yet — bail before that happens.
+        if self._leave_event.is_set():
+            log.info("AttachAdapter: leave requested during audio warmup — skipping helper spawn")
             return
 
         # Helper stderr → /tmp/operator.log (append). Same destination as
