@@ -110,6 +110,111 @@ def _kill_orphaned_children():
             pass
 
 
+_SLIP_LOCK_PATH = Path.home() / ".operator" / "slip.pid"
+
+
+def _pid_is_operator(pid: int) -> bool:
+    """True iff <pid> is a live operator-slip process.
+
+    Liveness via `kill(pid, 0)` then identity via `ps` argv match. The
+    argv check guards against PID reuse — without it, a long-dead
+    daemon's reclaimed PID owned by some unrelated process would make
+    the singleton guard false-positive forever.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # exists but owned by another user
+    try:
+        r = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return True  # can't verify identity — fail closed (treat as alive)
+    cmd = r.stdout
+    return "_1_800_operator" in cmd or "operator slip" in cmd
+
+
+def _acquire_slip_lock():
+    """Take the slip singleton lock at ~/.operator/slip.pid.
+
+    Returns None on success (lock now held by this process). Returns
+    the live PID of an existing operator-slip daemon when one is
+    already running. Stale lockfiles — PID dead, PID reused by an
+    unrelated process, or file contents corrupted — are reclaimed.
+
+    Lockfile-based rather than `pgrep -f` because surface-detect can
+    insert `claude` into operator's internal argv list without
+    rewriting the OS-visible command line, so a cmdline-grep can miss
+    a daemon launched via `operator slip <url>` (no positional). See
+    S219 investigation.
+    """
+    _SLIP_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            fd = os.open(
+                str(_SLIP_LOCK_PATH),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            try:
+                other_pid = int(_SLIP_LOCK_PATH.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                try:
+                    _SLIP_LOCK_PATH.unlink()
+                except OSError:
+                    pass
+                continue
+            if other_pid == os.getpid():
+                return None  # defensive — already ours
+            if _pid_is_operator(other_pid):
+                return other_pid
+            try:
+                _SLIP_LOCK_PATH.unlink()
+            except OSError:
+                pass
+            continue
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        finally:
+            os.close(fd)
+        return None
+
+
+def _write_slip_lock(pid: int) -> None:
+    """Overwrite the slip lockfile with <pid>. Called by the daemonize
+    parent after fork so the lockfile points at the surviving child."""
+    try:
+        _SLIP_LOCK_PATH.write_text(f"{pid}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _release_slip_lock() -> None:
+    """Delete the slip lockfile iff this process owns it. Idempotent.
+
+    Ownership check matters because the daemonize parent rewrites the
+    lockfile to point at the surviving child before exiting — so a
+    parent-side release would orphan the child. Only the recorded owner
+    deletes the file. _run_hangup bypasses this by calling unlink
+    directly after it's verified the holder is dead.
+    """
+    try:
+        owner = int(_SLIP_LOCK_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if owner != os.getpid():
+        return
+    try:
+        _SLIP_LOCK_PATH.unlink()
+    except OSError:
+        pass
+
+
 def _print_usage():
     print("Usage:")
     print("  operator slip claude <url>      Attach claude to a slip Chrome session")
@@ -235,9 +340,15 @@ def _daemonize_and_announce(url):
     sys.stderr.flush()
     pid = _os.fork()
     if pid > 0:
-        # Parent — emit the synchronous status line and exit clean.
-        # The Bash tool's stdout capture closes at this exit, so the
-        # model gets exactly this line as the command's response.
+        # Parent — rewrite the slip lockfile so it points at the
+        # surviving child (we acquired the lock pre-fork with our own
+        # PID, which is about to die). Order matters: rewrite first so
+        # any process arriving in the gap between our exit and our
+        # rewrite still sees a live owner. Then emit the synchronous
+        # status line and exit clean. The Bash tool's stdout capture
+        # closes at this exit, so the model gets exactly this line as
+        # the command's response.
+        _write_slip_lock(pid)
         print(
             f"operator: joining {url} (pid {pid}) — "
             f"use /operator:status to check, /operator:hangup to end early"
@@ -316,28 +427,37 @@ def _run_status():
 
 
 def _run_hangup():
-    """Send SIGTERM to any running `operator slip` process.
+    """Send SIGTERM to the running operator-slip daemon, if any.
+
+    Source of truth is the slip lockfile (~/.operator/slip.pid) written
+    at startup and rewritten post-fork to point at the surviving child.
+    If the lockfile is missing, corrupt, or its PID isn't alive +
+    identified as operator, treat as no-daemon-running and clean any
+    stale .current_meeting marker so `operator status` doesn't lie.
 
     The slip process's signal handler does the graceful teardown:
     ChatRunner.stop(), connector.leave() (CDP detach — does NOT quit
-    Chrome or close the chat panel, per spec), and clears the
-    .current_meeting marker. If no slip process is running but the
-    marker is stale, clean it up so `operator status` doesn't lie.
+    Chrome or close the chat panel, per spec), and releases the lock.
     """
     import signal as _sig
     import time as _time
     marker = Path.home() / ".operator" / ".current_meeting"
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "operator slip"],
-            capture_output=True, text=True, timeout=3,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"hangup: could not query running processes: {e}", file=sys.stderr)
-        return 2
-    pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
-    pids = [p for p in pids if p != os.getpid()]
-    if not pids:
+
+    pid = None
+    if _SLIP_LOCK_PATH.exists():
+        try:
+            pid = int(_SLIP_LOCK_PATH.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = None
+        if pid is not None and not _pid_is_operator(pid):
+            # Stale — reclaim so subsequent slip attempts succeed.
+            try:
+                _SLIP_LOCK_PATH.unlink()
+            except OSError:
+                pass
+            pid = None
+
+    if pid is None:
         if marker.exists():
             try:
                 marker.unlink()
@@ -345,28 +465,31 @@ def _run_hangup():
                 pass
         print("not in a meeting")
         return 0
-    for pid in pids:
+
+    try:
+        os.kill(pid, _sig.SIGTERM)
+    except ProcessLookupError:
+        # Raced with the daemon's own exit between our liveness check
+        # and the kill. Equivalent to clean shutdown — fall through.
         try:
-            os.kill(pid, _sig.SIGTERM)
-        except ProcessLookupError:
+            _SLIP_LOCK_PATH.unlink()
+        except OSError:
             pass
+        print("not in a meeting")
+        return 0
+
     # Brief wait so the slip process can run its shutdown handler
     # (connector.leave waits up to 10s for the browser thread). We poll
     # only for ~3s — long enough to confirm exit on the happy path, not
     # so long that the plugin skill feels stuck.
     deadline = _time.monotonic() + 3.0
     while _time.monotonic() < deadline:
-        alive = []
-        for pid in pids:
-            try:
-                os.kill(pid, 0)
-                alive.append(pid)
-            except ProcessLookupError:
-                pass
-        if not alive:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
             break
         _time.sleep(0.2)
-    print(f"hung up ({len(pids)} session{'s' if len(pids) != 1 else ''})")
+    print("hung up (1 session)")
     return 0
 
 
@@ -493,20 +616,10 @@ def _run_slip(name, rest):
     # running. Without this, the desktop app can stack operators on the same
     # slip Chrome (e.g. when the model retries a failed dispatch), each
     # spawning its own audio helper and writing to the same meeting JSONL.
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "operator slip claude"],
-            capture_output=True, text=True, timeout=3,
-        )
-        other_pids = [
-            int(p) for p in result.stdout.strip().split("\n")
-            if p.strip() and int(p) != os.getpid()
-        ]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        other_pids = []  # fail open if pgrep unavailable
-    if other_pids:
+    other_pid = _acquire_slip_lock()
+    if other_pid is not None:
         print(
-            f"operator slip is already running (pid {other_pids[0]}). "
+            f"operator slip is already running (pid {other_pid}). "
             f"Run `operator hangup` (or `/operator:hangup`) first, then retry.",
             file=sys.stderr,
         )
@@ -519,6 +632,7 @@ def _run_slip(name, rest):
     )
     ok, reason = claude_code_installed_and_logged_in()
     if not ok:
+        _release_slip_lock()
         print(
             f"\nslip claude requires the Claude Code CLI.\n"
             f"  {reason}\n"
@@ -637,6 +751,7 @@ def _run_slip(name, rest):
                 marker.unlink()
         except OSError:
             pass
+        _release_slip_lock()
         connector.leave()
         _kill_orphaned_children()
 
