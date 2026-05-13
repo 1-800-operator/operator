@@ -1045,11 +1045,17 @@ class AttachAdapter(MeetingConnector):
         return False
 
     def _ensure_chat_open(self, page):
-        """Open the chat panel if needed before sending. Uses Meet's own
-        send-button disabled state as the live signal — if the button
-        exists and is enabled, the panel is open enough to accept a send.
-        Otherwise click the chat toggle. Drops a debug screenshot if the
-        toggle can't be located.
+        """Open the chat panel if needed before sending. Uses textarea
+        visibility as the live signal — if the textarea is visible, the
+        panel is open and we leave it alone. Otherwise click the chat
+        toggle. Drops a debug screenshot if the toggle can't be located.
+
+        Don't be tempted to use the send-button `disabled` attribute as
+        the predicate: Meet disables the send button whenever the
+        textarea is empty (which is virtually always the case when we
+        check), so it would falsely indicate "panel closed" while the
+        panel is actually open — and the toggle click would then close
+        an already-open panel. S224 footgun.
 
         Called at join time (to materialize the chat-message DOM so the
         observer can attach to a stable [data-panel-id] container) and
@@ -1058,8 +1064,8 @@ class AttachAdapter(MeetingConnector):
         hidden (verified S224).
         """
         try:
-            send_btn = page.locator('button[aria-label="Send a message"]')
-            if send_btn.count() > 0 and not send_btn.first.is_disabled():
+            textarea = page.locator('textarea[aria-label="Send a message"]')
+            if textarea.count() > 0 and textarea.first.is_visible():
                 return
         except Exception:
             pass
@@ -1067,8 +1073,8 @@ class AttachAdapter(MeetingConnector):
             chat_btn = page.get_by_role("button", name="Chat with everyone")
             chat_btn.wait_for(timeout=3000)
             chat_btn.click()
-            log.info("AttachAdapter: clicked chat button — waiting for send button to enable")
-            page.locator('button[aria-label="Send a message"]').first.wait_for(
+            log.info("AttachAdapter: clicked chat button — waiting for panel to render")
+            page.locator('textarea[aria-label="Send a message"]').first.wait_for(
                 state="visible", timeout=2000
             )
             log.info("AttachAdapter: chat panel open")
