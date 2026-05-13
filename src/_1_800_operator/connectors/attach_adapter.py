@@ -375,6 +375,10 @@ class AttachAdapter(MeetingConnector):
         self._speaking_lock = threading.Lock()
         self._speaking_participants: dict[str, str] = {}  # pid → name
         self._last_s_speaker: str = ""
+        # Local runner's tile id, resolved at observer install time. The
+        # JS observer skips this tile, but we also filter at drain time
+        # in case a stale event slips through (e.g. tile DOM re-renders).
+        self._local_participant_id: str = ""
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -882,8 +886,14 @@ class AttachAdapter(MeetingConnector):
     def _install_speaking_observer(self, page):
         """Install the tile speaking-indicator MutationObserver. Browser thread only."""
         try:
-            count = page.evaluate(INSTALL_SPEAKING_OBSERVER_JS)
-            log.info(f"AttachAdapter: speaking observer installed on {count} tile(s)")
+            result = page.evaluate(INSTALL_SPEAKING_OBSERVER_JS) or {}
+            count = result.get("count", 0)
+            local_pid = result.get("local_pid", "") or ""
+            self._local_participant_id = local_pid
+            log.info(
+                f"AttachAdapter: speaking observer installed on {count} remote tile(s); "
+                f"local_pid={local_pid!r}"
+            )
         except Exception as e:
             log.warning(f"AttachAdapter: speaking observer install failed: {e}")
 
@@ -907,6 +917,11 @@ class AttachAdapter(MeetingConnector):
                 name = (ev.get("name") or "").strip()
                 speaking = ev.get("speaking", False)
                 if not name:
+                    continue
+                # Belt-and-suspenders: the JS observer skips the local
+                # tile, but a stale event could still reach Python if the
+                # tile DOM re-rendered between install and observation.
+                if pid and pid == self._local_participant_id:
                     continue
                 if speaking:
                     self._speaking_participants[pid] = name

@@ -161,12 +161,20 @@ GET_SELF_NAME_JS = """() => {
 }"""
 
 
-# Install a MutationObserver on every participant tile that fires when
-# the speaking-indicator class (BlxGDf) appears or disappears on any
-# descendant element. Pushes {participant_id, name, speaking, t} events
-# to window.__operatorSpeakingQueue; Python drains it via
-# DRAIN_SPEAKING_QUEUE_JS. Idempotent — disconnects any prior observers
-# before reinstalling. Returns the number of tiles observed.
+# Install a MutationObserver on every REMOTE participant tile that fires
+# when the speaking-indicator class (BlxGDf) appears or disappears on any
+# descendant element. The local tile is identified via the same predicate
+# as GET_SELF_NAME_JS (presence of button[data-idom-class] + non-empty
+# name) and deliberately skipped — slip Chrome's system-audio output
+# never contains the runner's own voice (Meet doesn't echo your mic back
+# to your speakers), so a "speaking" local tile is just mic activity and
+# would misattribute remote [S] audio to the runner.
+#
+# Pushes {participant_id, name, speaking, t} events to
+# window.__operatorSpeakingQueue; Python drains via DRAIN_SPEAKING_QUEUE_JS.
+# Idempotent — disconnects any prior observers before reinstalling.
+# Returns {count, local_pid} where count is the number of remote tiles
+# being observed and local_pid is the skipped local tile's id (or "").
 INSTALL_SPEAKING_OBSERVER_JS = """() => {
     if (window.__operatorSpeakingObservers) {
         window.__operatorSpeakingObservers.forEach(function(o) { o.disconnect(); });
@@ -188,11 +196,26 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
     }
 
     var tiles = document.querySelectorAll('[data-requested-participant-id]');
+
+    var localPid = '';
+    for (var i = 0; i < tiles.length; i++) {
+        if (tiles[i].querySelector('button[data-idom-class]')) {
+            var sp = tiles[i].querySelector('span.notranslate');
+            if (sp && (sp.textContent || '').trim()) {
+                localPid = tiles[i].getAttribute('data-requested-participant-id') || '';
+                break;
+            }
+        }
+    }
+
     var speakingState = {};
+    var observed = 0;
 
     tiles.forEach(function(tile) {
         var id = tile.getAttribute('data-requested-participant-id');
+        if (id === localPid) return;
         speakingState[id] = hasSpeakingClass(tile);
+        observed += 1;
 
         var obs = new MutationObserver(function() {
             var now = hasSpeakingClass(tile);
@@ -210,7 +233,7 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
         window.__operatorSpeakingObservers.push(obs);
     });
 
-    return tiles.length;
+    return {count: observed, local_pid: localPid};
 }"""
 
 
