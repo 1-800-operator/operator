@@ -17,6 +17,26 @@
 
 ## Current Status
 
+**Session 220 (May 12, 2026) — Async QA polish: three UX fixes live-tested and verified.** Three operator commits shipped to `origin/main` (`ce1ed1c`, `13c954e`, `ac21359`). All unit tests green. Audio helper rebuilt, re-signed, re-notarized.
+
+**Fix 1 — Narration prefix (`ce1ed1c`).** All in-meeting narration posts in `chat_runner.py` now use `[🤖 Claude]` instead of `[☎️ Operator]`. Covers tool-use progress, permission denial, connection events, and turn failure. `REPLY_PREFIX_OPERATOR` import removed from `chat_runner.py` (dead after the change); `test_heartbeat.py` assertions updated to match.
+
+**Fix 2 — Audio helper dock icon (`13c954e`).** `LSUIElement` flipped from `false` to `true` in `src/_1_800_operator/swift/Info.plist`. Rebuilt via `scripts/build_signed_helper.sh` — compiled, signed with `Developer ID Application: Jojo Shapiro (DSW7V72HT7)`, notarized (submission `b011e362`), stapled. Live-tested: icon no longer bounces in Dock during slip sessions.
+
+**Fix 3 — Audio pipeline stops on meeting leave (`ac21359`).** The 200ms browser loop in `_browser_session` now polls for the "Rejoin" button after the existing `page.is_closed()` / `browser.is_connected()` checks. When the button appears (user clicked "Leave call"), the loop sets `_leave_event` and breaks — hitting the `finally:` block which calls `_stop_audio_pipeline()`. Previously audio ran until slip Chrome was closed entirely. Live-tested and log-verified: pipeline teardown fires within 200ms of meeting exit (`AttachAdapter: user left the meeting — stopping audio` → `audio reader EOF` → `audio pipeline torn down` in ~400ms).
+
+**What was NOT addressed this session** (carrying to S221):
+- **14.22.9.8** — install.sh allowlist. Still the silent-fail wall for new desktop-app users. ~30 min. Carryover from S217 → S218 → S219 → S220.
+- **Plugin auto-update friction** — `/operator:update` skill + version-stale detection in operator. Multi-session carryover.
+
+**Don't forget:**
+- **Zero unpushed commits.** Three commits pushed to `origin/main` (`ce1ed1c` → `13c954e` → `ac21359`). Audio helper at `~/.operator/bin/operator-audio-capture.app` is the rebuilt artifact (not committed — it's a binary).
+- **README.md is dirty** — pre-existing user work on billing-protection wording. Not mine, untouched.
+
+---
+
+## Prior Status (preserved)
+
 **Session 219 (May 12, 2026) — JSONL-forensic root-cause of the `/operator:slip` double-Bash + lockfile singleton guard + SKILL.md rewrite.** Two commits shipped, two repos pushed: operator `6b67e1f` (origin + public — replaces pgrep singleton guard with `~/.operator/slip.pid` lockfile) and plugin `caf1cfd` (operator-plugin origin — rewrites SKILL.md to acknowledge the harness pre-executes the `!`-block and forbids the model from re-invoking Bash). Marketplace bumped to 0.1.10 in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
 
 **The arc.** S218 left two unresolved items I called "latent" in the singleton-guard implementation: the pgrep-cmdline pattern would miss daemons whose argv didn't literally contain `operator slip claude` (surface-detect path), and a separate page-handle re-resolution hypothesis for "Chrome closed during meeting-entry wait" failures. The lockfile guard shipped first (no controversy — the pgrep approach was genuinely fragile). Then the live test reproduced a "operator slip is already running (pid 96405)" error on what the user insisted was a single `/operator:slip` invocation. I initially proposed a same-URL-absorb fix at the operator level. The user asked the right question: "can we see what Claude actually saw and when?" That redirected us to read the desktop-app session JSONL transcript directly.
