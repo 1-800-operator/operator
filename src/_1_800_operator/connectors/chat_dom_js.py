@@ -138,16 +138,19 @@ GET_PARTICIPANT_NAMES_JS = """() => {
 
 
 # Return the operator-runner's Meet display name from the slip Chrome.
-# The slip Chrome's LOCAL tile (the bot itself) has camera-control
-# buttons with a data-idom-class attribute. Remote participant tiles
-# don't. The operator-runner joins the meeting from their own device,
-# so their tile is remote from the slip Chrome's perspective. Skip the
-# local bot tile, return span.notranslate from the first remote tile.
+# The slip Chrome's LOCAL tile has camera-control buttons with a
+# data-idom-class attribute; remote participant tiles don't. The local
+# tile IS the slip Chrome's Google account (the operator-runner's
+# account), so we read span.notranslate from the tile WITH the button.
+# Prior logic read the first remote tile on the assumption the runner
+# was also joined from a separate device — that fails in multi-person
+# meetings where gallery layout adds button[data-idom-class] to remote
+# tiles too, causing all tiles to be skipped.
 # Returns "" on failure — caller falls back to a generic label.
 GET_SELF_NAME_JS = """() => {
     const tiles = document.querySelectorAll('[data-requested-participant-id]');
     for (const tile of tiles) {
-        if (tile.querySelector('button[data-idom-class]')) continue;
+        if (!tile.querySelector('button[data-idom-class]')) continue;
         const span = tile.querySelector('span.notranslate');
         if (span) {
             const name = (span.textContent || '').trim();
