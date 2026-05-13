@@ -13,7 +13,7 @@ import time
 from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_quoteattr
 
 from _1_800_operator import config
-from _1_800_operator.bridges.claude import REPLY_PREFIX_OPERATOR
+from _1_800_operator.bridges.claude import REPLY_PREFIX_SLIP
 from _1_800_operator.pipeline import ui
 from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
 
@@ -195,7 +195,7 @@ class ChatRunner:
             line = f"running {tool_name}"
             if summary:
                 line = f"{line}: {summary}"
-            self._send(REPLY_PREFIX_OPERATOR + line, kind="operator_status", raw=True)
+            self._send(REPLY_PREFIX_SLIP + line, kind="operator_status", raw=True)
             self._last_tool_narration_ts = now
         except Exception as e:
             log.warning(f"ChatRunner: _narrate_tool_use failed: {e}")
@@ -210,7 +210,7 @@ class ChatRunner:
         self._denied_tool_ids_in_turn.add(tool_use_id)
         try:
             self._send(
-                REPLY_PREFIX_OPERATOR
+                REPLY_PREFIX_SLIP
                 + "permission denied — re-run with --yolo to skip per-tool approval",
                 kind="operator_status",
                 raw=True,
@@ -238,7 +238,7 @@ class ChatRunner:
             log.warning(f"ChatRunner: unknown connection event {event!r}")
             return
         try:
-            self._send(REPLY_PREFIX_OPERATOR + text, kind="operator_status", raw=True)
+            self._send(REPLY_PREFIX_SLIP + text, kind="operator_status", raw=True)
         except Exception as e:
             log.warning(f"ChatRunner: _narrate_connection failed: {e}")
 
@@ -674,7 +674,7 @@ class ChatRunner:
             self._emit_turn_done(failed=True)
             return
         try:
-            self._send(REPLY_PREFIX_OPERATOR + message, kind="operator_status", raw=True)
+            self._send(REPLY_PREFIX_SLIP + message, kind="operator_status", raw=True)
         except Exception as e:
             log.warning(f"ChatRunner: _narrate_failure post failed: {e}")
         self._emit_turn_done(failed=True)
