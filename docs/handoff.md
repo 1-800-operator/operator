@@ -1,60 +1,64 @@
-# Session 224 handoff (2026-05-13) — [S] speaker attribution fix + corrected reading of the audio bug
-
-## Corrected reading of the S223 "Jojo in [S]" observation
-
-S223 closed with the hypothesis that the runner's voice was leaking into the `[S]` system-audio leg. Today we verified that's **not** what's happening.
-
-Listening to `/tmp/operator_audio_debug/S/` (from a fresh `OPERATOR_AUDIO_DEBUG=1` run) confirmed that the runner's voice is **never** in `[S]`. The architecture is fine: slip Chrome's system audio only contains remote participants, just as designed.
-
-What was actually going wrong: the JSONL caption attribution. `sqr-vyex-wob.jsonl` contains 6 `Jojo Shapiro`-tagged captions whose **text** is from remote participants (e.g. the meeting farewell at `1778692437.6` — "Appreciate the time everyone. Talk to you on the next calls. All right. Thank you." — was actually Michael+Matthew+Kyle in quick succession, not Jojo).
-
-Root cause: `_audio_utterance_loop`'s `[S]` branch resolves the speaker via the DOM speaking-indicator (BlxGDf class). Meet drives that indicator off mic activity. The runner's mic is *constantly* hot because room audio from the speakers leaks into it, so the runner's local tile is *frequently* "speaking" — and the `[S]` utterance (genuinely from a remote participant) gets tagged with the runner's name.
+# Session 224 handoff (2026-05-13) — [S] speaker attribution + lazy chat-panel send
 
 ## What landed this session
 
-**Fix: exclude the local tile from `[S]` speaker attribution.** Two layers:
+Three commits on `main`, pushed to both `origin` and `public`:
 
-1. `INSTALL_SPEAKING_OBSERVER_JS` now identifies the local tile (same predicate as `GET_SELF_NAME_JS`: presence of `button[data-idom-class]` + non-empty `span.notranslate`) and skips installing a MutationObserver on it. Return shape changed from bare `count` to `{count, local_pid}`.
-2. `_drain_speaking_queue` defensively filters events whose `participant_id` matches the cached `_local_participant_id`, in case the local tile DOM re-renders and emits a stale event.
+1. **`528587c` — Exclude local tile from [S] speaker attribution.** The DOM speaking-indicator (BlxGDf class) fires for the local tile whenever the runner's mic is active. Room audio constantly bleeds into the mic (when listening on speakers), so the local tile is frequently "speaking" — and `[S]` utterances (which only contain remote participants) were getting tagged with the runner's name. Fix: `INSTALL_SPEAKING_OBSERVER_JS` now identifies the local tile via the same predicate as `GET_SELF_NAME_JS` and skips installing a MutationObserver on it. `_drain_speaking_queue` defensively filters events whose pid matches the cached local participant id, in case the tile DOM re-renders.
 
-Net effect: `_speaking_participants` and `_last_s_speaker` can never name the runner. The `[S]` leg attributes only to remote participants.
+2. **`8a8734d` — Stale truncation-notice assertions in transcript MCP tests.** Three assertions still matched the pre-`8b4260e` wording. Brought them in line with the current "showing the most recent N of …" / "omitted to fit response size" wording.
 
-**Side cleanup:** fixed three stale test assertions in `tests/test_transcript_mcp.py` left over from S223's truncation-notice wording change (commit `8b4260e`).
+3. **`<new>` — Lazy chat-panel send + drop stale `_chat_panel_open` cache.** See "Chat-panel architecture overhaul" below.
+
+## Corrected reading of the S223 "Jojo in [S]" observation
+
+S223 closed with the hypothesis that the runner's voice was leaking into `[S]`. Today we verified that's not what's happening — `/tmp/operator_audio_debug/S/` WAVs contain only remote voices. The architecture is fine. The bug was attribution, not audio capture. Fixed in commit 1 above.
+
+## Chat-panel architecture overhaul (commit 3)
+
+Live tests in `UvVMjhH-lXwB` confirmed three properties:
+
+- **Q1: messages flow into the DOM while panel is closed** — `delta: 1`, full message text intact (`text length: 493`, `ends with @claude: true`, no ellipsis). Tested with a 500-char message ending in the trigger phrase.
+- **Q2: the `[data-panel-id]` container persists across close→reopen** — `same node? true` and `isConnected: true`. Meet uses a CSS-only toggle.
+- **Send button is disabled while panel is closed** — `button: true disabled: true`. Meet hard-gates send on panel visibility, so no console-event hack can post a message with the panel closed.
+
+Practical implications:
+
+- **Receive-side works panel-closed** because the observer stays bound to the same container and Meet keeps inserting messages into it.
+- **Send-side requires the panel open** at the moment of send.
+- **The seed-loop race** (`project_chat_observer_seed_loop_drops_pre_install_messages`) still mandates that the observer install BEFORE any chat messages arrive, otherwise the seed-mark step silently swallows the first `@claude` mention.
+
+Net design:
+
+1. Keep the **join-time `_ensure_chat_open`** — establishes the chat DOM so the observer can attach before any messages land.
+2. **Drop `_ensure_chat_open` from the read path** — once attached, the observer survives panel toggles and keeps firing.
+3. **Rewrite `_ensure_chat_open`** to check Meet's own send-button `disabled` state instead of a cached `_chat_panel_open` flag. The button is the authoritative signal: enabled ⇒ panel is open enough to send, disabled ⇒ click the toggle.
+4. **Drop `self._chat_panel_open`** entirely. The flag was a stale cache — once `True` it never went back to `False` when the user closed the panel manually, so `_ensure_chat_open` short-circuited and the send path tried to fill an invisible textarea.
+
+This fixes the silent-reply bug observed in the live test today. Five `send_chat failed: Locator.wait_for: Timeout 5000ms exceeded` warnings between 12:55 and 12:58 — claude generated each reply, but operator couldn't deliver because the textarea was in DOM but invisible (panel closed by the user, stale flag, no re-open). After this change: each send checks the button state live, opens if needed, no staleness window.
+
+## Bonus observation worth flagging (not in this PR)
+
+When `send_chat` fails, the claude subprocess has no feedback channel — it sees its own streamed reply land in stdout and assumes it was delivered. In today's test, when asked "why didn't you reply to the earlier messages?", claude said "I did reply to each one" — a confident hallucination. Wiring send_chat failures back into the claude session as a tool-result error would close that loop. Worth considering for a future PR; out of scope here.
 
 ## State of the repo
 
-All commits pushed to `origin` and `public`. `uv tool install --reinstalled` on this machine.
+All commits pushed to `origin` and `public`. `uv tool install --reinstall .` needed before live validation.
 
 The `README.md` is still dirty (user-owned billing-protection wording) — not committed by convention.
 
-## Open questions remaining
+## Open follow-ups
 
-### 1. Can we send to the chat textarea while the panel is hidden?
+- **`[M]` bleed problem** — the mic leg picks up remote audio via room playback. Many "user"-tagged captions in `sqr-vyex-wob.jsonl` are actually echoes of Kyle/Michael/Matt. The bleed-suppressor isn't catching them. Independent from the `[S]` attribution work. Mitigations to investigate: tighter VAD threshold on the mic leg, wider far-end-activity window, or just accept that listening on speakers degrades `[M]` quality.
+- **Claude reply-delivery feedback loop** — see bonus observation above.
+- **Skip the join-time panel open entirely** — possible but requires either a heuristic seed (push the most-recent `@claude` to the queue if it's within ~3s) or moving the observer to a wider attach point (`document.body` subtree). Punted today; 1-second join blip is the cleaner tradeoff.
 
-S223 disabled chat-panel auto-reopen pending validation. The two console scripts from the S223 handoff are still ready to run in a live meeting. Results pending.
+## How to verify in a live meeting
 
-### 2. The `[M]` mic is full of bleed.
-
-Independent from the `[S]` attribution bug. With speakers (not headphones), the runner's `[M]` leg captures the remote participants playing back through the room and Whisper transcribes it labeled as the runner. Examples in `sqr-vyex-wob.jsonl`:
-
-- Kyle: "Monday or whatever." → user: "Monday, day or whatever."
-- Kyle: "The end game is to get an ultra wide monitor" → user: "The end game is to did an ultra-wide monitor."
-
-The bleed-suppressor (`far_end`-aware VAD on the mic leg) isn't catching these. Candidates:
-
-- Bleed-suppressor's far-end-activity window is too narrow / VAD threshold too lenient.
-- The mic Whisper finalizes faster than the bleed-suppressor's far-end snapshot.
-- With AirPods/headphones the leak goes away — confirming room acoustics are the proximate cause but not the only mitigation.
-
-### 3. Is `[M]` redundant?
-
-Resolved: **no.** `[S]` only contains remote participants (architecture confirmed). `[M]` is the only path for the runner's own voice. Keep both pipelines. The bleed problem (Q2 above) is what makes `[M]` look noisy; with clean acoustics it would be silent except for the runner.
-
-## How to verify the fix in a live meeting
-
-1. `uv tool install --reinstall` after pulling.
-2. Run `OPERATOR_AUDIO_DEBUG=1 operator slip claude <multi-party-meet-url>`.
-3. Talk over remote participants briefly so the local tile would be "speaking" while a remote is also talking.
-4. After the meeting, inspect the new `~/.operator/history/<slug>.jsonl`. No caption should have `sender` matching the runner's display name *and* text that is clearly a remote participant's speech.
-5. Cross-check `/tmp/operator_audio_debug/S/*.wav` to confirm the audio you expect.
-6. In `/tmp/operator.log`, look for the install line: `speaking observer installed on N remote tile(s); local_pid='…'` — confirms the local tile was identified and skipped.
+1. `cd /Users/jojo/Desktop/operator && uv tool install --reinstall .`
+2. `OPERATOR_AUDIO_DEBUG=1 operator slip claude <multi-party-meet-url>`
+3. Confirm join-time panel open works: see `AttachAdapter: chat panel open` in `/tmp/operator.log`.
+4. Manually close the chat panel.
+5. From another participant, send `@claude hello`. Claude should reply with the panel still closed (the panel auto-pops open at send time).
+6. No `send_chat failed: Locator.wait_for` warnings should appear in `/tmp/operator.log`.
+7. Cross-check `[S]` attribution: no caption in `~/.operator/history/<slug>.jsonl` should have `sender` equal to your display name with text clearly from a remote participant.

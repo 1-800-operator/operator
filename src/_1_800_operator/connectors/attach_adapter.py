@@ -326,7 +326,6 @@ class AttachAdapter(MeetingConnector):
         self._page = None
         self._chrome_proc = None
         self._observer_installed = False
-        self._chat_panel_open = False
         # Browser thread + chat command queue. Playwright's sync API is
         # single-threaded by contract: only the thread that opened the
         # context may call its methods. To keep AttachAdapter safe to
@@ -424,7 +423,6 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive.clear()
         self._browser_closed.clear()
         self._observer_installed = False
-        self._chat_panel_open = False
         self._slip_start_at = time.monotonic()
         self._meeting_entry_at = None
         # Pre-warm the whisper model in parallel with everything else the
@@ -817,19 +815,13 @@ class AttachAdapter(MeetingConnector):
         before server confirmation; a separate-participant observer
         wouldn't see the placeholder at all.
         """
-        self._ensure_chat_open(page)
+        # Read path never touches the panel state. The chat observer
+        # survives close→reopen cycles (verified S224: the [data-panel-id]
+        # container is the same node before and after a manual toggle,
+        # and Meet keeps inserting div[data-message-id] into it while
+        # the panel is hidden). So once installed at join, we just drain.
         self._install_chat_observer(page)
         try:
-            # NOTE: auto-reopen on manual close disabled pending send-without-
-            # open validation. If validated, remove _ensure_chat_open from the
-            # send path too and drop the _chat_panel_open flag entirely.
-            # try:
-            #     ta = page.locator('textarea[aria-label="Send a message"]')
-            #     if ta.count() == 0 or not ta.is_visible():
-            #         self._chat_panel_open = False
-            #         self._observer_installed = False
-            # except Exception:
-            #     pass
             messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
             # t_drained) separately from Python-side processing (t_drained →
@@ -1053,18 +1045,21 @@ class AttachAdapter(MeetingConnector):
         return False
 
     def _ensure_chat_open(self, page):
-        """Open the chat panel if it isn't already. Idempotent — clicks the
-        chat button only when the textarea isn't already visible. Drops a
-        debug screenshot if the button can't be located. Sets
-        _chat_panel_open on success so the polling loop doesn't re-check
-        on every tick (the button is a toggle — calling it while the panel
-        is open would close it)."""
-        if self._chat_panel_open:
-            return
+        """Open the chat panel if needed before sending. Uses Meet's own
+        send-button disabled state as the live signal — if the button
+        exists and is enabled, the panel is open enough to accept a send.
+        Otherwise click the chat toggle. Drops a debug screenshot if the
+        toggle can't be located.
+
+        Called at join time (to materialize the chat-message DOM so the
+        observer can attach to a stable [data-panel-id] container) and
+        before every send. Read path never calls this — the observer
+        survives close→reopen and continues firing while the panel is
+        hidden (verified S224).
+        """
         try:
-            textarea = page.locator('textarea[aria-label="Send a message"]')
-            if textarea.count() > 0 and textarea.is_visible():
-                self._chat_panel_open = True
+            send_btn = page.locator('button[aria-label="Send a message"]')
+            if send_btn.count() > 0 and not send_btn.first.is_disabled():
                 return
         except Exception:
             pass
@@ -1072,11 +1067,10 @@ class AttachAdapter(MeetingConnector):
             chat_btn = page.get_by_role("button", name="Chat with everyone")
             chat_btn.wait_for(timeout=3000)
             chat_btn.click()
-            log.info("AttachAdapter: clicked chat button — waiting for panel to render")
-            page.locator('textarea[aria-label="Send a message"]').wait_for(
+            log.info("AttachAdapter: clicked chat button — waiting for send button to enable")
+            page.locator('button[aria-label="Send a message"]').first.wait_for(
                 state="visible", timeout=2000
             )
-            self._chat_panel_open = True
             log.info("AttachAdapter: chat panel open")
         except Exception as e:
             log.debug(f"AttachAdapter: could not open chat panel: {e}")
