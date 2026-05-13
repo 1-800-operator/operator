@@ -55,6 +55,54 @@ from _1_800_operator.pipeline.providers.base import (
 log = logging.getLogger(__name__)
 
 
+def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token):
+    """Format the per-stage TTFT breakdown for the TIMING log line.
+
+    Splits the pre-first-token time into three observable stages so a
+    high `ttft` can be attributed to the right cost:
+
+      spawn_ms   — subprocess.Popen → return (fork+exec, dyld, etc.)
+      cli_init_ms — Popen → system_init event from claude (Node boot,
+                    config load, MCP server attach, --resume JSONL parse)
+      api_ttft_ms — system_init → first content_block_delta (the actual
+                    API call to claude.ai)
+
+    Any stage with no captured stamp shows as `n/a`. Returns a single
+    space-separated fragment ready to drop into the TIMING line.
+    """
+    spawn_ms = int((t_spawn_done - t_run_start) * 1000) if t_spawn_done else None
+    cli_init_ms = int((t_init - t_spawn_done) * 1000) if (t_init and t_spawn_done) else None
+    api_ttft_ms = int((t_first_token - t_init) * 1000) if (t_first_token and t_init) else None
+    def _f(v):
+        return f"{v}ms" if v is not None else "n/a"
+    return (
+        f"spawn={_f(spawn_ms)} "
+        f"cli_init={_f(cli_init_ms)} "
+        f"api_ttft={_f(api_ttft_ms)}"
+    )
+
+
+def _format_cache_stats(result_evt):
+    """Format prompt-cache usage from the result event's `usage` block.
+
+    claude reports per-turn token usage with cache_read_input_tokens and
+    cache_creation_input_tokens, which directly indicate whether the
+    prompt cache hit on this turn. A high cache_read with low input
+    means the cache is doing its job; a high input with low cache_read
+    means we're re-paying for the prefix every turn (likely because
+    the prefix isn't stable across spawns).
+    """
+    if not result_evt:
+        return "cache=n/a"
+    usage = result_evt.get("usage") or {}
+    if not usage:
+        return "cache=n/a"
+    inp = usage.get("input_tokens", 0)
+    creation = usage.get("cache_creation_input_tokens", 0)
+    read = usage.get("cache_read_input_tokens", 0)
+    return f"cache_input={inp} cache_creation={creation} cache_read={read}"
+
+
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` CLI is missing from PATH."""
 
@@ -554,8 +602,14 @@ class ClaudeCLIProvider(LLMProvider):
         accumulated from terminal events). When provided, runs in
         streaming mode (text from stream_event content_block_delta
         payloads, with per-paragraph flush).
+
+        Captures wall-time bookends (t_run_start, t_spawn_done) so the
+        drain methods can split ttft into per-stage costs in their
+        TIMING log lines (spawn / claude-CLI-init / API-TTFT).
         """
+        t_run_start = time.monotonic()
         proc, out_q, stderr_buf = self._spawn_one()
+        t_spawn_done = time.monotonic()
         try:
             envelope = {
                 "type": "user",
@@ -570,13 +624,14 @@ class ClaudeCLIProvider(LLMProvider):
                     f"claude subprocess stdin closed unexpectedly: {exc}\nstderr tail:\n{stderr_tail}"
                 ) from exc
 
+            timing = {"t_run_start": t_run_start, "t_spawn_done": t_spawn_done}
             if on_paragraph is None:
-                return self._drain_non_streaming(out_q, stderr_buf)
-            return self._drain_streaming(out_q, stderr_buf, on_paragraph)
+                return self._drain_non_streaming(out_q, stderr_buf, timing)
+            return self._drain_streaming(out_q, stderr_buf, on_paragraph, timing)
         finally:
             self._terminate(proc)
 
-    def _drain_non_streaming(self, out_q, stderr_buf):
+    def _drain_non_streaming(self, out_q, stderr_buf, timing):
         """Drain the stream until the `result` event. Return ProviderResponse.
 
         No turn timeout: trust the user to /operator hangup if a tool
@@ -584,7 +639,9 @@ class ClaudeCLIProvider(LLMProvider):
         harness-shaped — operator-imposed silence threshold that killed
         the subprocess from outside).
         """
-        t_start = time.monotonic()
+        t_run_start = timing["t_run_start"]
+        t_spawn_done = timing["t_spawn_done"]
+        t_init: float | None = None
         text_parts: list[str] = []
         result_evt = None
 
@@ -603,6 +660,8 @@ class ClaudeCLIProvider(LLMProvider):
                 continue
             etype = payload.get("type")
             if etype == "system" and payload.get("subtype") == "init":
+                if t_init is None:
+                    t_init = time.monotonic()
                 self._validate_init_event(payload)
             elif etype == "assistant":
                 chunks, _ = self._dispatch_assistant_blocks(payload, accumulate_text=True)
@@ -614,10 +673,12 @@ class ClaudeCLIProvider(LLMProvider):
                 result_evt = payload
                 break
 
-        elapsed = time.monotonic() - t_start
+        elapsed = time.monotonic() - t_run_start
         subtype = result_evt.get("subtype") if result_evt else None
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
+            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, None)} "
+            f"{_format_cache_stats(result_evt)} "
             f"result.subtype={subtype} text_chars={sum(len(p) for p in text_parts)}"
         )
 
@@ -632,7 +693,7 @@ class ClaudeCLIProvider(LLMProvider):
             stop_reason="end",
         )
 
-    def _drain_streaming(self, out_q, stderr_buf, on_paragraph):
+    def _drain_streaming(self, out_q, stderr_buf, on_paragraph, timing):
         """Drain the stream, flushing paragraphs as they arrive.
 
         Top-level assistant text arrives as `stream_event` events of shape:
@@ -646,7 +707,9 @@ class ClaudeCLIProvider(LLMProvider):
         agent deltas (parent_tool_use_id non-null) are not the bot's
         outgoing reply.
         """
-        t_start = time.monotonic()
+        t_run_start = timing["t_run_start"]
+        t_spawn_done = timing["t_spawn_done"]
+        t_init: float | None = None
         t_first_token: float | None = None
         t_first_flush: float | None = None
         buffer = ""
@@ -668,6 +731,8 @@ class ClaudeCLIProvider(LLMProvider):
                 continue
             etype = payload.get("type")
             if etype == "system" and payload.get("subtype") == "init":
+                if t_init is None:
+                    t_init = time.monotonic()
                 self._validate_init_event(payload)
                 continue
             if etype == "stream_event":
@@ -724,13 +789,15 @@ class ClaudeCLIProvider(LLMProvider):
         if buffer.strip():
             flush_paragraphs(buffer, on_paragraph, force_final=True)
 
-        elapsed = time.monotonic() - t_start
-        ttft = (t_first_token - t_start) if t_first_token else None
-        first_flush = (t_first_flush - t_start) if t_first_flush else None
+        elapsed = time.monotonic() - t_run_start
+        ttft = (t_first_token - t_run_start) if t_first_token else None
+        first_flush = (t_first_flush - t_run_start) if t_first_flush else None
         ttft_str = f"{ttft:.1f}s" if ttft is not None else "n/a"
         flush_str = f"{first_flush:.1f}s" if first_flush is not None else "n/a"
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s ttft={ttft_str} first_flush={flush_str} streamed=1 "
+            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token)} "
+            f"{_format_cache_stats(result_evt)} "
             f"result.subtype={result_evt.get('subtype') if result_evt else 'n/a'}"
         )
 
