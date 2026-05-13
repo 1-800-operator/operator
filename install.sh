@@ -190,6 +190,61 @@ if command -v claude >/dev/null 2>&1; then
   echo
 fi
 
+# -- 7.6. Allowlist operator commands for desktop-app skill dispatch --------
+
+# In the Claude Code desktop app (Mac/Windows), `!` blocks inside plugin
+# skills don't surface an approval dialog when the command isn't pre-
+# allowlisted — the Bash call silent-fails and the model goes quiet.
+# Terminal CLI users see a prompt; desktop-app users see nothing. Since the
+# desktop app is most users' default surface, /operator:slip and the other
+# operator skills won't work out of the box without this allowlist entry.
+#
+# One entry covers every current operator skill (slip, status, hangup,
+# doctor, recap) because operator self-daemonizes — there's no nohup wrapper
+# in the skill bodies. Merge-in (preserves existing user entries), idempotent
+# (skip if already present), soft-skip if claude isn't on PATH or the file
+# is unparseable.
+
+if command -v claude >/dev/null 2>&1; then
+  bold "Allowlisting operator commands in ~/.claude/settings.json..."
+  ALLOWLIST_RESULT="$(python3 - <<'PY' 2>&1
+import json, os, sys
+path = os.path.expanduser("~/.claude/settings.json")
+entry = "Bash(operator:*)"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
+except (json.JSONDecodeError, OSError) as e:
+    print(f"skip:{e}"); sys.exit(0)
+if not isinstance(cfg, dict):
+    print("skip:settings-not-an-object"); sys.exit(0)
+perms = cfg.setdefault("permissions", {})
+if not isinstance(perms, dict):
+    print("skip:permissions-not-an-object"); sys.exit(0)
+allow = perms.setdefault("allow", [])
+if not isinstance(allow, list):
+    print("skip:allow-not-a-list"); sys.exit(0)
+if entry in allow:
+    print("present"); sys.exit(0)
+allow.append(entry)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+print("added")
+PY
+)" || ALLOWLIST_RESULT="skip:python-failed"
+  case "${ALLOWLIST_RESULT}" in
+    added)   info "Added Bash(operator:*) to ~/.claude/settings.json permissions.allow." ;;
+    present) info "Bash(operator:*) already present in ~/.claude/settings.json — leaving untouched." ;;
+    skip:*)  warn "Could not update ~/.claude/settings.json (${ALLOWLIST_RESULT#skip:}) — desktop-app users may need to add Bash(operator:*) to permissions.allow manually." ;;
+    *)       warn "Unexpected allowlist result: ${ALLOWLIST_RESULT}" ;;
+  esac
+  echo
+fi
+
 # -- 8. macOS audio helper (operator-audio-capture) -------------------------
 
 # Slip mode's dual-stream audio capture (mic + system) is delivered by a
