@@ -243,7 +243,7 @@ def test_list_last_n():
     assert "live test" in out, out
     assert "wrap up" not in out, out
     # Must include the truncation hint
-    assert "showing 3 of" in out, out
+    assert "showing the most recent 3 of" in out, out
     os.unlink(path)
     print("✓ list_captions last_n with truncation hint")
 
@@ -262,8 +262,7 @@ def test_list_byte_ceiling_real_fixture():
     assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced: {out_bytes} bytes returned"
     )
-    assert "truncated to fit" in out, "truncation notice missing"
-    assert "captions omitted" in out, out
+    assert "omitted to fit response size" in out, "truncation notice missing"
     print(f"✓ byte ceiling holds at {out_bytes} bytes against 442-line real fixture")
 
 
@@ -413,7 +412,7 @@ def test_search_byte_ceiling():
     assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced on search: {out_bytes} bytes"
     )
-    assert "truncated to fit" in out, "search byte-ceiling notice missing"
+    assert "omitted to fit response size" in out, "search byte-ceiling notice missing"
     os.unlink(path)
     print(f"✓ search_captions byte ceiling holds ({out_bytes} bytes)")
 
