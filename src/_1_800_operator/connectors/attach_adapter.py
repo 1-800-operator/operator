@@ -479,6 +479,11 @@ class AttachAdapter(MeetingConnector):
                             "AttachAdapter: browser disconnected mid-meeting — exiting"
                         )
                         break
+                    rejoin_btn = self._page.get_by_role("button", name="Rejoin")
+                    if rejoin_btn.count() > 0 and rejoin_btn.first.is_visible():
+                        log.info("AttachAdapter: user left the meeting — stopping audio")
+                        self._leave_event.set()
+                        break
                 except Exception as e:
                     log.warning(f"AttachAdapter: liveness probe raised: {e}")
                     break
