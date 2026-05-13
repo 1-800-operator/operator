@@ -70,7 +70,7 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
                 }
             }
         }
-        return {id: msgId, sender: sender, text: text};
+        return {id: msgId, sender: sender, text: text, t_dom: Date.now()};
     }
 
     const textarea = document.querySelector('textarea[aria-label="Send a message"]');

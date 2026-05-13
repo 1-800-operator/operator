@@ -715,6 +715,10 @@ class AttachAdapter(MeetingConnector):
         self._install_chat_observer(page)
         try:
             messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
+            # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
+            # t_drained) separately from Python-side processing (t_drained →
+            # turn dispatch). Same wall clock as JS Date.now(), in ms.
+            t_drained_ms = int(time.time() * 1000)
             if messages:
                 log.debug(
                     f"AttachAdapter: observer drained {len(messages)} new messages"
@@ -729,6 +733,7 @@ class AttachAdapter(MeetingConnector):
                         "(awaiting canonical)"
                     )
                     continue
+                msg["t_drained"] = t_drained_ms
                 filtered.append(msg)
             messages = filtered
             if self._reply_prefix and messages:

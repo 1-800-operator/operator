@@ -62,6 +62,14 @@ class ChatRunner:
         # "no turn in flight" so the heartbeat closer is a no-op.
         self._turn_count = 0
         self._turn_start_ts: float | None = None
+        # Per-turn end-to-end latency trace. Populated at message receipt
+        # (t_dom + t_drained from the adapter), turn dispatch (t_handle_start),
+        # and first-paragraph DOM-visibility (t_first_visible, stamped inside
+        # _send after connector.send_chat returns). Drained + logged as the
+        # `TIMING turn_complete …` line in _emit_turn_done. Pair with the
+        # provider's `TIMING claude_cli_turn …` line for the LLM-internal
+        # ttft / first_flush slice.
+        self._turn_timing: dict | None = None
         # Bookkeeping for the streaming paragraph callback's pacer.
         # `_last_send_time` is updated by `_send` after a successful
         # post; the streaming on_paragraph closure reads it to enforce
@@ -493,14 +501,31 @@ class ChatRunner:
 
             log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r}")
 
+            # Per-message receive-lag breadcrumb. t_dom is stamped by the JS
+            # MutationObserver at DOM-arrival; t_drained by the adapter at
+            # `page.evaluate` drain time. Both ms-since-epoch on the same wall
+            # clock. now_ms - t_drained captures any Python-side queueing
+            # between the adapter's return and our process loop reaching this
+            # message. Fires for every received message (trigger or not) so we
+            # can see whether non-triggers experience the same lag.
+            t_dom = int(msg.get("t_dom") or 0)
+            t_drained = int(msg.get("t_drained") or 0)
+            if t_dom and t_drained:
+                now_ms = int(time.time() * 1000)
+                log.info(
+                    f"TIMING msg_received id={msg_id!r} "
+                    f"poll_lag_ms={t_drained - t_dom} "
+                    f"read_to_process_ms={now_ms - t_drained}"
+                )
+
             if self._record is not None:
                 self._record.append(sender=sender, text=text, kind="chat")
 
-            self._dispatch_user_message(text, sender=sender)
+            self._dispatch_user_message(text, sender=sender, t_dom=t_dom, t_drained=t_drained)
 
         self._own_messages -= own_matched
 
-    def _dispatch_user_message(self, text: str, sender: str = ""):
+    def _dispatch_user_message(self, text: str, sender: str = "", *, t_dom: int = 0, t_drained: int = 0):
         """Trigger-check a chat message and route it to the LLM if addressed.
 
         Pure routing — message persistence and seen-id tracking happen
@@ -515,7 +540,7 @@ class ChatRunner:
             '', text, count=1, flags=re.IGNORECASE,
         ).strip()
         if prompt:
-            self._handle_message(prompt, sender=sender)
+            self._handle_message(prompt, sender=sender, t_dom=t_dom, t_drained=t_drained)
 
     def _emit_turn_done(self, *, failed: bool = False):
         """Close out the per-turn stdout heartbeat.
@@ -528,12 +553,28 @@ class ChatRunner:
             return
         elapsed = time.time() - self._turn_start_ts
         self._turn_start_ts = None
+        # End-to-end TIMING summary. Pair with the provider's
+        # `TIMING claude_cli_turn …` line (ttft, first_flush) emitted from
+        # claude_cli.py to get the full picture of the LLM-internal slice.
+        t = self._turn_timing or {}
+        parts = [f"turn={self._turn_count}"]
+        if t.get("t_dom") and t.get("t_drained"):
+            parts.append(f"poll_lag_ms={t['t_drained'] - t['t_dom']}")
+        if t.get("t_drained") and t.get("t_handle_start"):
+            parts.append(f"gate_ms={t['t_handle_start'] - t['t_drained']}")
+        if t.get("t_handle_start") and t.get("t_first_visible"):
+            parts.append(f"to_first_visible_ms={t['t_first_visible'] - t['t_handle_start']}")
+        parts.append(f"total_ms={int(elapsed * 1000)}")
+        if failed:
+            parts.append("failed=1")
+        log.info("TIMING turn_complete " + " ".join(parts))
+        self._turn_timing = None
         if failed:
             ui.err(f"Turn {self._turn_count} failed — {elapsed:.1f}s")
         else:
             ui.ok(f"Replied — {elapsed:.1f}s")
 
-    def _handle_message(self, text, sender: str = ""):
+    def _handle_message(self, text, sender: str = "", *, t_dom: int = 0, t_drained: int = 0):
         """Process a single chat message via LLM."""
         self._turn_count += 1
         self._turn_start_ts = time.time()
@@ -542,6 +583,13 @@ class ChatRunner:
         # any prior turn's denial dedup doesn't leak.
         self._last_tool_narration_ts = 0.0
         self._denied_tool_ids_in_turn.clear()
+        # Open the per-turn timing trace. _send populates t_first_visible on
+        # first chat post; _emit_turn_done drains + logs `TIMING turn_complete`.
+        self._turn_timing = {
+            "t_dom": t_dom,
+            "t_drained": t_drained,
+            "t_handle_start": int(time.time() * 1000),
+        }
         wrapped = self._wrap_meet_chat(text, sender)
         try:
             result = self._llm.ask(
@@ -694,6 +742,18 @@ class ChatRunner:
             if msg_id:
                 self._seen_ids.add(msg_id)
             self._last_send_time = time.time()
+            # First-paragraph DOM-visibility stamp for the end-to-end TIMING
+            # trace. Only counts genuine claude replies (kind=="chat"), not
+            # operator-voice status posts, and only the first one of the turn.
+            # Stamped post-send so it reflects when send_chat actually
+            # returned (i.e. when the message landed in Meet's DOM), not
+            # when it was enqueued.
+            if (
+                kind == "chat"
+                and self._turn_timing is not None
+                and "t_first_visible" not in self._turn_timing
+            ):
+                self._turn_timing["t_first_visible"] = int(time.time() * 1000)
 
     def _drain_pending_sends(self):
         """Flush any queued off-thread sends on the main thread.
