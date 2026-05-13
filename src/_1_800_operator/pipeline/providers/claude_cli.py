@@ -62,38 +62,21 @@ def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, wa
     high `ttft` can be attributed to the right cost:
 
       spawn_ms   — subprocess.Popen → return (fork+exec, dyld, etc.)
-      cli_init_ms — Popen → system_init event from claude (Node boot,
-                    config load, MCP server attach, --resume JSONL parse)
-      api_ttft_ms — system_init → first content_block_delta (the actual
-                    API call to claude.ai)
+      cli_init_ms — t_spawn_done → system_init event from claude. For
+                    cold turns this is the full Node boot + MCP attach +
+                    --resume JSONL parse + stdin envelope read. For warm
+                    turns it's just (envelope-write → init), because
+                    the boot/attach/parse happened in parallel with idle
+                    during pre_warm. A small cli_init_ms on warm=1 is
+                    the visible win.
+      api_ttft_ms — system_init → first content_block_delta (API call).
 
-    When `warm=True` the subprocess was claimed from the pre-warm slot:
-    spawn was a slot-claim (zero-cost), cli_init was paid earlier during
-    pre_warm (shown as `warm`), and api_ttft starts from t_run_start
-    since the subprocess was already past init. The `warm=1|0` flag at
-    the end of the fragment makes turn-vs-turn comparison greppable.
-
+    The `warm=1|0` flag at the end makes warm-vs-cold turns greppable.
     Any stage with no captured stamp shows as `n/a`. Returns a single
     space-separated fragment ready to drop into the TIMING line.
     """
     def _f(v):
         return f"{v}ms" if v is not None else "n/a"
-
-    if warm:
-        # spawn_done equals run_start (no real spawn). cli_init was
-        # paid during pre_warm — label it "warm" instead of n/a so the
-        # log makes the win obvious. api_ttft measures from t_run_start
-        # because the warm subprocess emits no init event in-turn.
-        spawn_ms = 0
-        cli_init_label = "warm"
-        api_ttft_ms = int((t_first_token - t_run_start) * 1000) if t_first_token else None
-        return (
-            f"spawn={_f(spawn_ms)} "
-            f"cli_init={cli_init_label} "
-            f"api_ttft={_f(api_ttft_ms)} "
-            f"warm=1"
-        )
-
     spawn_ms = int((t_spawn_done - t_run_start) * 1000) if t_spawn_done else None
     cli_init_ms = int((t_init - t_spawn_done) * 1000) if (t_init and t_spawn_done) else None
     api_ttft_ms = int((t_first_token - t_init) * 1000) if (t_first_token and t_init) else None
@@ -101,7 +84,7 @@ def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, wa
         f"spawn={_f(spawn_ms)} "
         f"cli_init={_f(cli_init_ms)} "
         f"api_ttft={_f(api_ttft_ms)} "
-        f"warm=0"
+        f"warm={1 if warm else 0}"
     )
 
 
@@ -311,24 +294,27 @@ class ClaudeCLIProvider(LLMProvider):
 
     def pre_warm(self):
         """Spawn a `claude -p --resume <id>` subprocess ahead of demand
-        and park it idle.
+        and park it idle waiting for stdin.
 
-        Drains the system_init event so the subprocess is fully booted,
-        auth-validated, and session-rehydrated; the next user turn just
-        writes its envelope to stdin and goes straight to API. This
-        elides the ~2.6s cli_init cost on the turn that consumes the
-        warm slot.
+        Empirical finding (S220): claude in stream-json mode emits zero
+        events until it reads its first stdin input — so we cannot wait
+        for `system_init` here. The subprocess *does* perform its Node
+        boot + MCP attach + --resume JSONL parse during the parked
+        window, but silently. When the next turn writes its envelope to
+        stdin, `system_init` arrives almost instantly because the
+        startup work was already done.
 
-        Callers should invoke this:
-          - Once after a successful meeting join (covers turn 1).
-          - Once at the tail of a successful complete_streaming (covers
-            the next turn).
+        We slot the subprocess as-is and let the in-turn drain consume
+        init events normally (validating apiKeySource and capturing
+        session_id there, same as a cold spawn).
 
-        Idempotent: returns immediately if a healthy warm subprocess
-        already sits in the slot, or if another pre_warm is already
-        spawning. Safe to call from any thread. Best-effort: failures
-        log a warning and leave the slot empty, so the next turn falls
-        back to a cold spawn.
+        Callers:
+          - ChatRunner.run() after a successful meeting join (turn 1).
+          - complete_streaming tail on success (turns 2+).
+
+        Idempotent: returns if the slot already holds a live subprocess
+        or another pre_warm is mid-spawn. Safe to call from any thread.
+        Best-effort: failures log a warning and leave the slot empty.
         """
         if self._stopping:
             return
@@ -342,17 +328,17 @@ class ClaudeCLIProvider(LLMProvider):
         proc = None
         try:
             proc, out_q, stderr_buf = self._spawn_one()
-            self._drain_until_init(out_q, stderr_buf, timeout=15.0)
         except Exception as exc:
-            log.warning(f"ClaudeCLI: pre_warm failed: {exc}")
+            log.warning(f"ClaudeCLI: pre_warm spawn failed: {exc}")
             if proc is not None:
                 self._terminate(proc)
             with self._warm_lock:
                 self._warm_in_progress = False
             return
 
-        # Subprocess is up and init-validated. Slot it under the lock so
-        # a racing _run_one_turn either claims it or doesn't, atomically.
+        # Slot the subprocess. The startup work (Node + MCP + --resume)
+        # continues in the background; the next turn will write its
+        # envelope and see system_init promptly.
         with self._warm_lock:
             if self._stopping:
                 self._terminate(proc)
@@ -360,36 +346,8 @@ class ClaudeCLIProvider(LLMProvider):
                 self._warm_proc = proc
                 self._warm_out_q = out_q
                 self._warm_stderr_buf = stderr_buf
-                log.info("ClaudeCLI: warm subprocess slotted, ready for next turn")
+                log.info(f"ClaudeCLI: warm subprocess slotted (pid={proc.pid})")
             self._warm_in_progress = False
-
-    def _drain_until_init(self, out_q, stderr_buf, timeout=15.0):
-        """Drain the event queue until the system_init event arrives.
-
-        Validates apiKeySource and captures session_id (same checks the
-        in-turn drain would do). Raises ClaudeCLIProtocolError if the
-        subprocess EOFs or doesn't emit init within the timeout — the
-        caller (pre_warm) catches and skips slotting.
-        """
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                kind, payload = out_q.get(timeout=0.5)
-            except Empty:
-                continue
-            if kind == "eof":
-                stderr_tail = "".join(list(stderr_buf)[-20:]) if stderr_buf else "(empty)"
-                raise ClaudeCLIProtocolError(
-                    f"claude subprocess exited before init. stderr tail:\n{stderr_tail}"
-                )
-            if kind != "event":
-                continue
-            if payload.get("type") == "system" and payload.get("subtype") == "init":
-                self._validate_init_event(payload)
-                return
-        raise ClaudeCLIProtocolError(
-            f"claude subprocess did not emit system_init within {timeout}s"
-        )
 
     # --- spawn helpers ------------------------------------------------
 
@@ -747,14 +705,17 @@ class ClaudeCLIProvider(LLMProvider):
         payloads, with per-paragraph flush).
 
         Claims the warm-slot subprocess (slotted by `pre_warm`) if one
-        is alive; otherwise spawns fresh. When warm, the subprocess has
-        already consumed its system_init event during pre_warm, so the
-        drain methods will not see one — that's expected.
+        is alive; otherwise spawns fresh. The warm subprocess has done
+        its Node boot + MCP attach + --resume JSONL parse during the
+        parked window but emits no events until it reads stdin — so
+        the drain methods see `system_init` in-turn either way. The
+        win materializes as a much smaller cli_init measurement on
+        warm turns because the work happened in parallel with idle.
 
         Captures wall-time bookends (t_run_start, t_spawn_done, warm)
         so the drain methods can split ttft into per-stage costs in
-        their TIMING log lines (spawn / cli_init / api_ttft) and
-        attribute the win when warm=1.
+        their TIMING log lines (spawn / cli_init / api_ttft). The
+        `warm=1|0` flag groups warm and cold turns for comparison.
         """
         t_run_start = time.monotonic()
         proc = None
