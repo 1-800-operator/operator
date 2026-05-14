@@ -223,7 +223,6 @@ def _print_usage():
     print("  operator doctor                 Diagnostic check — is the world ready?")
     print()
     print("Flags:")
-    print("  --yolo                          Skip per-tool permission prompts")
     print("  --resume-session <id>           Bridge an existing Claude Code session into slip")
 
 
@@ -299,9 +298,7 @@ def main():
             print(f"Unknown bot: {name!r}. Supported: {supported}.\n")
             _print_usage()
             return 0
-        rest, yolo = _consume_yolo(argv[2:])
-        if yolo:
-            os.environ["OPERATOR_YOLO"] = "1"
+        rest = _consume_yolo(argv[2:])
         return _run_slip(name, rest)
 
     if first.startswith("-"):
@@ -395,14 +392,14 @@ def _infer_bot_from_surface():
 
 
 def _consume_yolo(args):
-    """Strip `--yolo` from argv list; return (filtered_args, yolo_bool).
+    """Strip `--yolo` from the argv list and return the remainder.
 
-    The flag appends `--dangerously-skip-permissions` to the spawned
-    `claude` CLI via the OPERATOR_YOLO env var read in
-    providers/claude_cli.py:_spawn.
+    `--yolo` is a no-op now — the inner-claude spawn carries
+    `--dangerously-skip-permissions` unconditionally (see
+    providers/claude_cli.py:_build_cmd). The flag is still consumed here
+    so the plugin slash command passing it doesn't trip "unknown option".
     """
-    yolo = "--yolo" in args
-    return [a for a in args if a != "--yolo"], yolo
+    return [a for a in args if a != "--yolo"]
 
 
 def _read_current_meeting_url():
@@ -617,7 +614,9 @@ def _run_slip(name, rest):
         return 0
 
     # claude binary preflight — fail loud and early; no browser dance,
-    # no config load if claude isn't installed or logged in.
+    # no config load if claude isn't installed, logged out, or too old.
+    # `reason` is self-contained (it names the specific fix), so the
+    # message just relays it.
     from _1_800_operator.pipeline.claude_code_import import (
         claude_code_installed_and_logged_in,
     )
@@ -625,10 +624,9 @@ def _run_slip(name, rest):
     if not ok:
         _release_slip_lock()
         print(
-            f"slip claude requires the Claude Code CLI.\n"
+            f"slip claude can't start:\n"
             f"  {reason}\n"
-            f"Install Claude Code (https://claude.ai/code) and run "
-            f"`claude login`, then re-run."
+            f"Fix that and re-run. (`operator doctor` runs the full check.)"
         )
         return 0
 
@@ -678,12 +676,12 @@ def _run_slip(name, rest):
 
     provider = build_provider(resume_session_id=resume_session_id)
     # Fire pre_warm now, before the join sequence (Chrome attach + lobby
-    # wait + whisper model load — typically ~30s). claude in stream-json
-    # mode emits no events pre-stdin, so we can't observe init completion;
-    # the longer the parked window before the first @mention, the more of
-    # claude's Node boot + MCP attach + --resume JSONL parse lands while
-    # we're still mid-join. Without this, a user who @mentions within ~2s
-    # of meeting entry pays a cli_init=~2s cold-init tax (observed S221).
+    # wait + whisper model load — typically ~30s). pre_warm spawns the
+    # interactive claude and runs the briefing round-trip; doing it now
+    # means claude's Node boot + MCP attach + --resume JSONL parse +
+    # briefing land during the join window instead of being charged to
+    # the first @mention. Without this, a user who @mentions within ~2s
+    # of meeting entry pays a cold-init tax (observed S221).
     import threading as _threading
     _threading.Thread(target=provider.pre_warm, daemon=True).start()
     llm = LLMClient(provider)

@@ -22,12 +22,8 @@ TRIGGER_PHRASE = "@claude"
 # bridges land. No user-facing knob; one prefix, hardcoded.
 REPLY_PREFIX_SLIP = "[🤖 Claude] "
 
-# Operator-voice prefix for status / observability messages that operator
-# itself authors and posts to chat — connection drops, mid-turn tool
-# narration, permission-denial hints. Distinct from REPLY_PREFIX_SLIP so
-# meeting participants can tell at a glance whether a chat message is
-# Claude speaking (model output) or the operator stepping in to keep the
-# room informed. The phone emoji aligns with the 1-800-Operator brand
-# metaphor — the operator is the human-style switchboard that connects
-# the call and intervenes when something goes sideways.
-REPLY_PREFIX_OPERATOR = "[☎️ Operator] "
+# There is no separate operator voice. Everything the bot says in a
+# meeting goes out under REPLY_PREFIX_SLIP — operator is invisible
+# plumbing, not a switchboard persona. The old REPLY_PREFIX_OPERATOR
+# ("[☎️ Operator] ") and its send-without-prefix path were removed in
+# S228 along with the operator-side narration callbacks.

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-Operator is a chat-based AI meeting participant. It CDP-attaches to a dedicated slip Chrome window running a Google Meet, opens the chat panel, watches for messages addressed to it (via the `@claude` trigger phrase), forwards each user message to a long-lived `claude -p --resume <id>` subprocess that owns its own tool loop, and posts the streamed reply back into meeting chat. v1 ships claude as the only agent; the inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy.
+Operator is a chat-based AI meeting participant. It CDP-attaches to a dedicated slip Chrome window running a Google Meet, opens the chat panel, watches for messages addressed to it (via the `@claude` trigger phrase), and forwards each one to a long-lived interactive `claude` subprocess — one per meeting, driven over a PTY — that owns its own tool loop. Claude's reply is relayed back into meeting chat in real time by tailing the Claude Code transcript. v1 ships claude as the only agent; the inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy.
 
 ## Commands
 
@@ -24,7 +24,7 @@ operator doctor                       # diagnostic: claude CLI + auth, Chrome, g
 
 Bare `operator` prints usage. v1 ships claude only; codex / gemini bridges would be sibling modules under `bridges/` if added — there is no per-bot YAML, no `~/.operator/agents/`, and no setup wizard (all of that machinery was deleted in Phase 14.19.7).
 
-`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The `--yolo` flag appends `--dangerously-skip-permissions` to the inner-claude spawn so per-tool prompts are skipped. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention.
+`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The inner-claude spawn always carries `--dangerously-skip-permissions` — the meeting flow needs tools to run without per-call prompts and operator has no permission layer of its own; the `--yolo` flag is still parsed for plugin-slash-command back-compat but is now a no-op. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention.
 
 ### Logs & Diagnostics
 
@@ -45,7 +45,7 @@ python tests/test_915_reconnection.py          # disconnect + grace-period exit
 python tests/test_claude_cli_provider.py       # claude_cli subprocess lifecycle + restart
 python tests/test_llm_client.py                # LLMClient ask/streaming
 python tests/test_transcript_mcp.py            # captions → MCP search
-python tests/test_heartbeat.py                 # operator-voice narration callbacks
+python tests/test_heartbeat.py                 # operator failure-narration (_narrate_failure)
 ```
 
 Or run all at once: `for f in tests/test_*.py; do python "$f" || echo "FAIL: $f"; done`
@@ -70,9 +70,9 @@ Connectors (implement MeetingConnector — kept as a seam for future bridges)
   connectors/chat_dom_js.py   — Meet chat-panel DOM payloads injected via page.evaluate
 
 Pipeline
-  pipeline/chat_runner.py     — polling loop; trigger detection, operator-voice
-                                 narration callbacks, off-thread send queue,
-                                 participant-based auto-leave
+  pipeline/chat_runner.py     — polling loop; trigger detection, off-thread
+                                 send queue + tick drain, participant-based
+                                 auto-leave
   pipeline/meeting_record.py  — append-only JSONL per meeting at ~/.operator/history/<slug>.jsonl;
                                  single source of truth for chat + caption history (meta header + tail(n))
   pipeline/llm.py             — LLMClient: feeds latest user_text + meeting-record tail to provider
@@ -90,9 +90,9 @@ Bridge + bundled MCP
 
 1. `AttachAdapter.join()` CDP-attaches to slip Chrome (a dedicated user-data-dir under `~/.operator/slip_profile/`, separate from the user's main Chrome to dodge Chrome 121+ CDP restrictions), navigates to the meeting URL, signs in if needed via the persisted slip-profile cookies, enters the meeting, opens the chat panel, installs the chat-message MutationObserver, and spawns the Swift audio helper that pipes mic + system audio into the whisper pipeline.
 2. `ChatRunner._loop()` polls `read_chat()` every 500 ms, drops already-seen / own messages, and only forwards messages containing the `@claude` trigger phrase. Slip mode is "speak when spoken to" — no 1-on-1 bypass.
-3. `LLMClient.ask()` reads the meeting JSONL tail via `MeetingRecord.tail(n)` and sends the latest user turn to `ClaudeCLIProvider`. The inner-claude subprocess owns its full tool loop, system prompt, and context. Operator spawns it naked (no `--append-system-prompt`, no `--mcp-config`) — see Phase 14.22.3 and the `project_anthropic_detection_vector.md` memory for why.
-4. Operator narrates what claude is doing via four stream-reading callbacks wired into `ClaudeCLIProvider`: `progress` (per tool_use, 20s throttle), `denial` (per turn, deduped), `connection` (EOF + retry events), `tick` (off-thread send-queue drain). Each callback posts a `[☎️ Operator] …` line so meeting participants see what's happening without operator authoring any prompt for claude.
-5. The streamed reply text flows back through `connector.send_chat()` paragraph-by-paragraph; the slip-mode adapter prefixes claude's reply with `[🤖 Claude] ` so the room can distinguish bot replies from the user's own messages. Operator-voice posts bypass the prefix via `send_chat_raw()`.
+3. `LLMClient.ask()` reads the meeting JSONL tail via `MeetingRecord.tail(n)` and sends the latest user turn to `ClaudeCLIProvider`. The inner-claude subprocess owns its full tool loop, system prompt, and context. The **spawn** stays naked — no `--append-system-prompt`, no `--mcp-config`, no `-p` — see the `project_anthropic_detection_vector.md` memory for why. But operator's *first bracketed-paste* (turn 0) is an operator-authored briefing (`ClaudeCLIProvider._BRIEFING`): it tells inner-claude it's in a live meeting and to narrate its tool calls. A first-turn paste rides the channel a human types on, so it carries no spawn-signature weight — the naked-spawn invariant constrains spawn *flags*, not the message stream (narrowed S228). Turn 0's reply is consumed and never posted.
+4. Claude narrates its own tool calls in its own voice (`[🤖 Claude] …`), because the briefing asked it to — there is no operator-side narration layer. The only provider callback ChatRunner wires is `tick` (off-thread send-queue drain during the in-turn reply tail). The Phase 14.22 "section G" operator-side `progress`/`denial`/`connection` narration callbacks were built, live-tested, and removed in S228: the raw `running Bash: <command>` lines were cryptic, `PostToolUseFailure` got misclassified as a permission denial, and Claude self-narrating in plain language is simply better.
+5. The reply text flows back through `connector.send_chat()` paragraph-by-paragraph; the slip-mode adapter prefixes claude's reply with `[🤖 Claude] ` so the room can distinguish bot replies from the user's own messages. Operator's own failure surface (`ChatRunner._narrate_failure` — for when *operator itself* can't render a result) bypasses that prefix via `send_chat_raw()`.
 
 ### Configuration
 
@@ -114,12 +114,9 @@ Inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hiera
 
 ### Tool Permissions
 
-Operator does not have its own permission layer. Two modes:
+Operator does not have its own permission layer. The inner-claude spawn carries `--dangerously-skip-permissions` unconditionally (since the 14.22 PTY pivot) — the meeting flow needs tools to run without per-call prompts, and operator has nothing to gate them with. The old `--yolo`-gated two-mode behavior is gone; the `--yolo` flag is still parsed for back-compat with the plugin slash command but does nothing.
 
-- **with `--yolo`**: operator appends `--dangerously-skip-permissions` to the inner-claude spawn. Claude runs every tool unconstrained.
-- **without `--yolo`**: operator passes nothing extra. Claude Code applies its native rules from `~/.claude/settings.json` (`permissions.allow` / `permissions.deny` / `permissions.ask`). Tools the user hasn't allowed are denied at the Claude Code layer; operator catches the denial via its stream-reading `denial` callback and posts a `[☎️ Operator] permission denied …` hint suggesting `--yolo`.
-
-Per-tool narration in chat is operator's own stream-reading observation (the `progress` callback in `ClaudeCLIProvider`), not a system-prompt directive — there is no `--append-system-prompt` in the spawn. Participants see what the bot is doing without being asked to approve.
+Per-tool narration in chat is **Claude's own**, prompted by the first-paste briefing — not an operator-side observation layer and not an `--append-system-prompt` directive (the spawn stays naked). Participants see what the bot is doing because Claude tells them, in its own voice.
 
 ### Participant-based Auto-leave
 

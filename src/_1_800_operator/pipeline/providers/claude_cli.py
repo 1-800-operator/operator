@@ -1,50 +1,92 @@
 """
-Claude Code CLI LLM provider — naked per-@mention `claude -p` shellouts.
+Claude Code CLI LLM provider — interactive PTY-driven `claude` + hook events.
 
-Each turn (each meeting-chat @mention) spawns a fresh `claude -p
---output-format stream-json --include-partial-messages` subprocess, drains
-its stream until the `result` event, and exits. There is no long-lived
-subprocess; there is no system prompt injected from operator; there is no
-per-spawn `--mcp-config` tempfile. The spawn shape is identical to what a
-user typing `claude --resume <id>` themselves would produce — by design.
+Phase 14.22 pivot (May 2026): replaces the previous per-@mention
+`claude -p` shellouts. Background in `debug/14_22_pty_spike/DECISION.md`.
 
-This is the load-bearing constraint for V1 (Phase 14.22, S210/S211): the
-spawn signature is what Anthropic uses to detect harness-on-subscription
-patterns, so operator must contribute zero flags or metadata that wouldn't
-exist if the user ran `claude` directly. Whatever steering we want lives
-client-side in the user's own Claude Code session (CLAUDE.md, plugin
-SKILL.md content) or in MCP tool descriptions read via normal tool
-discovery. See memory `project_anthropic_detection_vector.md`.
+Trigger: starting 2026-06-15 Anthropic stops counting `claude -p` and
+Agent SDK usage toward Claude subscription limits; both draw from a
+small per-plan Agent SDK credit, then API rates. Operator's per-meeting
+`claude -p --resume` flow burns through that bucket in days for any
+non-trivial user. Interactive `claude` stays on the subscription pool —
+the documented home for interactive usage.
 
-Session continuity:
-  - First turn: spawn with no `--resume` (or with `--resume <pre-populated-id>`
-    when the plugin passed `--resume-session ${CLAUDE_SESSION_ID}` to the
-    operator CLI). Capture `session_id` from the `system_init` event.
-  - Subsequent turns: spawn with `--resume <captured-id>`. Claude rehydrates
-    its on-disk session store; prompt-cache hits via `cache_read_input_tokens`
-    keep the per-turn cost reasonable.
-  - Mid-stream EOF: retry once with `--resume`. Genuine wedges (subprocess
-    silent forever) are caller-cancelled via `/operator hangup` — no
-    operator-imposed turn timeout, no heartbeat watchdog (both were
-    harness-shaped and got stripped in S211).
+How it works:
+  - One long-lived `claude --dangerously-skip-permissions` subprocess
+    per meeting, driven over a PTY (pty.openpty + os.setsid).
+  - Input: bracketed-paste wrap + CR written to the PTY master.
+    Universal — survives quotes, backslashes, multi-line, emoji, code
+    fences (proven in spike_finalize.py T1, SHA-256 byte-for-byte).
+    Char-by-char typing silently dropped chars on long messages.
+  - Output, two channels:
+      * The operator-plugin's Stop hook appends each completed turn as
+        JSONL to $OPERATOR_SESSION_DIR/replies.jsonl. The provider tails
+        that file purely as the turn-boundary signal — a new row means
+        "the turn is done."
+      * The actual reply *text* comes from the Claude Code transcript
+        JSONL (transcript_path, captured from turn 0's Stop payload).
+        During a turn the provider tails the transcript and posts each
+        assistant text block the moment it lands — so Claude's
+        self-narration ("let me grab that file") reaches meeting chat in
+        real time instead of being batched at end-of-turn. No screen
+        scraping, no TUI parsing. (The plugin also writes tools.jsonl /
+        errors.jsonl; the provider no longer reads them — Phase 14.22
+        section G's operator-side tool narration was dropped in favour
+        of Claude self-narrating, briefed via the first paste.)
 
-Subscription auth: ANTHROPIC_API_KEY is stripped from the spawn env on
-every shellout, and `apiKeySource == "none"` is asserted on the first
-spawn's `system_init` event. We then trust subsequent spawns under the
-same `_session_id` to inherit the same credential — the assertion fires
-only at provider startup, not on every shellout, since re-asserting on
-each spawn would be belt-and-suspenders without changing the failure
-mode.
+Briefing: the first bracketed-paste operator sends is an
+operator-authored context message (see _BRIEFING) telling inner-claude
+it's in a live meeting and to narrate its tool calls in its own voice.
+This rides the same channel a human types on, so it does NOT change the
+spawn signature — the naked-spawn invariant constrains spawn *flags*
+(no -p, no --append-system-prompt, no --mcp-config), not the message
+stream. Turn 0's reply is consumed by _send_briefing and never posted.
+
+Why not Stop-block input (return decision=block from Stop hook to
+inject next turn): claude's prompt-injection defense fires on it.
+Spike_framing proved every hook-injected message gets refused as a
+suspected prompt-injection attempt, even with a counter-instruction at
+session start. Filtering "Stop hook feedback:" at an API proxy would
+bypass an Anthropic safety feature — strategic non-starter. (Note: a
+*first user-turn paste* is not hook-injected and is not refused — the
+prompt-injection defense is specific to Stop-block feedback.)
+
+Why bracketed-paste (and not `claude -p` over stdin): the new spawn
+is interactive, so it owns the TTY and there is no `--input-format
+stream-json` envelope path. Bracketed-paste is what a human pasting
+into the TUI emits, and the TUI accepts it as a normal user turn.
+
+cwd: inner-claude must spawn in `<user-project-dir>` because
+`claude --resume` is cwd-scoped — the session JSONL lives under a
+project dir derived from the creator's cwd, and `--resume <id>` from
+the wrong cwd returns "No conversation found with session ID". No
+`--working-directory` flag exists (probed via `claude --help`); the
+process's actual cwd is the only knob. Side effect: the user's
+project-level `.claude/settings.json` hooks fire inside meetings — same
+as the prior `-p` behavior, not a regression.
+
+Subscription auth: ANTHROPIC_API_KEY is stripped from the spawn env
+unconditionally. There is no per-spawn apiKeySource assertion now
+because the interactive TUI doesn't emit a system_init event we can
+read — the equivalent guard is doctor's preflight (`claude auth
+status --json`) and a SessionStart-hook anomaly check later.
 """
+import fcntl
 import json
 import logging
 import os
+import pty
+import re
+import select
 import shutil
+import signal
+import struct
 import subprocess
+import termios
 import threading
 import time
-from collections import deque
-from queue import Queue, Empty
+import uuid
+from pathlib import Path
 
 from _1_800_operator.pipeline.providers.base import (
     LLMProvider,
@@ -55,309 +97,222 @@ from _1_800_operator.pipeline.providers.base import (
 log = logging.getLogger(__name__)
 
 
-def _format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, warm=False):
-    """Format the per-stage TTFT breakdown for the TIMING log line.
+# Bracketed-paste timings from spike_finalize.py — proven against the
+# T1 tough-inputs sweep (quotes/backslash/multi-line/emoji/code fences,
+# SHA-256 round-trip). Shortening any of these will eventually drop
+# bytes on long messages; don't tune without re-running T1.
+_BRACKET_OPEN_DELAY = 0.05
+_BRACKET_BODY_DELAY = 0.1
+_BRACKET_CLOSE_DELAY = 0.2
 
-    Splits the pre-first-token time into three observable stages so a
-    high `ttft` can be attributed to the right cost:
+# PTY window — set on the master fd so claude's TUI lays out at a
+# reasonable size rather than the default 80x24 that some renderers
+# pin to. Cosmetic only; events come out via hooks regardless.
+_PTY_ROWS = 40
+_PTY_COLS = 120
 
-      spawn_ms   — subprocess.Popen → return (fork+exec, dyld, etc.)
-      cli_init_ms — t_spawn_done → system_init event from claude. For
-                    cold turns this is the full Node boot + MCP attach +
-                    --resume JSONL parse + stdin envelope read. For warm
-                    turns it's just (envelope-write → init), because
-                    the boot/attach/parse happened in parallel with idle
-                    during pre_warm. A small cli_init_ms on warm=1 is
-                    the visible win.
-      api_ttft_ms — system_init → first content_block_delta (API call).
+# Spawn-ready handshake. Operator-plugin's SessionStart hook writes
+# `ready.flag` into the session dir; the provider polls for it after
+# spawn. The fallback settle is only hit when the plugin isn't installed
+# — in that case the reply tail will time out anyway with a clearer
+# error, so the settle just keeps the first send from racing the TUI.
+_READY_FLAG_TIMEOUT_SECONDS = 30.0
+_READY_FLAG_POLL_SECONDS = 0.1
+_SPAWN_FALLBACK_SETTLE_SECONDS = 5.0
 
-    The `warm=1|0` flag at the end makes warm-vs-cold turns greppable.
-    Any stage with no captured stamp shows as `n/a`. Returns a single
-    space-separated fragment ready to drop into the TIMING line.
-    """
-    def _f(v):
-        return f"{v}ms" if v is not None else "n/a"
-    spawn_ms = int((t_spawn_done - t_run_start) * 1000) if t_spawn_done else None
-    cli_init_ms = int((t_init - t_spawn_done) * 1000) if (t_init and t_spawn_done) else None
-    api_ttft_ms = int((t_first_token - t_init) * 1000) if (t_first_token and t_init) else None
-    return (
-        f"spawn={_f(spawn_ms)} "
-        f"cli_init={_f(cli_init_ms)} "
-        f"api_ttft={_f(api_ttft_ms)} "
-        f"warm={1 if warm else 0}"
-    )
+# Tail-loop polling cadence for replies.jsonl. 0.15s matches the spike
+# and is short enough that p50 turn TTFR (Stop hook fires → reply
+# posted) stays in the noise floor of the meeting-chat send path. The
+# same cadence drives the in-turn transcript tail (real-time narration).
+_REPLIES_POLL_SECONDS = 0.15
 
+# After the Stop hook fires, the turn's final assistant block may still
+# be a write-beat behind in the transcript JSONL. Settle this long, then
+# do one last transcript drain before closing the turn.
+_TRANSCRIPT_FINAL_DRAIN_SETTLE = 0.3
 
-def _format_cache_stats(result_evt):
-    """Format prompt-cache usage from the result event's `usage` block.
+# A foreign Stop hook (the user's own ~/.claude or project
+# settings.json) can run decision=block and inject "Stop hook
+# feedback: …", redirecting inner-claude mid-meeting. DECISION.md
+# section I: observable, not preventable — operator spawns in the
+# user's project dir for --resume, so that dir's hooks fire inside
+# meetings, and operator won't mutate the user's config to stop them.
+# The detection is surfaced to chat; the turn-end delay below is a
+# noisier proxy signal — logged only. If the gap between the final
+# assistant block landing and the Stop row appearing exceeds this,
+# foreign hooks may have run in between.
+_FOREIGN_HOOK_DELAY_WARN_SECONDS = 5.0
 
-    claude reports per-turn token usage with cache_read_input_tokens and
-    cache_creation_input_tokens, which directly indicate whether the
-    prompt cache hit on this turn. A high cache_read with low input
-    means the cache is doing its job; a high input with low cache_read
-    means we're re-paying for the prefix every turn (likely because
-    the prefix isn't stable across spawns).
-    """
-    if not result_evt:
-        return "cache=n/a"
-    usage = result_evt.get("usage") or {}
-    if not usage:
-        return "cache=n/a"
-    inp = usage.get("input_tokens", 0)
-    creation = usage.get("cache_creation_input_tokens", 0)
-    read = usage.get("cache_read_input_tokens", 0)
-    return f"cache_input={inp} cache_creation={creation} cache_read={read}"
+# How long to wait for inner-claude to acknowledge the briefing paste
+# (turn 0) before proceeding anyway. Generous — a one-line ack is fast,
+# but a cold resume can take a few seconds. On timeout the spawn still
+# proceeds; real turns will surface a genuine hook-side failure.
+_BRIEFING_REPLY_TIMEOUT_SECONDS = 60.0
+
+# Operator's briefing — the first bracketed-paste sent to a freshly
+# spawned inner-claude, before any real meeting turn. Operator-authored
+# context, deliberately conversational (not a rigid preamble): it rides
+# the same input channel a human types on, so it carries no spawn-
+# signature weight. See the module docstring on the naked-spawn
+# invariant. _send_briefing consumes turn 0's reply so this never
+# reaches meeting chat.
+_BRIEFING = """Quick context before we start: you're in a live Google Meet right now, and whatever you say goes straight into the meeting chat for everyone on the call to read. So keep replies short and conversational — chat-length, not essay-length.
+
+Before you run a tool — reading a file, searching, running a command — say what you're about to do in a quick line, like "let me grab that file" or "searching for it now." Then post the result when you have it. The point is the room sees what you're doing instead of staring at a blank screen while a tool runs.
+
+Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
 
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` CLI is missing from PATH."""
 
 
-class ClaudeCLISubscriptionRequiredError(RuntimeError):
-    """Raised when the spawned subprocess reports anything other than apiKeySource=none.
-
-    V1 is explicitly subscription-only — billing through the user's
-    Claude Max plan, not the API. If something leaks an ANTHROPIC_API_KEY
-    into the environment we want to fail loud at startup, not silently
-    rack up API charges.
-    """
-
-
 class ClaudeCLIProtocolError(RuntimeError):
-    """Subprocess exited or misbehaved unexpectedly. Wraps the surfacing diagnostic."""
+    """Inner-claude died, the PTY broke, or the reply tail timed out."""
 
 
-def _reader_thread(stream, q):
-    """Pump claude's stdout into a queue, one parsed JSON event per item."""
-    try:
-        for line in stream:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                q.put(("event", json.loads(line)))
-            except json.JSONDecodeError:
-                q.put(("raw", line))
-    finally:
-        q.put(("eof", None))
+def _set_winsize(fd, rows, cols):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def _drain_pty_thread(master_fd, dump_buf, stop_event):
+    """Drain master_fd into a rolling buffer for diagnostics on death.
+
+    The TUI emits cursor-positioned bytes that aren't useful to parse —
+    we capture the tail purely so a crashed-claude failure has something
+    to surface in the error message. The reader runs until stop_event
+    fires or the PTY closes (read() hits EOF or raises OSError).
+    """
+    while not stop_event.is_set():
+        try:
+            r, _, _ = select.select([master_fd], [], [], 0.2)
+        except (OSError, ValueError):
+            return
+        if not r:
+            continue
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            return
+        if not chunk:
+            return
+        dump_buf.append(chunk)
 
 
 class ClaudeCLIProvider(LLMProvider):
-    """Per-@mention `claude -p` shellouts as an LLMProvider.
+    """Long-lived interactive `claude` driven via PTY + hook events.
 
-    Construction is cheap; nothing happens until the first complete()
-    call. Each call spawns a fresh subprocess, runs it to the `result`
-    event, and exits. State carried across calls is just the captured
-    `session_id` (used to pass `--resume <id>` on subsequent spawns).
+    One subprocess per meeting; `pre_warm` opens it, `complete_streaming`
+    sends a turn and tails for the matching reply, `stop` tears it down.
+    The hook-side scaffolding (operator-plugin's hooks/scripts/*.sh)
+    must be installed in the user's Claude Code plugin list — without
+    it, replies.jsonl never appears and turns time out.
     """
 
-    def __init__(self, *, cwd=None, resume_session_id=None):
+    def __init__(self, *, cwd=None, resume_session_id=None, session_dir=None):
         """
         Args:
-          cwd: working directory for each spawn. Defaults to $HOME for
-            stable resolution of relative paths. The app-level builder
-            (build_provider) overrides this with the user's invocation
-            cwd so "this codebase" resolves naturally — same model as
-            the bare `claude` CLI.
-          resume_session_id: optional. Pre-populates `_session_id` so
-            the very first spawn passes `--resume <id>`. The plugin
-            slash command always passes this (substituted from
-            `${CLAUDE_SESSION_ID}` at execution time); terminal-direct
-            invocation omits it and a fresh session is born on first
-            @mention.
+          cwd: working dir for the inner-claude spawn. Defaults to the
+            invoking process's cwd. The plugin slash command runs from
+            the user's project dir, which is what we want for
+            `--resume` to find the session JSONL.
+          resume_session_id: optional Claude Code session id to bridge
+            into the meeting. Passed as `--resume <id>` on spawn.
+          session_dir: optional override for the per-session state dir
+            (where the plugin hooks write replies.jsonl etc.). Defaults
+            to a fresh ~/.operator/sessions/<uuid>/ created on
+            construction; the env-var contract OPERATOR_SESSION_DIR is
+            set here so the spawn inherits it.
         """
-        self._cwd = cwd or os.path.expanduser("~")
-        # Captured from the `system_init` event of the first spawn.
-        # Subsequent spawns pass `--resume <id>` so claude rehydrates
-        # the prior session's full message history (incl. tool use +
-        # tool results) from its on-disk session store. Pre-populated
-        # via the constructor when the plugin slash command bridges a
-        # caller's existing Claude Code session into the meeting.
-        self._session_id: str | None = resume_session_id
-        # Tracks whether we've validated apiKeySource at least once.
-        # Per-shellout assertion is unnecessary — the first spawn's
-        # check is sufficient since the spawn env is built identically
-        # each time (ANTHROPIC_API_KEY stripped, no other auth
-        # breadcrumbs). Re-asserting on every spawn would just waste
-        # work without changing the failure mode.
-        self._init_validated = False
-        # Optional progress narrator: callable (tool_name, tool_input)
-        # -> None, fired on every tool_use content block as the model
-        # emits them. ChatRunner uses this to post `[☎️ Operator]`-
-        # voice tool narration (20s-throttled) into meeting chat.
-        self._progress_callback = None
-        # Optional in-turn tick: callable () -> None, fired on every
-        # iteration of the out-queue read loop. ChatRunner uses this
-        # to drain its off-thread send queue (operator-voice
-        # narrations queued from the provider's pump thread) onto the
-        # main Playwright-owning thread while the polling thread is
-        # parked inside complete_streaming().
-        self._tick_callback = None
-        # Optional permission-denial narrator: callable (tool_name) ->
-        # None, fired when a tool_result block carries a permission-
-        # denied signature. ChatRunner uses this to post a one-time
-        # `[☎️ Operator] permission denied for X — re-run with --yolo`
-        # hint. Throttled to once per turn at the ChatRunner layer.
-        self._denial_callback = None
-        # Optional connection-status narrator: callable (event: str) ->
-        # None, fired on EOF mid-stream + on the retry. ChatRunner uses
-        # this to post `[☎️ Operator] connection dropped — reconnecting…`
-        # to chat in operator's switchboard voice. event is one of
-        # {"dropped", "reconnecting", "failed"}.
-        self._connection_callback = None
-        # Set by stop() during shutdown. Suppresses the EOF retry path
-        # so a SIGINT-triggered subprocess kill doesn't race in a
-        # fresh spawn after the rest of operator has torn down.
+        self._cwd = cwd or os.getcwd()
+        self._resume_session_id = resume_session_id
+
+        if session_dir is None:
+            session_dir = Path.home() / ".operator" / "sessions" / uuid.uuid4().hex
+        self._session_dir = Path(session_dir)
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._replies_path = self._session_dir / "replies.jsonl"
+        self._ready_flag_path = self._session_dir / "ready.flag"
+        self._metadata_path = self._session_dir / "metadata.json"
+
+        self._proc: subprocess.Popen | None = None
+        self._master_fd: int | None = None
+        self._pty_reader_stop = threading.Event()
+        self._pty_reader_thread: threading.Thread | None = None
+        self._pty_dump: list[bytes] = []
+
+        self._spawn_lock = threading.Lock()
+        self._spawn_in_progress = False
+        self._spawn_exc: Exception | None = None
         self._stopping = False
-        # Eager pre-spawn slot. pre_warm() spawns a `claude -p --resume <id>`
-        # subprocess and consumes its system_init event (validating auth +
-        # capturing session_id) ahead of any user turn. The next turn
-        # claims this slot in _run_one_turn and skips the ~2.6s
-        # cli_init cost. Two callers fire pre_warm: (a) ChatRunner.run()
-        # after a successful meeting join (covers turn 1) and (b) the
-        # tail of complete_streaming on success (covers turns 2+).
-        # `_warm_in_progress` is a dedup latch so overlapping callers
-        # don't spawn twice. The slow spawn happens OUTSIDE the lock so
-        # a turn arriving mid-prewarm doesn't serialize on it.
-        self._warm_proc = None
-        self._warm_out_q: Queue | None = None
-        self._warm_stderr_buf: deque[str] | None = None
-        self._warm_lock = threading.Lock()
-        self._warm_in_progress = False
+
+        # Tick callback: ChatRunner drains its off-thread send queue on
+        # every reply-tail poll. The progress/denial/connection callbacks
+        # the prior provider shape carried are gone — Claude self-narrates
+        # its tool calls now (briefed via the first paste), so operator
+        # no longer tails tools.jsonl / errors.jsonl.
+        self._tick_callback = None
+
+        # Captured `session_id` for archival. The Stop hook payload
+        # includes `transcript_path` and `session_id`; we record the
+        # first one we see so `metadata.json` carries it.
+        self._captured_session_id: str | None = None
+
+        # Claude Code transcript JSONL for the live session — captured
+        # from turn 0's Stop payload in _send_briefing. Real turns tail
+        # this file for real-time assistant-text narration. None until
+        # the briefing reply lands (or a real turn backfills it).
+        self._transcript_path: Path | None = None
 
     # --- callback wiring (set by ChatRunner._wire_provider) -----------
 
-    def set_progress_callback(self, callback):
-        """Late-bind the tool-use narrator.
-
-        Called once per tool_use content block during streaming, on the
-        provider's reader thread. Signature: (tool_name: str,
-        tool_input: dict) -> None. Exceptions are swallowed so a
-        misbehaving narrator can't kill the turn.
-        """
-        self._progress_callback = callback
-
     def set_tick_callback(self, callback):
-        """Late-bind a per-iteration tick fired during in-turn out-queue
-        polling. Signature: () -> None. Called on the same thread that
-        invoked complete()/complete_streaming() (the polling thread on
-        the live runner) on every loop iteration of the streaming and
-        non-streaming event readers — both event arrivals and the 0.5s
-        timeout cycle. ChatRunner uses this to drain its off-thread
-        send queue while the polling thread is parked here. Exceptions
-        are swallowed so a misbehaving callback can't kill the turn."""
+        """Per-iteration tick during the reply tail loop. Used by
+        ChatRunner to drain its off-thread send queue while the
+        polling thread is parked here. Signature: () -> None.
+        """
         self._tick_callback = callback
-
-    def set_denial_callback(self, callback):
-        """Late-bind the permission-denial narrator.
-
-        Called when a tool_result block carries a permission-denied
-        signature. Signature: (tool_name: str) -> None. ChatRunner
-        debounces to once per turn at its layer.
-        """
-        self._denial_callback = callback
-
-    def set_connection_callback(self, callback):
-        """Late-bind the switchboard-voice connection narrator.
-
-        Called on mid-stream EOF + on the retry path. Signature:
-        (event: str) -> None where event ∈ {"dropped", "reconnecting",
-        "failed"}. ChatRunner posts the operator-voice status line.
-        """
-        self._connection_callback = callback
 
     # --- lifecycle ----------------------------------------------------
 
     def stop(self):
-        """Mark the provider as shutting down.
-
-        Per-@mention spawns are owned by their complete_streaming()
-        call frame and tear down via its finally block. Pre-warmed
-        subprocesses are owned by the provider, so this method
-        terminates any warm slot inhabitant. Setting `_stopping` makes
-        the EOF retry path bail rather than spawning a zombie
-        replacement after a SIGINT-triggered kill. Idempotent.
-        """
+        """Tear down the inner-claude PTY. Idempotent."""
         if self._stopping:
             return
         log.info("ClaudeCLI stop() called")
         self._stopping = True
-        # Terminate the warm subprocess if any. Hold the lock so a
-        # concurrent _run_one_turn doesn't claim a doomed subprocess
-        # mid-shutdown.
-        with self._warm_lock:
-            if self._warm_proc is not None:
-                self._terminate(self._warm_proc)
-                self._warm_proc = None
-                self._warm_out_q = None
-                self._warm_stderr_buf = None
+        self._terminate_inner()
 
     def pre_warm(self):
-        """Spawn a `claude -p --resume <id>` subprocess ahead of demand
-        and park it idle waiting for stdin.
+        """Spawn the long-lived inner-claude subprocess.
 
-        Empirical finding (S220): claude in stream-json mode emits zero
-        events until it reads its first stdin input — so we cannot wait
-        for `system_init` here. The subprocess *does* perform its Node
-        boot + MCP attach + --resume JSONL parse during the parked
-        window, but silently. When the next turn writes its envelope to
-        stdin, `system_init` arrives almost instantly because the
-        startup work was already done.
-
-        We slot the subprocess as-is and let the in-turn drain consume
-        init events normally (validating apiKeySource and capturing
-        session_id there, same as a cold spawn).
-
-        Callers:
-          - ChatRunner.run() after a successful meeting join (turn 1).
-          - complete_streaming tail on success (turns 2+).
-
-        Idempotent: returns if the slot already holds a live subprocess
-        or another pre_warm is mid-spawn. Safe to call from any thread.
-        Best-effort: failures log a warning and leave the slot empty.
+        Called once per meeting (from __main__.py after the meeting
+        join sequence). Idempotent: a second call while a spawn is
+        in-flight returns; a call after the subprocess is already
+        alive returns. Best-effort — failure logs and leaves the
+        provider unspawned; the next complete() call will retry.
         """
         if self._stopping:
             return
-        with self._warm_lock:
-            if self._warm_proc is not None and self._warm_proc.poll() is None:
-                return  # already warm and alive
-            if self._warm_in_progress:
-                return  # another pre_warm is mid-spawn
-            self._warm_in_progress = True
-
-        proc = None
+        with self._spawn_lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return
+            if self._spawn_in_progress:
+                return
+            self._spawn_in_progress = True
         try:
-            proc, out_q, stderr_buf = self._spawn_one()
+            self._spawn_inner()
+            self._spawn_exc = None
         except Exception as exc:
             log.warning(f"ClaudeCLI: pre_warm spawn failed: {exc}")
-            if proc is not None:
-                self._terminate(proc)
-            with self._warm_lock:
-                self._warm_in_progress = False
-            return
+            self._spawn_exc = exc
+        finally:
+            with self._spawn_lock:
+                self._spawn_in_progress = False
 
-        # Slot the subprocess. The startup work (Node + MCP + --resume)
-        # continues in the background; the next turn will write its
-        # envelope and see system_init promptly.
-        with self._warm_lock:
-            if self._stopping:
-                self._terminate(proc)
-            else:
-                self._warm_proc = proc
-                self._warm_out_q = out_q
-                self._warm_stderr_buf = stderr_buf
-                log.info(f"ClaudeCLI: warm subprocess slotted (pid={proc.pid})")
-            self._warm_in_progress = False
-
-    # --- spawn helpers ------------------------------------------------
+    # --- spawn --------------------------------------------------------
 
     def _build_cmd(self):
-        """Assemble the per-shellout command vector.
-
-        Naked: only flags that look like what a user typing `claude`
-        themselves would produce. No `--append-system-prompt`, no
-        `--mcp-config`, no harness identity at the spawn layer.
-        """
         claude = shutil.which("claude")
         if not claude:
             raise ClaudeCLINotFoundError(
@@ -365,120 +320,188 @@ class ClaudeCLIProvider(LLMProvider):
                 "https://docs.anthropic.com/en/docs/claude-code and ensure it is "
                 "logged in (`claude auth status`)."
             )
-        cmd = [
-            claude, "-p",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ]
-        # `--yolo` on the operator CLI sets OPERATOR_YOLO=1 in env. We
-        # forward it as `--dangerously-skip-permissions`, which is a
-        # user-equivalent flag (any user can pass it directly to
-        # claude). With no yolo flag we pass nothing extra and Claude
-        # Code applies its native permission rules from the user's
-        # ~/.claude/settings.json. Operator does not impose its own
-        # permission layer.
-        if os.environ.get("OPERATOR_YOLO") == "1":
-            cmd.append("--dangerously-skip-permissions")
-        if self._session_id is not None:
-            # Subsequent @mention (or first @mention with a session id
-            # bridged in via --resume-session): rehydrate the prior
-            # session so the model inherits full message history. The
-            # init event will echo this same session_id back.
-            cmd += ["--resume", self._session_id]
+        # --dangerously-skip-permissions is unconditional now. Operator
+        # has no permission layer of its own and the meeting flow needs
+        # tools to run without per-call prompts. The user-facing `--yolo`
+        # flag becomes a no-op (kept in argv parsing for back-compat
+        # with the plugin slash command; nothing reads it here anymore).
+        cmd = [claude, "--dangerously-skip-permissions"]
+        if self._resume_session_id:
+            cmd += ["--resume", self._resume_session_id]
         return cmd
 
-    def _spawn_one(self):
-        """Launch one per-@mention `claude -p` subprocess.
-
-        Returns (proc, out_q, stderr_buf). Caller is responsible for
-        terminating proc in a finally block. On any error tearing up
-        the subprocess raises ClaudeCLIProtocolError with a useful
-        diagnostic.
-        """
+    def _spawn_inner(self):
+        """Open the PTY, fork claude into it, start the drain thread."""
         cmd = self._build_cmd()
-        # Strip ANTHROPIC_API_KEY from the spawn env so claude falls
-        # through to the OAuth-stored Max credential. The first spawn
-        # additionally asserts apiKeySource == "none" on its init
-        # event below.
+
+        # Clear a stale ready.flag before spawning. The flag is written
+        # once per claude process by the plugin's SessionStart hook; on a
+        # respawn (inner-claude crashed, next turn relaunches it) the
+        # previous process's flag is still on disk, so _wait_for_ready
+        # would return instantly and the first bracketed-paste would race
+        # the new TUI's startup and be lost. Deleting it here forces
+        # _wait_for_ready to block for the *new* hook.
+        try:
+            self._ready_flag_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(f"ClaudeCLI: could not clear stale ready.flag: {exc}")
+
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        # Load-bearing: hook scripts read this to know where to write.
+        # Setting it here as well as in __main__.py is belt-and-suspenders
+        # — provider construction is the authoritative place because the
+        # session dir is owned here.
+        env["OPERATOR_SESSION_DIR"] = str(self._session_dir)
+
+        master_fd, slave_fd = pty.openpty()
+        _set_winsize(master_fd, _PTY_ROWS, _PTY_COLS)
 
         log.info(
-            f"ClaudeCLI spawning per-@mention subprocess: cwd={self._cwd} "
-            f"resume={'<pre-populated>' if self._session_id else 'none'}"
+            f"ClaudeCLI spawning interactive claude: cwd={self._cwd} "
+            f"session_dir={self._session_dir} "
+            f"resume={'<bridged>' if self._resume_session_id else 'none'}"
         )
         try:
+            # start_new_session=True is the in-process default via the
+            # Popen monkey-patch in __main__.py, which also satisfies our
+            # need for the child to be its own process group (so killpg
+            # in _terminate_inner only hits inner-claude, not us). We
+            # MUST NOT also pass preexec_fn=os.setsid here — that calls
+            # setsid in the child a second time and fails with EPERM
+            # because the child is already a session leader.
             proc = subprocess.Popen(
                 cmd,
                 cwd=self._cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,
                 env=env,
+                close_fds=True,
             )
         except OSError as exc:
+            os.close(master_fd)
+            os.close(slave_fd)
             raise ClaudeCLIProtocolError(f"failed to launch claude CLI: {exc}") from exc
 
-        out_q: Queue = Queue()
-        threading.Thread(
-            target=_reader_thread, args=(proc.stdout, out_q), daemon=True,
-        ).start()
+        os.close(slave_fd)
 
-        stderr_buf: deque[str] = deque(maxlen=500)
-        threading.Thread(
-            target=lambda: stderr_buf.extend(proc.stderr), daemon=True,
-        ).start()
+        self._proc = proc
+        self._master_fd = master_fd
+        self._pty_reader_stop = threading.Event()
+        self._pty_dump = []
+        self._pty_reader_thread = threading.Thread(
+            target=_drain_pty_thread,
+            args=(master_fd, self._pty_dump, self._pty_reader_stop),
+            daemon=True,
+        )
+        self._pty_reader_thread.start()
 
-        return proc, out_q, stderr_buf
-
-    def _terminate(self, proc):
-        """Best-effort tear-down for a spawned subprocess. Idempotent."""
-        if proc is None:
-            return
+        # Record metadata up-front so it survives a crash before any
+        # reply lands.
         try:
-            if proc.stdin and not proc.stdin.closed:
-                proc.stdin.close()
-        except Exception:
+            self._metadata_path.write_text(
+                json.dumps({
+                    "started_at": time.time(),
+                    "cwd": self._cwd,
+                    "resume_session_id": self._resume_session_id,
+                    "pid": proc.pid,
+                }),
+                encoding="utf-8",
+            )
+        except OSError:
             pass
-        if proc.poll() is None:
+
+        self._wait_for_ready()
+        log.info(f"ClaudeCLI: inner-claude live (pid={proc.pid})")
+        self._send_briefing()
+
+    def _wait_for_ready(self):
+        """Block until the SessionStart hook writes ready.flag, with timeout.
+
+        Falls back to a hardcoded settle if the flag never appears, which
+        almost always means operator-plugin isn't installed in the user's
+        Claude Code. The fallback at least lets the TUI initialize before
+        the first paste — the actual failure surfaces clearly when the
+        Stop hook tail times out on the first turn.
+        """
+        deadline = time.monotonic() + _READY_FLAG_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if self._ready_flag_path.exists():
+                return
+            if self._proc is not None and self._proc.poll() is not None:
+                raise ClaudeCLIProtocolError(
+                    f"inner-claude exited during startup (rc={self._proc.returncode}).\n"
+                    f"PTY tail:\n{self._pty_tail()}"
+                )
+            time.sleep(_READY_FLAG_POLL_SECONDS)
+        log.warning(
+            f"ClaudeCLI: ready.flag never appeared after "
+            f"{_READY_FLAG_TIMEOUT_SECONDS:.0f}s — operator-plugin likely not "
+            f"installed. Falling back to time-based settle; expect the first "
+            f"turn to time out with a clearer hook-side error."
+        )
+        time.sleep(_SPAWN_FALLBACK_SETTLE_SECONDS)
+
+    def _terminate_inner(self):
+        """Best-effort tear-down. Idempotent."""
+        proc = self._proc
+        master_fd = self._master_fd
+
+        if self._pty_reader_thread is not None:
+            self._pty_reader_stop.set()
+            self._pty_reader_thread.join(timeout=2)
+            self._pty_reader_thread = None
+
+        if proc is not None and proc.poll() is None:
             try:
-                proc.terminate()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
 
-    def _validate_init_event(self, payload):
-        """Check apiKeySource on a system-init event. Raise if not subscription.
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
 
-        Captures the session_id on every init event so subsequent
-        spawns can `--resume`. The first init also flips
-        `_init_validated` so we only assert once per provider lifetime.
-        """
-        source = payload.get("apiKeySource")
-        if source != "none":
-            raise ClaudeCLISubscriptionRequiredError(
-                f"claude reported apiKeySource={source!r}; v1 requires "
-                "subscription auth (apiKeySource='none'). Refusing to "
-                "proceed — an API key may have leaked into the environment."
-            )
-        self._init_validated = True
-        session_id = payload.get("session_id")
-        if session_id:
-            # On a resumed spawn claude echoes the same id; on a
-            # fresh first spawn it issues a new one. Either way,
-            # capturing here gives subsequent shellouts a stable
-            # `--resume <id>` target.
-            self._session_id = session_id
-        log.info(
-            f"ClaudeCLI spawn ready: apiKeySource=none, session={session_id or '?'}"
-        )
+        # Stamp ended_at into metadata for archival.
+        try:
+            if self._metadata_path.exists():
+                meta = json.loads(self._metadata_path.read_text(encoding="utf-8"))
+                meta["ended_at"] = time.time()
+                if self._captured_session_id:
+                    meta["session_id"] = self._captured_session_id
+                self._metadata_path.write_text(json.dumps(meta), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+        self._proc = None
+        self._master_fd = None
+
+    def _pty_tail(self, n_bytes=2000):
+        """Return the last n_bytes of captured PTY output as a string."""
+        joined = b"".join(self._pty_dump)
+        tail = joined[-n_bytes:]
+        try:
+            return tail.decode("utf-8", errors="replace")
+        except Exception:
+            return "<undecodable>"
+
+    # --- callback firing helpers -------------------------------------
 
     def _fire_tick(self):
         cb = self._tick_callback
@@ -489,115 +512,324 @@ class ClaudeCLIProvider(LLMProvider):
         except Exception as e:
             log.warning(f"ClaudeCLI: tick callback raised: {e}")
 
-    def _fire_progress(self, name, tool_input):
-        cb = self._progress_callback
-        if cb is None:
-            return
-        try:
-            cb(name, tool_input)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: progress_callback raised on {name!r}: {e}")
+    # --- briefing -----------------------------------------------------
 
-    def _fire_denial(self, name):
-        cb = self._denial_callback
-        if cb is None:
-            return
-        try:
-            cb(name)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: denial_callback raised on {name!r}: {e}")
+    def _send_briefing(self):
+        """Send the operator briefing (turn 0), consume its reply, and
+        capture the transcript path.
 
-    def _fire_connection(self, event):
-        cb = self._connection_callback
-        if cb is None:
-            return
-        try:
-            cb(event)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: connection_callback raised on {event!r}: {e}")
+        The briefing tells inner-claude it's in a live meeting and to
+        narrate its tool calls — see _BRIEFING and the module docstring.
+        Whatever Claude says back is consumed here and never reaches
+        meeting chat: the first *real* turn is what the room sees.
 
-    # --- event-loop helpers -------------------------------------------
-
-    def _dispatch_assistant_blocks(self, payload, *, accumulate_text):
-        """Walk an assistant event's content blocks. Returns (text_chunks, saw_tool_use).
-
-        text_chunks is empty when streaming (stream_event handles partial
-        deltas; assistant events are terminal echo). The non-streaming path
-        passes accumulate_text=True to opt into reconstruction from blocks.
-        Fires progress_callback per tool_use block.
+        Turn 0's Stop payload carries `transcript_path` — captured here
+        so real turns can tail the transcript for real-time narration.
+        Best-effort — a briefing hiccup logs and proceeds; the real
+        turns will surface any genuine hook-side failure (and backfill
+        the transcript path from their own Stop payloads).
         """
-        text_chunks: list[str] = []
-        saw_tool_use = False
-        for block in (payload.get("message") or {}).get("content") or []:
-            btype = block.get("type")
-            if btype == "text" and accumulate_text:
-                text_chunks.append(block.get("text", ""))
-            elif btype == "tool_use":
-                saw_tool_use = True
-                self._fire_progress(
-                    block.get("name", ""), block.get("input") or {},
+        prev = self._count_replies()
+        try:
+            self._send_message(_BRIEFING)
+            reply = self._wait_for_next_reply(
+                prev, timeout=_BRIEFING_REPLY_TIMEOUT_SECONDS
+            )
+        except ClaudeCLIProtocolError as exc:
+            log.warning(f"ClaudeCLI: briefing failed ({exc}) — proceeding")
+            return
+        if reply is None:
+            log.warning(
+                "ClaudeCLI: briefing reply never landed — proceeding anyway "
+                "(operator-plugin hooks may not be installed)"
+            )
+            return
+        tp = self._extract_transcript_path(reply)
+        if tp:
+            self._transcript_path = tp
+        sid = self._extract_session_id(reply)
+        if sid and not self._captured_session_id:
+            self._captured_session_id = sid
+        log.info(
+            f"ClaudeCLI: briefing acknowledged; turn 0 consumed "
+            f"(transcript={'captured' if tp else 'MISSING'})"
+        )
+
+    # --- send + tail --------------------------------------------------
+
+    def _send_message(self, msg):
+        """Bracketed-paste wrap + CR. Universal input strategy from
+        spike_finalize.py T1.
+        """
+        if self._master_fd is None:
+            raise ClaudeCLIProtocolError(
+                "inner-claude is not running; pre_warm or complete() must spawn first"
+            )
+        payload = msg.encode("utf-8")
+        try:
+            os.write(self._master_fd, b"\x1b[200~")
+            time.sleep(_BRACKET_OPEN_DELAY)
+            os.write(self._master_fd, payload)
+            time.sleep(_BRACKET_BODY_DELAY)
+            os.write(self._master_fd, b"\x1b[201~")
+            time.sleep(_BRACKET_CLOSE_DELAY)
+            os.write(self._master_fd, b"\r")
+        except OSError as exc:
+            raise ClaudeCLIProtocolError(
+                f"PTY write failed: {exc}\nPTY tail:\n{self._pty_tail()}"
+            ) from exc
+
+    def _count_replies(self):
+        """Count completed reply rows in replies.jsonl. 0 if the file
+        doesn't exist yet — the plugin hooks may not have fired.
+        """
+        try:
+            with self._replies_path.open("rb") as f:
+                return sum(1 for _ in f)
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            return 0
+
+    def _read_reply_at(self, index):
+        """Read the JSON object at line `index` of replies.jsonl.
+
+        Returns None if the line is unreadable or doesn't parse — the
+        hook script may still be mid-flush, but our caller has already
+        confirmed line count grew, so it should be valid by now.
+        """
+        try:
+            with self._replies_path.open("r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i == index:
+                        return json.loads(line)
+        except (OSError, json.JSONDecodeError):
+            return None
+        return None
+
+    def _wait_for_next_reply(self, prev_count, timeout, on_poll=None):
+        """Tail replies.jsonl until count > prev_count or timeout.
+
+        Returns the parsed reply object (the Stop hook's payload), or
+        None on timeout. Fires the tick callback on every poll so
+        ChatRunner can drain its off-thread send queue. `on_poll`, if
+        given, is called once per poll iteration — _run_turn uses it to
+        tail the transcript for real-time narration; _send_briefing
+        passes nothing so turn 0's narration is not posted.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Clean exit on teardown: stop() sets _stopping then SIGTERMs
+            # the group. Catching the flag here returns quietly instead
+            # of letting the imminent proc death raise the alarming
+            # "inner-claude exited unexpectedly" crash dump for what is
+            # really an orderly shutdown.
+            if self._stopping:
+                return None
+            self._fire_tick()
+            if on_poll is not None:
+                on_poll()
+            if self._proc is not None and self._proc.poll() is not None:
+                raise ClaudeCLIProtocolError(
+                    f"inner-claude exited unexpectedly (rc={self._proc.returncode}).\n"
+                    f"PTY tail:\n{self._pty_tail()}"
                 )
-        return text_chunks, saw_tool_use
+            current = self._count_replies()
+            if current > prev_count:
+                reply = self._read_reply_at(prev_count)
+                if reply is not None:
+                    return reply
+            time.sleep(_REPLIES_POLL_SECONDS)
+        return None
+
+    # --- transcript tail (real-time narration) -----------------------
+
+    def _transcript_size(self):
+        """Current byte size of the transcript JSONL, or 0 if unknown.
+        Used as the per-turn tail start offset, captured before the send.
+        """
+        if self._transcript_path is None:
+            return 0
+        try:
+            return self._transcript_path.stat().st_size
+        except OSError:
+            return 0
+
+    def _read_transcript_lines(self, offset, buf):
+        """Read new complete JSONL events from the transcript past `offset`.
+
+        Returns (new_offset, leftover_buf, [parsed_events]). Tolerates a
+        missing file and a partial trailing line (held in buf for the
+        next call) — same seek-and-buffer discipline replies tailing uses.
+        """
+        path = self._transcript_path
+        if path is None:
+            return offset, buf, []
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return offset, buf, []
+        if size <= offset:
+            return offset, buf, []
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            return offset, buf, []
+        offset += len(chunk)
+        buf += chunk
+        parts = buf.split(b"\n")
+        buf = parts.pop()
+        events = []
+        for line in parts:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        return offset, buf, events
 
     @staticmethod
-    def _user_event_carries_tool_result(payload) -> bool:
-        """True if a `user` event carries any tool_result block."""
-        for block in (payload.get("message") or {}).get("content") or []:
-            if block.get("type") == "tool_result":
-                return True
+    def _assistant_texts(events):
+        """Extract assistant text blocks from transcript events, in order.
+
+        Transcript event shape: {"type": "assistant", "message":
+        {"content": [{"type": "text", "text": ...}, {"type": "tool_use",
+        ...}]}}. tool_use blocks and non-assistant events are skipped;
+        `content` is also tolerated as a bare string. Returns the list of
+        non-empty text strings.
+        """
+        texts = []
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "assistant":
+                continue
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                blocks = [{"type": "text", "text": content}]
+            elif isinstance(content, list):
+                blocks = content
+            else:
+                continue
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text")
+                    if isinstance(t, str) and t.strip():
+                        texts.append(t)
+        return texts
+
+    @staticmethod
+    def _has_foreign_hook_feedback(events):
+        """True if a user-role transcript event carries the literal
+        'Stop hook feedback:' marker — a foreign Stop hook ran
+        decision=block and injected a redirect this turn (DECISION.md
+        section I: observable, not preventable).
+        """
+        MARKER = "Stop hook feedback:"
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "user":
+                continue
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                if MARKER in content:
+                    return True
+            elif isinstance(content, list):
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                        and MARKER in block["text"]
+                    ):
+                        return True
         return False
 
-    def _check_user_event_for_denials(self, payload):
-        """Inspect a `user` event's tool_result blocks for permission denials.
+    @staticmethod
+    def _extract_assistant_text(reply):
+        """Pull `last_assistant_message` from a Stop hook payload.
 
-        Fires denial_callback once per denied tool_use_id. The signature
-        match is intentionally permissive — Claude Code formats permission
-        errors as plain text inside the tool_result content, varying by
-        tool. We match on substrings that consistently appear ("permission
-        denied", "not allowed", "not granted", "blocked by permissions").
+        Hook payload shape (from spike_finalize bench scripts):
+            {"ts": <float>, "kind": "stop", "input": {
+                "hook_event_name": "Stop",
+                "last_assistant_message": "<final text>",
+                "session_id": "<id>",
+                "transcript_path": "<path>",
+                ...
+            }}
+
+        The wrapping `{ts, kind, input: ...}` shape is the operator-plugin
+        script's convention; Claude Code's actual hook payload is the
+        `input` sub-object. We tolerate both shapes so plugin-script
+        changes don't break the provider.
         """
-        for block in (payload.get("message") or {}).get("content") or []:
-            if block.get("type") != "tool_result":
-                continue
-            content = block.get("content")
-            if isinstance(content, list):
-                # Some Claude Code tool_result payloads ship an array of
-                # text blocks; flatten for matching.
-                content = " ".join(
-                    str(c.get("text", c)) if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            text = (content or "").lower() if isinstance(content, str) else ""
-            if not text:
-                continue
-            denial_signals = (
-                "permission denied",
-                "not allowed",
-                "not granted",
-                "not permitted",
-                "blocked by permissions",
-                "requires approval",
-            )
-            if any(sig in text for sig in denial_signals):
-                # tool name isn't on the tool_result block itself —
-                # it's on the corresponding tool_use we already saw.
-                # Pass the tool_use_id so ChatRunner can correlate if
-                # it kept that mapping; falls back to "<tool>" when
-                # ChatRunner doesn't track ids.
-                tool_id = block.get("tool_use_id") or "<tool>"
-                self._fire_denial(tool_id)
+        if not isinstance(reply, dict):
+            return None
+        inner = reply.get("input") if isinstance(reply.get("input"), dict) else reply
+        text = inner.get("last_assistant_message")
+        if isinstance(text, str):
+            return text
+        return None
+
+    @staticmethod
+    def _extract_session_id(reply):
+        if not isinstance(reply, dict):
+            return None
+        inner = reply.get("input") if isinstance(reply.get("input"), dict) else reply
+        sid = inner.get("session_id")
+        return sid if isinstance(sid, str) else None
+
+    @staticmethod
+    def _extract_transcript_path(reply):
+        """Pull `transcript_path` from a Stop hook payload, as a Path."""
+        if not isinstance(reply, dict):
+            return None
+        inner = reply.get("input") if isinstance(reply.get("input"), dict) else reply
+        tp = inner.get("transcript_path")
+        return Path(tp) if isinstance(tp, str) and tp else None
 
     # --- LLMProvider interface ----------------------------------------
 
     def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
-        """Spawn one shellout, send the latest user message, return the reply.
+        """Send the latest user turn, wait for Stop hook, return reply.
 
-        Args ignored: system, model, max_tokens, tools — inner-claude
-        owns its own system prompt + tool loop natively. The neutral
-        `messages` list arrives with the meeting chat tail; we send only
-        the last entry (the new user turn) since claude has the prior
-        history in its on-disk session store via `--resume`.
+        Ignored args (system / model / max_tokens / tools): inner-claude
+        owns its own system prompt, model selection, and tool loop
+        natively. Only the latest user turn is forwarded — claude has
+        its own conversation memory.
         """
+        return self._run_turn(messages, on_paragraph=None)
+
+    def complete_streaming(
+        self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
+        retry_rate_limits=True,
+    ):
+        """Same as complete(), but posts assistant text as it lands.
+
+        _run_turn tails the Claude Code transcript JSONL during the turn
+        and calls on_paragraph for each assistant text block the moment
+        it appears — so Claude's self-narration ("let me grab that
+        file") reaches chat in real time, not batched at end-of-turn.
+        This restores the streaming behaviour the early PTY pivot lost,
+        without screen-scraping the TUI (the transcript is structured
+        JSONL Claude Code writes itself).
+        """
+        if on_paragraph is None:
+            return self.complete(system, messages, model, max_tokens, tools=tools)
+        return self._run_turn(messages, on_paragraph=on_paragraph)
+
+    def warmup(self, model):
+        """No-op. pre_warm() is the meaningful warmup for this provider."""
+        return None
+
+    def _run_turn(self, messages, on_paragraph):
         if self._stopping:
             raise ClaudeCLIProtocolError("provider is stopping")
         if not messages:
@@ -605,353 +837,143 @@ class ClaudeCLIProvider(LLMProvider):
         last = messages[-1]
         if last.get("role") != "user":
             raise ValueError(
-                f"claude_cli expects the last message to be a user turn; got role={last.get('role')!r}"
+                f"claude_cli expects the last message to be a user turn; "
+                f"got role={last.get('role')!r}"
             )
-        new_user_text = last.get("content") or ""
+        user_text = last.get("content") or ""
 
-        try:
-            return self._run_one_turn(new_user_text, on_paragraph=None)
-        except ClaudeCLIProtocolError as exc:
-            if self._stopping:
-                log.info("ClaudeCLI: turn aborted during shutdown — propagating")
-                raise
-            log.warning(f"ClaudeCLI: turn aborted ({exc}); attempting one retry with --resume")
-            self._fire_connection("dropped")
-            self._fire_connection("reconnecting")
-            try:
-                return self._run_one_turn(new_user_text, on_paragraph=None)
-            except ClaudeCLIProtocolError as exc2:
-                self._fire_connection("failed")
-                raise exc2
-
-    def complete_streaming(
-        self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
-        retry_rate_limits=True,
-    ):
-        """Same contract as complete(), but flushes paragraphs as they arrive.
-
-        on_paragraph(text: str) is called for each completed paragraph
-        (split on \\n\\n, decoration-only fragments dropped) plus the
-        trailing partial at end-of-stream. Returns a ProviderResponse
-        with the full accumulated text in `text`.
-        """
-        if self._stopping:
-            raise ClaudeCLIProtocolError("provider is stopping")
-        if on_paragraph is None:
-            return self.complete(system, messages, model, max_tokens, tools=tools)
-
-        if not messages:
-            raise ValueError("complete_streaming() requires at least one message")
-        last = messages[-1]
-        if last.get("role") != "user":
-            raise ValueError(
-                f"claude_cli expects the last message to be a user turn; got role={last.get('role')!r}"
-            )
-        new_user_text = last.get("content") or ""
-
-        try:
-            result = self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
-            self._schedule_pre_warm()
-            return result
-        except ClaudeCLIProtocolError as exc:
-            if self._stopping:
-                log.info("ClaudeCLI: streaming turn aborted during shutdown — propagating")
-                raise
-            log.warning(
-                f"ClaudeCLI: streaming turn aborted ({exc}); attempting one retry with --resume. "
-                "Note: any paragraphs already flushed to on_paragraph are visible to the user; "
-                "the retry may emit overlapping content."
-            )
-            self._fire_connection("dropped")
-            self._fire_connection("reconnecting")
-            try:
-                result = self._run_one_turn(new_user_text, on_paragraph=on_paragraph)
-                self._schedule_pre_warm()
-                return result
-            except ClaudeCLIProtocolError as exc2:
-                self._fire_connection("failed")
-                raise exc2
-
-    def _schedule_pre_warm(self):
-        """Fire pre_warm on a daemon thread so the caller doesn't block
-        for the ~2.6s claude CLI startup. The next turn will claim the
-        warm slot if it arrives after pre_warm finishes; otherwise it
-        cold-spawns and pre_warm slots a fresh one for the turn after.
-        """
-        if self._stopping:
-            return
-        threading.Thread(target=self.pre_warm, daemon=True).start()
-
-    def warmup(self, model):
-        """No-op for the per-@mention shape.
-
-        With the long-lived subprocess gone, there's nothing to pre-
-        spawn. Kept on the LLMProvider ABC for compatibility — the ABC
-        contract is "fire a 1-token request to warm the connection
-        pool", but per-@mention shellouts have no persistent
-        connection to warm.
-        """
-        return None
-
-    # --- the actual turn ----------------------------------------------
-
-    def _run_one_turn(self, user_text, on_paragraph):
-        """Spawn one shellout, write the user turn, drain to result, exit.
-
-        Used by both complete() and complete_streaming(). When
-        on_paragraph is None, runs in non-streaming mode (assistant text
-        accumulated from terminal events). When provided, runs in
-        streaming mode (text from stream_event content_block_delta
-        payloads, with per-paragraph flush).
-
-        Claims the warm-slot subprocess (slotted by `pre_warm`) if one
-        is alive; otherwise spawns fresh. The warm subprocess has done
-        its Node boot + MCP attach + --resume JSONL parse during the
-        parked window but emits no events until it reads stdin — so
-        the drain methods see `system_init` in-turn either way. The
-        win materializes as a much smaller cli_init measurement on
-        warm turns because the work happened in parallel with idle.
-
-        Captures wall-time bookends (t_run_start, t_spawn_done, warm)
-        so the drain methods can split ttft into per-stage costs in
-        their TIMING log lines (spawn / cli_init / api_ttft). The
-        `warm=1|0` flag groups warm and cold turns for comparison.
-        """
-        t_run_start = time.monotonic()
-        proc = None
-        out_q = None
-        stderr_buf = None
-        was_warm = False
-        with self._warm_lock:
-            if self._warm_proc is not None and self._warm_proc.poll() is None:
-                proc = self._warm_proc
-                out_q = self._warm_out_q
-                stderr_buf = self._warm_stderr_buf
-                self._warm_proc = None
-                self._warm_out_q = None
-                self._warm_stderr_buf = None
-                was_warm = True
-            elif self._warm_proc is not None:
-                # Slot held a dead subprocess (idle timeout, crash, etc.).
-                # Clean it up and fall through to cold spawn.
-                self._terminate(self._warm_proc)
-                self._warm_proc = None
-                self._warm_out_q = None
-                self._warm_stderr_buf = None
-
-        if not was_warm:
-            proc, out_q, stderr_buf = self._spawn_one()
-        t_spawn_done = time.monotonic()
-        try:
-            envelope = {
-                "type": "user",
-                "message": {"role": "user", "content": user_text},
-            }
-            try:
-                proc.stdin.write(json.dumps(envelope) + "\n")
-                proc.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                stderr_tail = "".join(list(stderr_buf)[-20:]) if stderr_buf else "(empty)"
-                raise ClaudeCLIProtocolError(
-                    f"claude subprocess stdin closed unexpectedly: {exc}\nstderr tail:\n{stderr_tail}"
-                ) from exc
-
-            timing = {
-                "t_run_start": t_run_start,
-                "t_spawn_done": t_spawn_done,
-                "warm": was_warm,
-            }
-            if on_paragraph is None:
-                return self._drain_non_streaming(out_q, stderr_buf, timing)
-            return self._drain_streaming(out_q, stderr_buf, on_paragraph, timing)
-        finally:
-            self._terminate(proc)
-
-    def _drain_non_streaming(self, out_q, stderr_buf, timing):
-        """Drain the stream until the `result` event. Return ProviderResponse.
-
-        No turn timeout: trust the user to /operator hangup if a tool
-        chain runs long. Heartbeat watchdog removed in S211 (was
-        harness-shaped — operator-imposed silence threshold that killed
-        the subprocess from outside).
-        """
-        t_run_start = timing["t_run_start"]
-        t_spawn_done = timing["t_spawn_done"]
-        t_init: float | None = None
-        text_parts: list[str] = []
-        result_evt = None
-
-        while True:
-            self._fire_tick()
-            try:
-                kind, payload = out_q.get(timeout=0.5)
-            except Empty:
-                continue
-            if kind == "eof":
-                stderr_tail = "".join(list(stderr_buf)[-20:]) if stderr_buf else "(empty)"
-                raise ClaudeCLIProtocolError(
-                    f"claude subprocess exited mid-turn. stderr tail:\n{stderr_tail}"
+        # Lazy spawn / respawn: pre_warm should already have run from
+        # __main__, but a slow join or a missed pre_warm shouldn't break
+        # the turn. If a previous spawn died (inner-claude crashed, the
+        # PTY hit EOF), tear its threads + master_fd down before
+        # respawning — otherwise the dead spawn's PTY-drain and tail
+        # threads leak and keep running against the same files.
+        if self._proc is not None and self._proc.poll() is not None:
+            log.info("ClaudeCLI: inner-claude died — tearing down before respawn")
+            self._terminate_inner()
+        if self._proc is None:
+            self.pre_warm()
+            if self._proc is None:
+                detail = (
+                    f": {self._spawn_exc}" if self._spawn_exc else ""
                 )
-            if kind != "event":
-                continue
-            etype = payload.get("type")
-            if etype == "system" and payload.get("subtype") == "init":
-                if t_init is None:
-                    t_init = time.monotonic()
-                self._validate_init_event(payload)
-            elif etype == "assistant":
-                chunks, _ = self._dispatch_assistant_blocks(payload, accumulate_text=True)
-                text_parts.extend(chunks)
-            elif etype == "user":
-                if self._user_event_carries_tool_result(payload):
-                    self._check_user_event_for_denials(payload)
-            elif etype == "result":
-                result_evt = payload
-                break
+                raise ClaudeCLIProtocolError(
+                    f"inner-claude failed to spawn{detail}"
+                )
 
-        elapsed = time.monotonic() - t_run_start
-        subtype = result_evt.get("subtype") if result_evt else None
+        t_start = time.monotonic()
+        prev_count = self._count_replies()
+
+        # Transcript tail state — captured BEFORE the send so the user
+        # message and every assistant block this turn falls past the
+        # offset. Closure mutables because _wait_for_next_reply drives
+        # the poll loop and calls _poll_transcript back in. `posted`
+        # accumulates the text blocks already surfaced this turn.
+        tx_offset = [self._transcript_size()]
+        tx_buf = [b""]
+        posted: list[str] = []
+        last_block_ts = [None]   # monotonic time operator last saw an assistant block
+        foreign_hook = [False]   # a foreign Stop hook redirected this turn
+
+        def _poll_transcript():
+            tx_offset[0], tx_buf[0], events = self._read_transcript_lines(
+                tx_offset[0], tx_buf[0]
+            )
+            for block in self._assistant_texts(events):
+                posted.append(block)
+                last_block_ts[0] = time.monotonic()
+                if on_paragraph is not None:
+                    flush_paragraphs(block, on_paragraph, force_final=True)
+            if not foreign_hook[0] and self._has_foreign_hook_feedback(events):
+                foreign_hook[0] = True
+
+        self._send_message(user_text)
+
+        # Generous per-turn timeout — claude tool loops can run minutes
+        # legitimately. The user cancels via /operator:hangup if a tool
+        # chain wedges; no operator-imposed deadline.
+        reply = self._wait_for_next_reply(
+            prev_count, timeout=600.0, on_poll=_poll_transcript
+        )
+        t_reply = time.monotonic()
+        elapsed = t_reply - t_start
+        # Snapshot before the final drain — last_block_ts keeps advancing
+        # if the drain picks up a late block, but for the Stop-lag signal
+        # we want "last block operator had seen when Stop fired".
+        last_block_at_stop = last_block_ts[0]
+
+        if reply is None:
+            if self._stopping:
+                # _wait_for_next_reply bailed on the teardown flag, not a
+                # timeout — a clean "winding down", not a crash.
+                raise ClaudeCLIProtocolError("provider is stopping")
+            raise ClaudeCLIProtocolError(
+                f"timed out after {elapsed:.0f}s waiting for Stop hook reply.\n"
+                "Likely cause: operator-plugin's hooks are not installed (no "
+                "replies.jsonl was written). Verify with `ls "
+                f"{self._session_dir}`.\nPTY tail:\n{self._pty_tail()}"
+            )
+
+        # The final assistant block may land in the transcript a beat
+        # after the Stop hook fires — settle, then drain once more.
+        time.sleep(_TRANSCRIPT_FINAL_DRAIN_SETTLE)
+        _poll_transcript()
+
+        sid = self._extract_session_id(reply)
+        if sid and not self._captured_session_id:
+            self._captured_session_id = sid
+        # Backfill the transcript path if the briefing missed it — the
+        # next turn then gets real-time narration.
+        if self._transcript_path is None:
+            tp = self._extract_transcript_path(reply)
+            if tp:
+                self._transcript_path = tp
+
+        # Backstop: if the Stop payload's last_assistant_message never
+        # came through the transcript tail (no transcript path captured,
+        # or a write race), post it now so the turn isn't silent.
+        stop_text = self._extract_assistant_text(reply)
+        if stop_text and stop_text not in posted:
+            posted.append(stop_text)
+            if on_paragraph is not None:
+                flush_paragraphs(stop_text, on_paragraph, force_final=True)
+
+        text = "\n\n".join(posted) if posted else stop_text
+
+        # Section I — foreign-hook observability. A foreign Stop hook
+        # that ran decision=block injects "Stop hook feedback:" as a
+        # user turn; surface that to the room as a notice. We only know
+        # the hook *interrupted* the turn — not whether claude acted on
+        # it (claude's prompt-injection defense ignores adversarial
+        # reasons; a benign-looking project hook it may well follow), so
+        # the notice claims only the interruption. The Stop-lag gap
+        # (final visible block → Stop row) is a noisier proxy — log
+        # only, not chat-worthy.
+        notices: list[str] = []
+        if foreign_hook[0]:
+            log.warning("ClaudeCLI: foreign Stop-hook feedback detected this turn")
+            notices.append(
+                "heads up — a hook outside this meeting interrupted my last turn"
+            )
+        if last_block_at_stop is not None:
+            stop_gap = t_reply - last_block_at_stop
+            if stop_gap > _FOREIGN_HOOK_DELAY_WARN_SECONDS:
+                log.warning(
+                    f"ClaudeCLI: {stop_gap:.1f}s gap between final assistant "
+                    f"block and Stop hook — foreign hooks may have run"
+                )
+
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
-            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, None, warm=timing.get('warm', False))} "
-            f"{_format_cache_stats(result_evt)} "
-            f"result.subtype={subtype} text_chars={sum(len(p) for p in text_parts)}"
+            f"reply_blocks={len(posted)} "
+            f"reply_chars={len(text) if text else 0} "
+            f"foreign_hook={foreign_hook[0]} "
+            f"session={sid or '?'}"
         )
-
-        if subtype == "error_during_execution":
-            err_detail = result_evt.get("error") or "; ".join(result_evt.get("errors") or [])
-            raise ClaudeCLIProtocolError(
-                f"claude reported error_during_execution: {err_detail}"
-            )
 
         return ProviderResponse(
-            text="".join(text_parts) or None,
+            text=text or None,
             tool_calls=[],
             stop_reason="end",
-        )
-
-    def _drain_streaming(self, out_q, stderr_buf, on_paragraph, timing):
-        """Drain the stream, flushing paragraphs as they arrive.
-
-        Top-level assistant text arrives as `stream_event` events of shape:
-            {"type": "stream_event",
-             "event": {"type": "content_block_delta",
-                       "index": N,
-                       "delta": {"type": "text_delta", "text": "..."}},
-             "parent_tool_use_id": null | <id>}
-
-        We only flush text where `parent_tool_use_id` is null — sub-
-        agent deltas (parent_tool_use_id non-null) are not the bot's
-        outgoing reply.
-        """
-        t_run_start = timing["t_run_start"]
-        t_spawn_done = timing["t_spawn_done"]
-        t_init: float | None = None
-        t_first_token: float | None = None
-        t_first_flush: float | None = None
-        buffer = ""
-        full_text_parts: list[str] = []
-        result_evt = None
-
-        while True:
-            self._fire_tick()
-            try:
-                kind, payload = out_q.get(timeout=0.5)
-            except Empty:
-                continue
-            if kind == "eof":
-                stderr_tail = "".join(list(stderr_buf)[-20:]) if stderr_buf else "(empty)"
-                raise ClaudeCLIProtocolError(
-                    f"claude subprocess exited mid-turn. stderr tail:\n{stderr_tail}"
-                )
-            if kind != "event":
-                continue
-            etype = payload.get("type")
-            if etype == "system" and payload.get("subtype") == "init":
-                if t_init is None:
-                    t_init = time.monotonic()
-                self._validate_init_event(payload)
-                continue
-            if etype == "stream_event":
-                if payload.get("parent_tool_use_id"):
-                    continue
-                inner = payload.get("event") or {}
-                if inner.get("type") != "content_block_delta":
-                    continue
-                delta = inner.get("delta") or {}
-                if delta.get("type") != "text_delta":
-                    continue
-                text = delta.get("text") or ""
-                if not text:
-                    continue
-                if t_first_token is None:
-                    t_first_token = time.monotonic()
-                full_text_parts.append(text)
-                buffer += text
-                if "\n\n" in buffer:
-                    if t_first_flush is None:
-                        t_first_flush = time.monotonic()
-                    buffer = flush_paragraphs(buffer, on_paragraph)
-                continue
-            if etype == "assistant":
-                # Sub-agent assistants arrive here with parent_tool_use_id
-                # set; they're inner Task-tool output, not the bot's
-                # reply. Skip.
-                if payload.get("parent_tool_use_id"):
-                    continue
-                # Streaming reconstructs text from stream_event deltas
-                # — we don't accumulate from assistant blocks here, just
-                # dispatch tool_use to progress_callback.
-                self._dispatch_assistant_blocks(payload, accumulate_text=False)
-                # An `assistant` event finalizes one sub-message of the
-                # turn. When the model calls a tool, the next text comes
-                # in a NEW assistant message (indices reset to 0).
-                # Without flushing here, "Hey — writing that now." and
-                # "Done — ..." get concatenated as one paragraph.
-                if buffer.strip():
-                    if t_first_flush is None:
-                        t_first_flush = time.monotonic()
-                    flush_paragraphs(buffer, on_paragraph, force_final=True)
-                    full_text_parts.append("\n\n")
-                    buffer = ""
-                continue
-            if etype == "user":
-                if self._user_event_carries_tool_result(payload):
-                    self._check_user_event_for_denials(payload)
-                continue
-            if etype == "result":
-                result_evt = payload
-                break
-
-        if buffer.strip():
-            flush_paragraphs(buffer, on_paragraph, force_final=True)
-
-        elapsed = time.monotonic() - t_run_start
-        ttft = (t_first_token - t_run_start) if t_first_token else None
-        first_flush = (t_first_flush - t_run_start) if t_first_flush else None
-        ttft_str = f"{ttft:.1f}s" if ttft is not None else "n/a"
-        flush_str = f"{first_flush:.1f}s" if first_flush is not None else "n/a"
-        log.info(
-            f"TIMING claude_cli_turn={elapsed:.1f}s ttft={ttft_str} first_flush={flush_str} streamed=1 "
-            f"{_format_stage_breakdown(t_run_start, t_spawn_done, t_init, t_first_token, warm=timing.get('warm', False))} "
-            f"{_format_cache_stats(result_evt)} "
-            f"result.subtype={result_evt.get('subtype') if result_evt else 'n/a'}"
-        )
-
-        if result_evt is not None and result_evt.get("subtype") == "error_during_execution":
-            # claude emits the failure text in either `error` (singular) or
-            # `errors` (plural array) depending on the failure mode. Read
-            # both so the surfaced exception is actually diagnostic — e.g.
-            # "No conversation found with session ID: …" lands in `errors`.
-            err_detail = result_evt.get("error") or "; ".join(result_evt.get("errors") or [])
-            raise ClaudeCLIProtocolError(
-                f"claude reported error_during_execution: {err_detail}"
-            )
-
-        final_text = "".join(full_text_parts).strip()
-
-        return ProviderResponse(
-            text=final_text or None,
-            tool_calls=[],
-            stop_reason="end",
+            notices=notices,
         )

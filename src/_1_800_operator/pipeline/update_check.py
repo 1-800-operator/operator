@@ -3,9 +3,10 @@ Best-effort version-stale check for the operator plugin.
 
 Compares the locally-cached marketplace metadata to the published
 marketplace.json on GitHub. If a newer plugin version exists, returns
-a one-line hint string that ChatRunner posts in operator-voice after
-join. Silent failure on any error (offline, parse mismatch, missing
-files) — this is a courtesy, not a load-bearing check.
+a one-line hint string that ChatRunner logs after join (log-only — a
+plugin-version notice is noise for meeting participants). Silent
+failure on any error (offline, parse mismatch, missing files) — this
+is a courtesy, not a load-bearing check.
 
 The hint points the user at `/operator:update`, the plugin-side skill
 that runs the two `claude plugin` commands needed to refresh the local

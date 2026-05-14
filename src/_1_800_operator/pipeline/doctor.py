@@ -89,11 +89,16 @@ def _check_claude() -> CheckResult:
     status, detail = _probe_claude_code(check_auth=True)
     if status == "ok":
         return CheckResult("claude CLI", True, "installed and logged in", "")
+    fix = (
+        "update Claude Code — run /plugin, or reinstall from https://claude.ai/code"
+        if status == "version_too_old"
+        else "claude auth login"
+    )
     return CheckResult(
         name="claude CLI",
         ok=False,
         detail=detail,
-        fix="claude auth login",
+        fix=fix,
     )
 
 

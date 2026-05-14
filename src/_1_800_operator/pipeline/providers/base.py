@@ -70,10 +70,16 @@ class ProviderResponse:
       "tool_use"  — model wants to call one or more tools
       "length"    — hit max_tokens
       "other"     — anything else (content filter, etc.)
+
+    notices: operator-observed events from the turn that the caller
+      should surface to chat after the reply — e.g. a foreign hook
+      redirecting the conversation. Optional; providers with nothing to
+      report leave it empty.
     """
     text: str | None
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str = "end"
+    notices: list[str] = field(default_factory=list)
 
 
 class LLMProvider:
