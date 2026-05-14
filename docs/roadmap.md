@@ -1,8 +1,42 @@
 # Operator — Roadmap
 
-*Last updated: May 13, 2026 (session 225 — AEC bleed mitigation: spike + design decision; no production code changes).
+*Last updated: May 13, 2026 (session 226 — 14.22 architecture pivot decided in response to Anthropic's June 15 `claude -p` billing change; full spike + DECISION.md committed; refactor not yet started).
 
-**Session 225 (May 13, 2026) — AEC bleed mitigation spike.** S224 left open question #1 ("`[M]` bleed: many user-attributed captions are clearly echoes of remote participants playing through room speakers"). Spent this session building an offline AEC spike to determine the right algorithm + parameters before touching production code. No production commits this session.
+**Session 226 (May 13, 2026) — Anthropic billing pivot.** Anthropic announced this morning that starting **2026-06-15**, `claude -p` and Agent SDK usage no longer count toward subscription limits — they draw from a small per-plan Agent SDK credit ($20 Pro / $100 Max 5x / $200 Max 20x), then pay-as-you-go API rates. Operator's entire architecture spawns `claude -p --resume <id>` per meeting; under the new rules, a Max-20x user running operator on daily meetings would drain the credit in days. The "free on your existing subscription" economic premise dies for `-p`.
+
+**Spent this session validating the pivot and committing the plan, not refactoring production code.** Seven spikes in `debug/14_22_pty_spike/`, full reasoning in `debug/14_22_pty_spike/DECISION.md`. Single commit `8816cef` (S226: 14.22 pivot spike — claude -p → interactive claude via PTY+hooks).
+
+**Architecture decided:**
+```
+INPUT:  bracketed-paste wrap + \r into PTY  →  arrives as a normal user turn
+OUTPUT: hooks (operator-plugin ships hooks/hooks.json; Stop, PreToolUse,
+                PostToolUseFailure, PermissionDenied, StopFailure, SessionStart)
+PERMS:  claude --dangerously-skip-permissions  →  no permission prompts
+SPAWN:  cwd = user's project dir (so --resume finds the session JSONL)
+```
+
+**Key spike findings:**
+1. **Stop-block as input mechanism is dead** — Claude Code prepends "Stop hook feedback:\n" to any `reason` returned by a Stop-block hook, and the model's prompt-injection defense fires on it, refusing every message as suspected injection. Even a counter-instruction at session start doesn't override the defense. Filtering the prefix at the API layer would deliberately bypass an Anthropic safety feature → strategic non-starter.
+2. **Bracketed-paste wrap is the universal input strategy** — `\x1b[200~ <msg> \x1b[201~\r`. Survives quotes, backslashes, multi-line, emoji, code fences (SHA-256 round-trip verified). Char-by-char typing at any speed silently dropped chars on long messages.
+3. **Hooks deliver everything we need for output** — `Stop.last_assistant_message` gives the reply text directly (no transcript parsing, no screen scraping). `PreToolUse` gives `{tool_name, tool_input}` for the progress callback. `PostToolUseFailure` + `PermissionDenied` give the denial callback. `StopFailure` gives connection/API error events.
+4. **`claude --resume <id>` works interactively, but is cwd-scoped** — session JSONL lookup is keyed by project-dir-derived path. Cross-cwd resume returns "No conversation found." Operator must spawn inner-claude with `cwd=<user-project-dir>`. No `--working-directory` flag exists (only `--add-dir` which widens tool access).
+5. **`--dangerously-skip-permissions` works with interactive claude** — confirmed via spike. Tool failures (missing file etc.) still surface via `PostToolUseFailure`.
+
+**All four user flows preserved:**
+- `/operator:slip <url>` from Claude Code (desktop or terminal) — plugin entry point unchanged
+- Pre-loaded context survives via `--resume` of the user's main session
+- Post-meeting continuation — shared session_id means the user's main Claude Code session has every meeting interaction in context when they return
+- Transcript MCP — unchanged, MCPs are user-level config inherited by any claude session
+
+**Escape hatch:** `/operator:slip <url> --fresh` will spawn inner-claude with no `--resume` and `cwd=~/.operator/sessions/<id>/` — clean room for when a foreign hook is suspected of misbehaving or when the user wants a meeting bot without inherited context.
+
+**Open question (untestable until June 15):** does Anthropic classify PTY-driven interactive claude as subscription usage (planned) or reclassify as programmatic (bad)? Watch Claude Code release notes between now and June 15. If they reclassify, BYO-API-key remains as a ~10-line escape hatch (documented in DECISION.md step M).
+
+**Codex preparation:** revisited the second-provider question (previously resolved NO per `project_second_provider_resolved_no.md`). Decision: keep the existing `LLMProvider` abstraction clean during the refactor (no Claude-isms leaking into `pipeline/llm.py`); preserve `-p` architecture in git history (this commit), not in-tree. Codex's integration when we add it is a separate `CodexCLIProvider` against the same contract — independent of how Claude's provider is implemented underneath.
+
+**Production refactor plan committed to `debug/14_22_pty_spike/DECISION.md`** with numbered sections A–M for the refactor steps and 20–25 for the integration test pass. Refactor estimate: 1-2 focused sessions for spawn + input + hooks plumbing + callback remap, 1 session for lifecycle + real-meeting integration testing.
+
+**Prior status: Session 225 (May 13, 2026) — AEC bleed mitigation spike.** S224 left open question #1 ("`[M]` bleed: many user-attributed captions are clearly echoes of remote participants playing through room speakers"). Spent this session building an offline AEC spike to determine the right algorithm + parameters before touching production code. No production commits this session.
 
 **Key findings, all empirical on a scripted bleed test (90s, built-in MacBook speakers, realistic volume):**
 1. **WebRTC AEC3 (via `tonarino/webrtc-audio-processing` Rust crate, features `bundled` + `experimental-aec3-config`) gives -30 dB bleed cancellation with -0.1 dB user-voice damage.** Double-talk gives -8 dB bleed with mostly-intact user voice. speexdsp was tested as a baseline and gave only -3 dB on the same data — not viable.
@@ -297,6 +331,8 @@ Muting the Meet mic stops the `M` stream within one observer tick (verified by s
 ---
 
 ## Phase 14.22: Plugin form factor + naked `claude -p` shellouts ← BLOCKS LAUNCH
+
+> **⚠️ S226 (2026-05-13): the `claude -p` spawn mechanism in this phase is being REPLACED.** Anthropic announced that starting 2026-06-15, `claude -p` no longer counts toward subscription limits and drains a small Agent SDK credit instead. Operator must pivot to interactive `claude` driven via PTY + hooks. Plugin form factor and shared-context-by-default invariants in this phase are PRESERVED; only the spawn-and-extract mechanism changes. Full plan in `debug/14_22_pty_spike/DECISION.md`. See the S226 status paragraph at the top of this roadmap for spike findings.
 
 *Strategic pivot, session 210 (2026-05-09/10). Driven by an external Claude-desktop research conversation about the policy + product shape of subscription-auth wrappers (the OpenClaw cutoff, Anthropic's Feb 2026 docs clarification, the "tolerated-not-permitted" line for naked CLI shellouts). The conversation concluded that any system-prompt injection or `--mcp-config` flag at `claude -p` spawn time carries harness identity and is structurally what got OpenClaw blocked. v1 must strip every such flag from the inner-claude spawn and rely instead on the naked `claude -p [--resume <id>]` shape.*
 

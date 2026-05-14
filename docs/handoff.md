@@ -1,56 +1,53 @@
-# Session 225 handoff (2026-05-13) — AEC bleed-mitigation spike complete; integration not yet started
+# Session 226 handoff (2026-05-13) — 14.22 architecture pivot validated; refactor not yet started
 
 ## What landed this session
 
-**No production commits.** Work was entirely in `debug/14_23_aec_spike/` (untracked). The session converted S224's open question #1 (`[M]` bleed unreliable) from "we don't know what to do" to "we have a working algorithm + concrete parameters."
+One commit on `main`: `8816cef` (S226: 14.22 pivot spike — claude -p → interactive claude via PTY+hooks). No production code changed; the commit ships seven spike scripts, the bench/ workdir with proof-of-concept hooks, captured byte streams as evidence, and the full architectural decision in `debug/14_22_pty_spike/DECISION.md`.
 
-### Spike artifacts (in `debug/14_23_aec_spike/`)
+Anthropic announced this morning (2026-05-13) that starting **2026-06-15**, `claude -p` and Agent SDK usage no longer count toward Claude subscription limits — they draw from a small per-plan Agent SDK credit ($20 Pro / $100 Max 5x / $200 Max 20x), then API rates. Operator's entire architecture spawns `claude -p --resume <id>` per meeting; the economic premise dies. The session was spent validating an alternative architecture and committing the plan.
 
-- `record_test_session.sh` + `record_continuous.py` — guided 90-second test recorder that walks the user through seven labeled segments (silent baseline / bleed-only / user-only / two double-talk types / quick alternation / bookend) and dumps continuous S+M WAVs.
-- Two real test recordings: archived v1 (full speaker volume) in `archive_v1_fullvol/`, live v2 (realistic volume) at `session_{S,M}.wav` + `session_log.txt`.
-- `aec3/` Rust binary using `tonarino/webrtc-audio-processing` 2.1.0 with `bundled` + `experimental-aec3-config` features. Binary at `aec3/target/release/aec3_spike`. CLI: `--mic <wav> --ref <wav> --out <wav>`.
-- `analyze_session.py` / `diagnose.py` / `aligned_rerun.py` / `run_aec3_v2.py` / `aec3_shift_sweep.py` — measurement scripts.
-- Listenable A/B output at `out_aec3/listen_aec3_shifted.wav` — user verified by ear that the cleaned audio matches the numbers.
+**Architecture decided:**
+```
+INPUT:  bracketed-paste wrap + \r into PTY  (\x1b[200~ <msg> \x1b[201~\r)
+OUTPUT: hooks (operator-plugin ships hooks/hooks.json — Stop, PreToolUse,
+                PostToolUseFailure, PermissionDenied, StopFailure, SessionStart)
+PERMS:  claude --dangerously-skip-permissions (unconditional)
+SPAWN:  cwd = user's project dir (so --resume finds the session JSONL)
+```
 
-### Empirical findings
+**Critical findings (all in DECISION.md):**
+1. **Stop-block as input is dead** — claude's prompt-injection defense refuses every hook-injected message; even a counter-instruction at session start doesn't override it. Filtering "Stop hook feedback:" at an API proxy bypasses an Anthropic safety feature (strategic non-starter).
+2. **Bracketed-paste wrap is universal** — survives quotes, backslashes, multi-line, emoji, code fences (SHA-256 verified byte-for-byte). Char-by-char typing silently drops chars on long messages.
+3. **Hooks deliver everything** — `Stop.last_assistant_message`, `PreToolUse{tool_name, tool_input}`, `PostToolUseFailure`, `PermissionDenied`, `StopFailure`. No screen scraping needed.
+4. **`claude --resume` is cwd-scoped** — must spawn inner-claude with `cwd=<user-project-dir>`. No `--working-directory` flag exists. Implication: user's project hooks fire inside meetings (same as today's `-p` behavior — not a regression).
 
-1. **WebRTC AEC3 + correct alignment gives -30 dB bleed cancellation, -0.1 dB user-voice damage, -8 dB double-talk reduction.** Default config; no tuning required.
-2. **speexdsp not viable** — only -17 dB max even on aligned data.
-3. **SCStream has a 63 ms anti-causal timing skew** (mic LEADS ref). This is the bug that made S224's coincidence-VAD bleed gate ineffective. Documented as new Hard Won Knowledge entry in `docs/agent-context.md`.
-4. **AEC3's causal delay-search window: 63-500 ms.** Over-shifting is safe within that range.
-5. **Production pick: 150 ms hardcoded pre-shift.** Saved as memory `project_aec_design_findings`.
+All four user flows preserved: `/operator:slip` plugin entry, pre-loaded context via `--resume`, post-meeting continuation via shared session_id, transcript MCP unchanged.
 
-### New memories saved
+## Next step
 
-- `feedback_no_rinky_dink_deps.md` — user rejected the small-but-clean DTLN-aec CoreML library mid-session ("rinky dink repo"). Don't propose load-bearing deps on bus-factor-of-one repos.
-- `project_aec_design_findings.md` — empirical findings + 150 ms shift + algorithm decision for the future integration session.
+**Start the production refactor following `debug/14_22_pty_spike/DECISION.md` sections A–M in order.**
 
-## Exact next step
+Section ordering is intentional: A (spawn) → B (spawn-ready handshake via SessionStart hook) → C (bracketed-paste send) → D (hook handlers + plugin layout) → E (state dir) → F (env-var contract `OPERATOR_SESSION_DIR`) → G–H (callback remap + reply assembly) → I (foreign-hook detector) → J (tear-down race fix) → K (Claude Code version floor) → L (plugin install validation). Each section in DECISION.md has the concrete change spelled out. Estimate: 1-2 focused sessions for A through H, 1 session for I-L plus integration tests (numbered 20–25 in DECISION.md).
 
-**Start integration with step 1 of the 7-step plan in `docs/roadmap.md`'s Current Status section.** Step 1 is contained (~1 hour, only touches `debug/14_23_aec_spike/aec3/src/main.rs`):
+The first concrete action: open `pipeline/providers/claude_cli_provider.py` and replace the `claude -p` spawn with the interactive PTY-driven spawn from section A. Per `feedback_surgical_changes`, ship one section at a time, test before moving on.
 
-> Extend the Rust binary from batch mode (one-WAV in, one-WAV out) to streaming mode: read framed PCM on stdin using the same `[1-byte tag][4-byte BE length][N bytes Float32 LE]` protocol the audio helper outputs, internally maintain a 150 ms M-frame delay buffer, output framed cleaned-M frames on stdout. Long-running process; clean shutdown on stdin EOF.
+## Open follow-ups
 
-Other steps in order: `pipeline/aec_cleaner.py` (subprocess manager + delay buffer + frame pairing); wire into `connectors/attach_adapter.py`; delete the dead `far_end` coupling from `pipeline/audio.py`; add build/install for the Rust binary; tests; live validation. Each step is small enough to commit independently.
-
-## Open follow-ups (carried)
-
-- **Claude reply-delivery feedback loop** (carried from S224) — when `send_chat` fails, the claude subprocess gets no signal. Not addressed this session.
-- **Post-MVP: gate `operator slip` behind the plugin** (carried from S224).
+- **Anthropic's classification past June 15** — untestable until then; the only existential unknown. Watch Claude Code release notes and `claude --help` for new flags/env vars that signal Anthropic is patterning against PTY-driven use. If they reclassify, BYO-API-key (DECISION.md section M) becomes the only option.
+- **Codex addition** — revisited and decided NOT to build now (was previously resolved NO per `project_second_provider_resolved_no.md`, now back on the table as eventual). Preparation: keep `LLMProvider` abstraction clean during the refactor — no Claude-specific concepts (hooks, PTY, bracketed paste, "Stop hook feedback:") should leak into `pipeline/llm.py` or `pipeline/chat_runner.py`. Document the contract in a docstring. Optionally add a stub `CodexCLIProvider(LLMProvider)` that raises `NotImplementedError` as a compile-time guard.
+- **Foreign-hook safety net** — operator's `doctor` should survey `~/.claude/settings.json` for slow/blocking hooks and warn the user before relying on operator for time-sensitive meetings. Detector pattern in DECISION.md section I.
+- **From S225 (still open):** AEC bleed mitigation integration — `debug/14_23_aec_spike/` has the design + parameters locked; 7-step integration plan documented in roadmap. Not blocked by the 14.22 pivot; can land in parallel.
 
 ## State of the repo
 
-- `main` is at `f1add9d` (last S224 commit), unchanged this session.
-- Tracked-but-modified files: `README.md` (user-owned billing wording, convention is not to commit), `docs/agent-context.md` + `docs/handoff.md` + `docs/roadmap.md` (this session's updates — should commit). The agent-context + roadmap + handoff updates are the only changes worth committing this session.
-- Untracked: `debug/14_23_aec_spike/` (spike artifacts — generally we leave debug/ uncommitted, follow existing convention).
+`origin` is ahead by 2 commits — `72e0005` (S225 AEC spike notes) and `8816cef` (this session). Neither pushed yet. Both should go to both `origin` and `public` per project convention. README.md still has uncommitted user-owned billing-protection wording — convention is not to commit.
 
-## How to verify the spike findings in a fresh session
+## How to verify the pivot plan in a live meeting (after refactor lands)
 
-```bash
-cd debug/14_23_aec_spike
-source venv/bin/activate
-python aec3_shift_sweep.py
-# Expect: shifts -63 to -500 ms all give ~-30 dB bleed drop; past -500 falls off
-afplay out_aec3/listen_aec3_shifted.wav
-# A/B confirms the numbers by ear
-```
+1. `uv tool install --reinstall .` after each refactor section.
+2. Spawn-ready handshake: confirm `~/.operator/sessions/<id>/ready.flag` appears within 2s of inner-claude spawn (via the SessionStart hook).
+3. Send a long meeting message (>300 chars with emoji + code block); confirm `replies.jsonl` row appears with `last_assistant_message` matching expectation.
+4. Trigger a multi-tool turn; confirm N `PreToolUse` events in `tools.jsonl` + 1 `Stop` event in `replies.jsonl`.
+5. Trigger a tool failure; confirm `PostToolUseFailure` event in `errors.jsonl` and operator's `denial` callback fires.
+6. Cross-meeting context: pre-load a memorable fact in the user's main Claude Code session, run `/operator:slip`, ask claude in the meeting to recall, confirm reply mentions the fact.
+7. Post-meeting recall: end the meeting, return to the user's main Claude Code session, ask "what did we discuss?" — confirm meeting interactions are in context.
