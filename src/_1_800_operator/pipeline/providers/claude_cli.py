@@ -113,12 +113,46 @@ _PTY_COLS = 120
 
 # Spawn-ready handshake. Operator-plugin's SessionStart hook writes
 # `ready.flag` into the session dir; the provider polls for it after
-# spawn. The fallback settle is only hit when the plugin isn't installed
-# — in that case the reply tail will time out anyway with a clearer
-# error, so the settle just keeps the first send from racing the TUI.
-_READY_FLAG_TIMEOUT_SECONDS = 30.0
+# spawn. The ceiling is a HARD ceiling, not a soft timeout: a healthy
+# boot writes the flag in well under a second (instrumented: 0.37s
+# fresh, 0.37s resuming a 13 MB session — SessionStart fires before MCP
+# connects and isn't gated on session size). 180s is generous enough
+# that a slow-but-healthy boot is never false-flagged as hung, while
+# still bounding the wait so a genuinely wedged claude is declared dead
+# in finite time. There is NO blind-settle fallback: either the flag
+# appears (ready), the process dies / the PTY hits EOF (fail now), or
+# the ceiling is hit (fail) — never a "sleep and hope" guess, which is
+# what silently lost the briefing on a slow boot before this rework.
+_READY_FLAG_CEILING_SECONDS = 180.0
 _READY_FLAG_POLL_SECONDS = 0.1
-_SPAWN_FALLBACK_SETTLE_SECONDS = 5.0
+# One-time internal log breadcrumb if the flag is slower than a healthy
+# boot — no behaviour change, just a forensic marker so the next slow
+# boot leaves a trail (the 95s boot that motivated this was unreproducible).
+_READY_FLAG_SLOW_WARN_SECONDS = 15.0
+
+# Structural "blocked on an interactive prompt" signal. A booting claude
+# reaches ready.flag in under a second; if it instead renders terminal
+# output and then goes SILENT with the flag still absent, it has stopped
+# emitting and is WAITING — almost always on an interactive prompt (the
+# workspace-trust dialog, an onboarding step, a future Anthropic prompt).
+# The signal is structural — it doesn't care which prompt — so it
+# generalises to prompts that don't exist yet. This is the quiet window
+# that marks "stopped emitting, now waiting."
+_PTY_QUIET_BLOCKED_SECONDS = 5.0
+
+# Soft text-heuristic needles for ENRICHING a stuck-boot diagnosis — never
+# load-bearing (the idle TUI input box itself renders prompt-ish glyphs,
+# so text matching false-positives if trusted). The raw PTY stream
+# positions words with cursor-move escapes instead of spaces, so the
+# matcher strips ALL ANSI and ALL whitespace first — hence these needles
+# are space-free. Generic prompt affordances first; the workspace-trust
+# label is an optional nicety on top. We classify and report — never
+# parse-to-answer.
+_PROMPT_AFFORDANCE_NEEDLES = (
+    "entertoconfirm", "esctocancel", "esctoexit",
+    "(y/n)", "[y/n]", "(yes/no)", "pressenter",
+)
+_TRUST_DIALOG_NEEDLES = ("trustthisfolder", "doyoutrust", "isthisaproject")
 
 # Tail-loop polling cadence for replies.jsonl. 0.15s matches the spike
 # and is short enough that p50 turn TTFR (Stop hook fires → reply
@@ -419,31 +453,134 @@ class ClaudeCLIProvider(LLMProvider):
         self._send_briefing()
 
     def _wait_for_ready(self):
-        """Block until the SessionStart hook writes ready.flag, with timeout.
+        """Block until the SessionStart hook writes ready.flag.
 
-        Falls back to a hardcoded settle if the flag never appears, which
-        almost always means operator-plugin isn't installed in the user's
-        Claude Code. The fallback at least lets the TUI initialize before
-        the first paste — the actual failure surfaces clearly when the
-        Stop hook tail times out on the first turn.
+        Three terminal outcomes, no fourth "settle and hope" path:
+          - the flag appears              → return (ready)
+          - the process dies / PTY EOFs   → raise (inner-claude is gone)
+          - the hard ceiling is hit       → raise (inner-claude is hung)
+
+        Raising propagates to pre_warm, which records it on `_spawn_exc`
+        WITHOUT posting anything to chat — the never-post-unprompted
+        invariant. The held failure surfaces only if a participant later
+        @mentions claude (handled by _run_turn). If no @mention ever
+        comes, operator stays silent and just leaves on auto-leave.
         """
-        deadline = time.monotonic() + _READY_FLAG_TIMEOUT_SECONDS
+        started = time.monotonic()
+        deadline = started + _READY_FLAG_CEILING_SECONDS
+        slow_warned = False
+        # PTY-activity tracking for the structural stuck-boot signal.
+        # The drain thread appends one entry per chunk, so chunk-count
+        # growth == new output arrived — an O(1) check per poll. "Output
+        # then sustained silence" is the generic "blocked on a prompt"
+        # signature; see _diagnose_stuck_boot.
+        pty_chunks_seen = 0
+        pty_last_change = started
         while time.monotonic() < deadline:
             if self._ready_flag_path.exists():
                 return
+            # Hard signals that inner-claude is gone — fail now, don't
+            # wait out the ceiling.
             if self._proc is not None and self._proc.poll() is not None:
                 raise ClaudeCLIProtocolError(
                     f"inner-claude exited during startup (rc={self._proc.returncode}).\n"
                     f"PTY tail:\n{self._pty_tail()}"
                 )
+            # The PTY drain thread only exits on EOF / OSError on the
+            # master fd while we're in startup (stop_event isn't set
+            # until _terminate_inner). A dead drain thread therefore
+            # means the PTY closed under us — inner-claude is gone even
+            # if poll() hasn't caught up yet.
+            if (
+                self._pty_reader_thread is not None
+                and not self._pty_reader_thread.is_alive()
+            ):
+                raise ClaudeCLIProtocolError(
+                    "inner-claude's PTY hit EOF during startup "
+                    "(the process closed its tty).\n"
+                    f"PTY tail:\n{self._pty_tail()}"
+                )
+            if len(self._pty_dump) != pty_chunks_seen:
+                pty_chunks_seen = len(self._pty_dump)
+                pty_last_change = time.monotonic()
+            elapsed = time.monotonic() - started
+            if not slow_warned and elapsed >= _READY_FLAG_SLOW_WARN_SECONDS:
+                slow_warned = True
+                log.warning(
+                    f"ClaudeCLI: ready.flag not yet seen after "
+                    f"{elapsed:.0f}s — slower than a healthy boot "
+                    f"(~0.4s). Still waiting (ceiling "
+                    f"{_READY_FLAG_CEILING_SECONDS:.0f}s)."
+                )
             time.sleep(_READY_FLAG_POLL_SECONDS)
-        log.warning(
-            f"ClaudeCLI: ready.flag never appeared after "
-            f"{_READY_FLAG_TIMEOUT_SECONDS:.0f}s — operator-plugin likely not "
-            f"installed. Falling back to time-based settle; expect the first "
-            f"turn to time out with a clearer hook-side error."
+        # Ceiling hit, process still alive — classify why, structurally.
+        had_output = pty_chunks_seen > 0
+        quiet_secs = (time.monotonic() - pty_last_change) if had_output else None
+        diagnosis = self._diagnose_stuck_boot(
+            had_output=had_output, quiet_secs=quiet_secs
         )
-        time.sleep(_SPAWN_FALLBACK_SETTLE_SECONDS)
+        raise ClaudeCLIProtocolError(
+            f"inner-claude never became ready within "
+            f"{_READY_FLAG_CEILING_SECONDS:.0f}s — {diagnosis}.\n"
+            f"PTY tail:\n{self._pty_tail()}"
+        )
+
+    def _diagnose_stuck_boot(self, *, had_output, quiet_secs):
+        """Classify why _wait_for_ready is about to fail, structurally.
+
+        The load-bearing signal is structural and text-free: inner-claude
+        is alive, ready.flag never came, and (the strong case) it
+        produced terminal output and then went quiet — it rendered
+        something and is now WAITING. That pattern means "blocked on an
+        interactive prompt" whatever the prompt is, so it generalises to
+        prompts Anthropic hasn't shipped yet.
+
+        A soft text heuristic over the PTY tail only *enriches* the
+        message ("looks like a y/n prompt", maybe "looks like the
+        workspace-trust dialog"). It is unreliable by nature — the idle
+        TUI input box itself renders prompt-ish glyphs — so it never
+        gates behaviour, only decorates the report. We classify and
+        report; we never parse-to-answer (that would be both
+        screen-scraping and programmatically defeating a security
+        prompt — see project_anthropic_detection_vector).
+        """
+        blocked = (
+            had_output
+            and quiet_secs is not None
+            and quiet_secs >= _PTY_QUIET_BLOCKED_SECONDS
+        )
+        if blocked:
+            msg = (
+                f"inner-claude rendered terminal output then went silent "
+                f"for {quiet_secs:.0f}s with ready.flag still absent — it "
+                f"appears blocked on an interactive prompt during startup"
+            )
+        elif not had_output:
+            msg = (
+                "inner-claude produced no terminal output at all — it may "
+                "have failed to start, or operator-plugin's SessionStart "
+                "hook is not firing"
+            )
+        else:
+            msg = (
+                "inner-claude kept producing output but never signaled "
+                "ready — an unusually slow or looping startup"
+            )
+        # Soft enrichment — best-effort, never load-bearing. The raw PTY
+        # stream positions words with cursor-move escapes instead of
+        # spaces, so strip ALL ANSI and ALL whitespace before matching
+        # the (space-free) needles.
+        compact = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", self._pty_tail()).lower()
+        compact = re.sub(r"\s+", "", compact)
+        if any(n in compact for n in _TRUST_DIALOG_NEEDLES):
+            msg += (
+                " — the PTY tail looks like Claude Code's workspace-trust "
+                "dialog; open this folder in Claude Code directly and "
+                "accept it once"
+            )
+        elif any(n in compact for n in _PROMPT_AFFORDANCE_NEEDLES):
+            msg += " — the PTY tail looks like an interactive y/n or selection prompt"
+        return msg
 
     def _terminate_inner(self):
         """Best-effort tear-down. Idempotent."""

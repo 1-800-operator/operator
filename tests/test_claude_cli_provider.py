@@ -263,6 +263,123 @@ def test_spawn_failure_surfaces_detail():
     print("  spawn failure surfaces _spawn_exc detail OK")
 
 
+def test_wait_for_ready_outcomes():
+    """_wait_for_ready has exactly three terminal outcomes — no fourth
+    "settle and hope" path:
+
+      - ready.flag appears        → returns
+      - the process has died      → raises (return code in the message)
+      - the PTY drain thread died → raises (EOF — the tty closed)
+      - the hard ceiling is hit   → raises (hung / plugin not installed)
+
+    The raise propagates to pre_warm, which records it on _spawn_exc
+    without posting to chat — surfacing is deferred to the next @claude
+    turn (the never-post-unprompted invariant).
+    """
+    from _1_800_operator.pipeline.providers import claude_cli as cc
+
+    # 1. flag present → returns promptly.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._proc = _FakeProc(alive=True)
+        provider._ready_flag_path.write_text("", encoding="utf-8")
+        t0 = time.monotonic()
+        provider._wait_for_ready()  # should not raise, should not block
+        assert time.monotonic() - t0 < 1.0, "flag present → return immediately"
+
+    # 2. process already dead → raises with the return code.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._proc = _FakeProc(alive=False, returncode=42)
+        try:
+            provider._wait_for_ready()
+            assert False, "dead process should raise"
+        except ClaudeCLIProtocolError as exc:
+            assert "42" in str(exc) and "exited during startup" in str(exc), exc
+
+    # 3. PTY drain thread already exited → raises EOF (tty closed under us).
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._proc = _FakeProc(alive=True)  # poll() says alive...
+        dead_thread = threading.Thread(target=lambda: None)
+        dead_thread.start()
+        dead_thread.join()  # ...but the drain thread has exited
+        provider._pty_reader_thread = dead_thread
+        try:
+            provider._wait_for_ready()
+            assert False, "dead PTY drain thread should raise"
+        except ClaudeCLIProtocolError as exc:
+            assert "EOF" in str(exc), f"should name the PTY EOF: {exc}"
+
+    # 4. process alive, no flag, ceiling hit → raises "never became ready".
+    #    Monkeypatch the ceiling tiny so the test doesn't wait 180s.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._proc = _FakeProc(alive=True)
+        saved = cc._READY_FLAG_CEILING_SECONDS
+        cc._READY_FLAG_CEILING_SECONDS = 0.3
+        try:
+            t0 = time.monotonic()
+            provider._wait_for_ready()
+            assert False, "ceiling should raise when no flag ever appears"
+        except ClaudeCLIProtocolError as exc:
+            assert "never became ready" in str(exc), exc
+            # _diagnose_stuck_boot is wired into the ceiling raise: no PTY
+            # output was captured (_pty_dump is empty) → "no terminal output".
+            assert "no terminal output" in str(exc), f"diagnosis should be wired in: {exc}"
+            assert time.monotonic() - t0 >= 0.3, "should wait out the ceiling"
+        finally:
+            cc._READY_FLAG_CEILING_SECONDS = saved
+    print("  _wait_for_ready: flag / dead-proc / PTY-EOF / ceiling outcomes OK")
+
+
+def test_diagnose_stuck_boot():
+    """_diagnose_stuck_boot classifies a stuck boot structurally (text-free)
+    and layers a soft, never-load-bearing text heuristic on top.
+
+    Structural branches:
+      - output then sustained silence → "blocked on an interactive prompt"
+      - no output at all              → "no terminal output"
+      - output right up to the wire   → "never signaled ready"
+    The text heuristic only enriches the message — and recognises generic
+    prompt affordances, not just the specific workspace-trust dialog, so
+    it generalises to prompts Anthropic hasn't shipped yet.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+
+        # Structural: output + long silence → blocked-on-prompt.
+        provider._pty_dump = []
+        d = provider._diagnose_stuck_boot(had_output=True, quiet_secs=12.0)
+        assert "blocked on an interactive prompt" in d, d
+
+        # Structural: no output at all → distinct classification.
+        d = provider._diagnose_stuck_boot(had_output=False, quiet_secs=None)
+        assert "no terminal output" in d, d
+
+        # Structural: output never went quiet → slow/looping, not blocked.
+        d = provider._diagnose_stuck_boot(had_output=True, quiet_secs=1.0)
+        assert "never signaled ready" in d, d
+
+        # Soft enrichment: a workspace-trust-shaped tail gets the specific
+        # label (ANSI + spacing stripped before matching).
+        provider._pty_dump = [
+            b"\x1b[1CQuick\x1b[1Csafety\x1b[1Ccheck:\x1b[1CIs\x1b[1Cthis"
+            b"\x1b[1Ca\x1b[1Cproject\x1b[1Cyou\x1b[1Ctrust?\x1b[1C"
+            b"1.\x1b[1CYes,\x1b[1CI\x1b[1Ctrust\x1b[1Cthis\x1b[1Cfolder"
+        ]
+        d = provider._diagnose_stuck_boot(had_output=True, quiet_secs=12.0)
+        assert "workspace-trust" in d, f"trust-dialog tail should be labelled: {d}"
+
+        # Soft enrichment: a generic y/n prompt gets the generic label,
+        # NOT the trust-specific one.
+        provider._pty_dump = [b"Continue with the install? press enter / (y/n)"]
+        d = provider._diagnose_stuck_boot(had_output=True, quiet_secs=12.0)
+        assert "y/n or selection prompt" in d, d
+        assert "workspace-trust" not in d, d
+    print("  _diagnose_stuck_boot: structural branches + soft enrichment OK")
+
+
 # --- replies.jsonl tailing -------------------------------------------
 
 
@@ -619,6 +736,8 @@ def main():
         test_warmup_is_noop,
         test_run_turn_rejects_bad_messages,
         test_spawn_failure_surfaces_detail,
+        test_wait_for_ready_outcomes,
+        test_diagnose_stuck_boot,
         test_count_and_read_replies,
         test_wait_for_next_reply_picks_up_new_row,
         test_wait_for_next_reply_times_out,
