@@ -188,6 +188,7 @@ class ClaudeCLIProvider(LLMProvider):
 
         self._spawn_lock = threading.Lock()
         self._spawn_in_progress = False
+        self._spawn_exc: Exception | None = None
         self._stopping = False
 
         # Callback slots — preserved from the prior provider shape so
@@ -254,8 +255,10 @@ class ClaudeCLIProvider(LLMProvider):
             self._spawn_in_progress = True
         try:
             self._spawn_inner()
+            self._spawn_exc = None
         except Exception as exc:
             log.warning(f"ClaudeCLI: pre_warm spawn failed: {exc}")
+            self._spawn_exc = exc
         finally:
             with self._spawn_lock:
                 self._spawn_in_progress = False
@@ -299,13 +302,20 @@ class ClaudeCLIProvider(LLMProvider):
             f"resume={'<bridged>' if self._resume_session_id else 'none'}"
         )
         try:
+            # start_new_session=True is the in-process default via the
+            # Popen monkey-patch in __main__.py, which also satisfies our
+            # need for the child to be its own process group (so killpg
+            # in _terminate_inner only hits inner-claude, not us). We
+            # MUST NOT also pass preexec_fn=os.setsid here — that calls
+            # setsid in the child a second time and fails with EPERM
+            # because the child is already a session leader.
             proc = subprocess.Popen(
                 cmd,
                 cwd=self._cwd,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                preexec_fn=os.setsid,
+                start_new_session=True,
                 env=env,
                 close_fds=True,
             )
@@ -601,8 +611,11 @@ class ClaudeCLIProvider(LLMProvider):
         if self._proc is None or self._proc.poll() is not None:
             self.pre_warm()
             if self._proc is None:
+                detail = (
+                    f": {self._spawn_exc}" if self._spawn_exc else ""
+                )
                 raise ClaudeCLIProtocolError(
-                    "inner-claude failed to spawn; check operator-plugin install"
+                    f"inner-claude failed to spawn{detail}"
                 )
 
         t_start = time.monotonic()
