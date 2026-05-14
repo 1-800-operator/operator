@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-Operator is a chat-based AI meeting participant. It CDP-attaches to a dedicated slip Chrome window running a Google Meet, opens the chat panel, watches for messages addressed to it (via the `@claude` trigger phrase), forwards each user message to a long-lived `claude -p --resume <id>` subprocess that owns its own tool loop, and posts the streamed reply back into meeting chat. v1 ships claude as the only agent; the inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy.
+Operator is a chat-based AI meeting participant. It CDP-attaches to a dedicated slip Chrome window running a Google Meet, opens the chat panel, watches for messages addressed to it (via the `@claude` trigger phrase), and forwards each one to a long-lived interactive `claude` subprocess — one per meeting, driven over a PTY — that owns its own tool loop. Claude's reply is relayed back into meeting chat in real time by tailing the Claude Code transcript. v1 ships claude as the only agent; the inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hierarchy.
 
 ## Commands
 
@@ -24,7 +24,7 @@ operator doctor                       # diagnostic: claude CLI + auth, Chrome, g
 
 Bare `operator` prints usage. v1 ships claude only; codex / gemini bridges would be sibling modules under `bridges/` if added — there is no per-bot YAML, no `~/.operator/agents/`, and no setup wizard (all of that machinery was deleted in Phase 14.19.7).
 
-`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The `--yolo` flag appends `--dangerously-skip-permissions` to the inner-claude spawn so per-tool prompts are skipped. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention.
+`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The inner-claude spawn always carries `--dangerously-skip-permissions` — the meeting flow needs tools to run without per-call prompts and operator has no permission layer of its own; the `--yolo` flag is still parsed for plugin-slash-command back-compat but is now a no-op. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention.
 
 ### Logs & Diagnostics
 
@@ -70,9 +70,9 @@ Connectors (implement MeetingConnector — kept as a seam for future bridges)
   connectors/chat_dom_js.py   — Meet chat-panel DOM payloads injected via page.evaluate
 
 Pipeline
-  pipeline/chat_runner.py     — polling loop; trigger detection, operator-voice
-                                 narration callbacks, off-thread send queue,
-                                 participant-based auto-leave
+  pipeline/chat_runner.py     — polling loop; trigger detection, off-thread
+                                 send queue + tick drain, participant-based
+                                 auto-leave
   pipeline/meeting_record.py  — append-only JSONL per meeting at ~/.operator/history/<slug>.jsonl;
                                  single source of truth for chat + caption history (meta header + tail(n))
   pipeline/llm.py             — LLMClient: feeds latest user_text + meeting-record tail to provider
