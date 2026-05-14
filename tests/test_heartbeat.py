@@ -31,7 +31,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from _1_800_operator.bridges.claude import REPLY_PREFIX_SLIP
+from _1_800_operator.bridges.claude import REPLY_PREFIX_OPERATOR
 from _1_800_operator.pipeline import chat_runner as cr_mod
 from _1_800_operator.pipeline.chat_runner import ChatRunner
 
@@ -86,7 +86,7 @@ def test_narrate_tool_use_throttles_rapid_chains(monkeypatch):
 
     raw = runner._connector.sent_raw
     assert len(raw) == 1, f"throttle should suppress chained narrations; got {raw}"
-    assert raw[0].startswith(REPLY_PREFIX_SLIP)
+    assert raw[0].startswith(REPLY_PREFIX_OPERATOR)
     assert "running Read" in raw[0]
     assert "/tmp/foo.txt" in raw[0]
 
@@ -112,7 +112,7 @@ def test_narrate_tool_use_collapses_multi_tool_batch(monkeypatch):
 
     raw = runner._connector.sent_raw
     assert len(raw) == 1, f"a batch posts exactly one line; got {raw}"
-    assert raw[0] == REPLY_PREFIX_SLIP + "running Read, Edit, Bash"
+    assert raw[0] == REPLY_PREFIX_OPERATOR + "running Read, Edit, Bash"
     # ToolSearch is filtered out of the batch before the count is taken,
     # so a batch of [ToolSearch, Read] narrates as a lone Read with args.
     fake_now[0] += cr_mod.TOOL_NARRATION_THROTTLE_SECONDS + 0.1
@@ -160,7 +160,7 @@ def test_narrate_connection_dropped_posts_switchboard_voice():
     runner = _make_runner()
     runner._narrate_connection("dropped")
     assert len(runner._connector.sent_raw) == 1
-    assert runner._connector.sent_raw[0].startswith(REPLY_PREFIX_SLIP)
+    assert runner._connector.sent_raw[0].startswith(REPLY_PREFIX_OPERATOR)
     assert "connection dropped" in runner._connector.sent_raw[0]
 
 
@@ -197,7 +197,7 @@ def test_narrate_failure_posts_operator_voice_directly():
     runner = _make_runner()
     runner._narrate_failure("hit an unexpected snag — try @mentioning again")
     assert len(runner._connector.sent_raw) == 1
-    assert runner._connector.sent_raw[0].startswith(REPLY_PREFIX_SLIP)
+    assert runner._connector.sent_raw[0].startswith(REPLY_PREFIX_OPERATOR)
     assert "snag" in runner._connector.sent_raw[0]
     # Must not have gone through the prefixed path.
     assert runner._connector.sent_prefixed == []
