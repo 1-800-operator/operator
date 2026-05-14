@@ -1,11 +1,13 @@
 """Claude Code installation preflight — used at boot.
 
-Used by `_run_slip` to fail loudly before any browser starts when the
-`claude` CLI is missing or not logged in.
+Used by `_run_slip` and `operator doctor` to fail loudly before any
+browser starts when the `claude` CLI is missing, logged out, or too old
+for operator's PTY + hook-events flow.
 """
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 
@@ -13,20 +15,65 @@ import subprocess
 # returns in <300 ms; 5 s is generous slack for a cold `node` warm-up
 # on slow disks.
 _CLAUDE_AUTH_TIMEOUT = 5.0
+_CLAUDE_VERSION_TIMEOUT = 5.0
+
+# Minimum Claude Code version operator's PTY + hook-events flow was
+# validated against (debug/14_22_pty_spike ran on 2.1.141). Older builds
+# may not emit the SessionStart / Stop hook events or the transcript
+# shape the provider depends on, so operator refuses to launch on them.
+_MIN_CLAUDE_CODE_VERSION = (2, 1, 141)
+_MIN_CLAUDE_CODE_VERSION_STR = "2.1.141"
+
+
+def _claude_code_version() -> tuple[int, ...] | None:
+    """Parse `claude --version` into a comparable (major, minor, patch)
+    tuple, or None if it can't be determined (timeout, non-zero exit,
+    unparseable output).
+
+    Callers fail OPEN on None — refusing a correctly-installed claude
+    because the `--version` string format changed would be worse than
+    proceeding on an unknown version.
+    """
+    try:
+        r = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_VERSION_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", r.stdout)
+    if not m:
+        return None
+    return tuple(int(g) for g in m.groups())
 
 
 def _probe_claude_code(*, check_auth: bool = True) -> tuple[str, str]:
     """Check claude-code prereqs. Returns (status, detail).
 
     status:
-      "ok"              — git + claude both on PATH, and (if check_auth)
-                          `claude auth status --json` reports loggedIn=true.
-      "prereq_missing"  — something's missing; detail names what.
+      "ok"               — git + claude on PATH, claude new enough, and
+                           (if check_auth) `claude auth status --json`
+                           reports loggedIn=true.
+      "prereq_missing"   — something's missing; detail names what.
+      "version_too_old"  — claude is installed but below the floor
+                           operator was validated against; detail says so.
     """
     if shutil.which("git") is None:
         return "prereq_missing", "git CLI not on PATH — install git first"
     if shutil.which("claude") is None:
         return "prereq_missing", "claude CLI not on PATH — install Claude Code first"
+    ver = _claude_code_version()
+    if ver is not None and ver < _MIN_CLAUDE_CODE_VERSION:
+        got = ".".join(str(p) for p in ver)
+        return "version_too_old", (
+            f"Claude Code {got} is too old — operator needs "
+            f">= {_MIN_CLAUDE_CODE_VERSION_STR}. Update via /plugin "
+            f"(or reinstall from https://claude.ai/code)."
+        )
     if not check_auth:
         return "ok", ""
     try:

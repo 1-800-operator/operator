@@ -614,7 +614,9 @@ def _run_slip(name, rest):
         return 0
 
     # claude binary preflight — fail loud and early; no browser dance,
-    # no config load if claude isn't installed or logged in.
+    # no config load if claude isn't installed, logged out, or too old.
+    # `reason` is self-contained (it names the specific fix), so the
+    # message just relays it.
     from _1_800_operator.pipeline.claude_code_import import (
         claude_code_installed_and_logged_in,
     )
@@ -622,10 +624,9 @@ def _run_slip(name, rest):
     if not ok:
         _release_slip_lock()
         print(
-            f"slip claude requires the Claude Code CLI.\n"
+            f"slip claude can't start:\n"
             f"  {reason}\n"
-            f"Install Claude Code (https://claude.ai/code) and run "
-            f"`claude login`, then re-run."
+            f"Fix that and re-run. (`operator doctor` runs the full check.)"
         )
         return 0
 
