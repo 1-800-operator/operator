@@ -476,25 +476,21 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
-            # The provider's connection_callback already posted a
-            # `[☎️ Operator] couldn't reach Claude…` line for EOF /
-            # protocol errors before raising. Other exception types
-            # (binary missing, subscription mis-configured, etc.) skip
-            # that path; map them to a switchboard-voice line keyed on
-            # the exception class name. Never echo str(e) into chat —
-            # it can carry response payloads, token-bearing URLs, or
-            # upstream secrets. Full detail still lands in
-            # /tmp/operator.log via the log.error above.
+            # Map the exception class to a plain chat line. Never echo
+            # str(e) into chat — it can carry response payloads,
+            # token-bearing URLs, or upstream secrets. Full detail still
+            # lands in /tmp/operator.log via the log.error above.
             exc_name = type(e).__name__
             if "NotFound" in exc_name:
                 msg = "claude CLI not found — install from claude.ai/code"
             elif "Subscription" in exc_name:
                 msg = "claude subscription not detected — run `claude auth status`"
             elif "Protocol" in exc_name:
-                # connection_callback already posted "couldn't reach
-                # Claude" before raising; don't double-post.
-                self._emit_turn_done(failed=True)
-                return
+                # inner-claude crashed or the PTY broke mid-turn. The
+                # next @mention respawns it (see _run_turn's teardown-
+                # before-respawn path) — tell the room so this turn
+                # isn't a silent drop.
+                msg = "lost the connection to Claude — try @mentioning again in a moment"
             else:
                 msg = f"hit an unexpected snag ({exc_name}) — try @mentioning again"
             self._narrate_failure(msg)
@@ -506,7 +502,7 @@ class ChatRunner:
 
         claude_cli owns its own tool loop, so the only result shapes that
         reach here are text (streamed or non-streamed). Anything else is
-        a bug — operator narrates the failure in switchboard voice.
+        a bug — operator posts a plain failure line.
         """
         if isinstance(result, str):
             self._send(result)
