@@ -17,6 +17,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,6 +198,84 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
     )
 
 
+def _check_mlx_whisper_warm() -> CheckResult:
+    """Run the same mlx-whisper warmup operator does at slip meeting entry.
+
+    Surfaces two failure modes at install/diagnostic time rather than mid-
+    meeting:
+
+      1. `[metal::Device] Unable to build metal library from source` — MLX
+         can't compile its Metal shader library against the local Xcode
+         toolchain. operator catches this exception cleanly and falls back
+         to chat-only mode (no transcripts), but MLX *also* spawns an
+         internal helper to invoke the Metal compiler, and that helper can
+         crash as a fork-child, producing a noisy macOS crash dialog. By
+         running this check at doctor time, the user hits any breakage in
+         a diagnostic context (manageable) instead of mid-call (panic).
+
+      2. Model download / disk / network failures on first run.
+
+    Optional check: a failure here doesn't fail `operator doctor`'s exit
+    code — slip still runs (chat-only), so this is a warning, not a
+    blocker. Cold-cache first run takes 3-20s while MLX compiles Metal
+    shaders; subsequent runs return in under a second.
+    """
+    if sys.platform != "darwin":
+        return CheckResult(
+            "mlx-whisper warmup",
+            True,
+            "skipped (slip audio is mac-only)",
+            "",
+            optional=True,
+        )
+    # Lazy imports so a missing mlx dep doesn't break the other checks.
+    try:
+        import numpy as np
+        import mlx_whisper
+    except ImportError as e:
+        return CheckResult(
+            name="mlx-whisper warmup",
+            ok=False,
+            detail=f"import failed: {e} — slip will run chat-only",
+            fix="re-run install.sh",
+            optional=True,
+        )
+    # One-line stderr hint so users on a cold-cache first run know why
+    # doctor is pausing here. Printing before the call (not after) so the
+    # hint sticks even if mlx crashes via fork-child.
+    print("    warming mlx-whisper-base (3-20s on first run)…", file=sys.stderr, flush=True)
+    t0 = time.monotonic()
+    try:
+        mlx_whisper.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            path_or_hf_repo="mlx-community/whisper-base-mlx",
+            language="en",
+        )
+    except Exception as e:
+        # Collapse multi-line exception text to the first line so the
+        # checklist line stays readable.
+        first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        return CheckResult(
+            name="mlx-whisper warmup",
+            ok=False,
+            detail=f"{first_line} — slip will run chat-only (no transcripts)",
+            fix=(
+                "often transient (Metal-XPC compile race): retry `operator doctor`. "
+                "If it persists: install Xcode Command Line Tools (`xcode-select --install`), "
+                "or pin to Python 3.10-3.13 (mlx Metal-shader compile is flakier on bleeding-edge "
+                "Python builds)."
+            ),
+            optional=True,
+        )
+    elapsed = time.monotonic() - t0
+    return CheckResult(
+        "mlx-whisper warmup",
+        True,
+        f"ready ({elapsed:.1f}s)",
+        "",
+    )
+
+
 def _check_aec_binary() -> CheckResult:
     """aec3 speaker-bleed cleaner. Optional but recommended on built-in speakers."""
     binary = _aec_binary()
@@ -269,6 +348,7 @@ def run_doctor() -> int:
         checks.append(_check_screen_recording(probe))
         checks.append(_check_microphone(probe))
         checks.append(_check_aec_binary())
+        checks.append(_check_mlx_whisper_warm())
 
     print()
     print("operator doctor")
