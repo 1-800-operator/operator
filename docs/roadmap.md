@@ -1,8 +1,49 @@
 # Operator — Roadmap
 
-*Last updated: May 13, 2026 (session 226 — 14.22 architecture pivot decided in response to Anthropic's June 15 `claude -p` billing change; full spike + DECISION.md committed; refactor not yet started).
+*Last updated: May 13, 2026 (session 227 — AEC3 speaker-bleed cleaner integrated AND 14.22 PTY+hooks production refactor live-validated end-to-end on its branch; AEC pushed to origin, PTY refactor pending merge).*
 
-**Session 226 (May 13, 2026) — Anthropic billing pivot.** Anthropic announced this morning that starting **2026-06-15**, `claude -p` and Agent SDK usage no longer count toward subscription limits — they draw from a small per-plan Agent SDK credit ($20 Pro / $100 Max 5x / $200 Max 20x), then pay-as-you-go API rates. Operator's entire architecture spawns `claude -p --resume <id>` per meeting; under the new rules, a Max-20x user running operator on daily meetings would drain the credit in days. The "free on your existing subscription" economic premise dies for `-p`.
+**Session 227 — also in parallel: 14.22 PTY+hooks production refactor live-validated on `phase-14.22-pty-pivot` branch.** Picked up the S226 architecture decision and shipped the production refactor. Two commits on the branch, both unpushed; live-tested in a real Meet with three back-to-back turns (text reply, Read tool, Write tool) landing cleanly at 3-6 s TTFR. operator-plugin bumped to 0.1.12 and pushed to origin with the hook scripts; operator main bumped marketplace.json and pushed to origin + public.
+
+- `daedf21` (on `phase-14.22-pty-pivot`) — S227: 14.22 production refactor. `pipeline/providers/claude_cli.py` rewritten as a long-lived interactive `claude --dangerously-skip-permissions` driven via PTY (pty.openpty + 40×120 winsize + start_new_session), with bracketed-paste send (`\x1b[200~ <msg> \x1b[201~\r`, timings from spike T1) and a tail-loop on `replies.jsonl` for replies. SessionStart→`ready.flag` handshake with 30 s timeout falling back to a 5 s settle if the plugin isn't installed. State dir at `~/.operator/sessions/<uuid>/`. `OPERATOR_SESSION_DIR` exported into the spawn env so the plugin's hook subprocesses can find their write target. ANTHROPIC_API_KEY still stripped from spawn env. Bundles A + B + C + E + F + H from `debug/14_22_pty_spike/DECISION.md` into one coherent commit so the first commit is end-to-end live-testable; G (operator-voice callback remap) / I (foreign-hook detector) / J (tear-down race) / K (CC version floor) / L (plugin install smoke) follow in their own commits.
+- `a857412` (on `phase-14.22-pty-pivot`) — S227: PTY spawn fix. Dropped `preexec_fn=os.setsid` from the Popen call because `__main__.py` monkey-patches Popen to default `start_new_session=True`, which already calls setsid in the child — passing both ran setsid twice and the second call failed EPERM. Switched to `start_new_session=True` explicitly so the spawn works independently of the monkey-patch. Also surfaced the spawn exception text on the subsequent ProtocolError so a future failure here is diagnosable from /tmp/operator.log.
+- `operator-plugin@f9900f9` (0.1.12, pushed to GitHub) — ships `hooks/hooks.json` + `hooks/scripts/{session_start,stop,pretool,error,_common}.sh`. All gated on `$OPERATOR_SESSION_DIR` so they no-op on the user's normal Claude Code sessions.
+- `main@be955f0` — marketplace.json bumped to 0.1.12 (pushed to origin + public; public was 6 commits behind, caught up).
+
+**Live-validation results (Meet `ekg-vzgc-kiv`):** three turns, all clean. Turn 1 (text): 3.08 s msg→posted. Turn 2 (read mvp.md and summarize, used Read tool): 6.15 s. Turn 3 (duplicate the file, used Write tool): 5.31 s. Same `session=a72bcb0f-…` resumed across all three turns (cwd-scoped `--resume` worked). `ready.flag` written by SessionStart hook within ~2 s of spawn. Bracketed-paste handled slashes, file paths, hyphens cleanly. Desktop-app session bridging worked via the `CLAUDE_CODE_SESSION_ID` env path.
+
+**Known regressions to fix in follow-up commits:**
+1. **No tool-narration / denial / connection narration** in chat (`[☎️ Operator] running Bash…` etc.). Section G of DECISION.md wires these off `tools.jsonl` + `errors.jsonl` tail loops + PTY EOF.
+2. **No mid-generation streaming.** Stop hook fires at end-of-turn, so paragraph-flush is batched. Chat still posts paragraph-by-paragraph, just delivered as a burst. This is the documented cost of hooks-as-output (vs. screen-scraping the TUI).
+3. **`tests/test_claude_cli_provider.py` is now obsolete** — written for the per-turn shellout shape. Pair its rewrite with section L.
+
+**Hard-won knowledge captured below (`docs/agent-context.md`):** double-setsid via the Popen monkey-patch — silent-fail mode where the child appears to spawn (Popen returns a pid) but the preexec_fn crashes pre-exec and the parent sees "Exception occurred in preexec_fn." with no other detail.
+
+**Prior session in parallel (also S227, same day):**
+
+**Session 227 (May 13, 2026) — AEC3 speaker-bleed cleaner shipped.** Picked up S225's spike plan and ran the full 7-step integration. AEC3 now lives in production as a long-running Rust subprocess (`~/.operator/bin/aec3`) wired into operator's slip mic path; helper `[M]` frames are echo-cancelled before reaching whisper. Two commits on `main`, pushed to `origin`:
+
+- `bc56fad` — S227: AEC3 speaker-bleed cleaner — integrate spike into live mic pipeline (13 files, +1622/-59). Rust source moved from `debug/14_23_aec_spike/aec3/` to `src/_1_800_operator/rust/aec3/` (parallel to the swift/ helper); binary gains a streaming mode that reads the audio helper's framing protocol on stdin, holds mic in a 150 ms delay queue (S225's empirical pre-shift), and writes cleaned-mic frames on stdout. New `pipeline/aec_cleaner.py` subprocess manager spawns the binary via `os.posix_spawn` directly (NOT `subprocess.Popen`) to avoid fork() in operator's mlx-whisper-loaded process. `connectors/attach_adapter.py` rewires: `[S]` feeds both `s_proc.feed_audio` and `aec.feed_render`; `[M]` feeds `aec.feed_capture`; AEC's `on_clean_mic` callback hands cleaned bytes to `m_proc.feed_audio`. Far-end VAD bleed gate fully deleted from `pipeline/audio.py` (`far_end` param, `speech_active` field, `BLEED_` rename — all gone), since AEC handles bleed natively at -30 dB and the gate was falsely dropping genuine double-talk. M↔S leg fuzzy bleed dedupe added: rolling 4 s deque of normalized S-leg captions; M-leg captions with `SequenceMatcher.ratio() ≥ 0.75` against any entry get dropped before the caption callback fires — catches residual bleed AEC doesn't fully cancel. Tunables in `config.py` (`BLEED_DEDUPE_WINDOW_SECONDS`, `BLEED_DEDUPE_SIMILARITY`). `install.sh` step 8.5 runs `cargo build --release` from the wheel's rust source and installs to `~/.operator/bin/aec3`; soft-skip if cargo missing. `pipeline/doctor.py` gets a new `aec3 cleaner` check + introduces optional checks (`!` glyph, doesn't drive exit code). 6 new test cases (`tests/test_aec_cleaner.py` 4-case binary round-trip, `tests/test_attach_audio_wiring.py` 2-case dedupe).
+
+- `bcb672f` — S227: doctor — pre-warm mlx-whisper to surface Metal compile failure (1 file, +80). Adds an `mlx-whisper warmup` optional check that runs the same warmup operator does at slip entry. Catches the `[metal::Device] Unable to build metal library from source` failure mode at diagnostic time instead of mid-meeting — operator already handles the exception cleanly (chat-only fallback) but MLX *also* spawns an internal helper that can crash as a fork-child producing a scary macOS crash dialog. Cold-cache first run takes 3-20s while MLX compiles Metal shaders; subsequent runs <1s. Stderr progress hint before the check so users don't think doctor is hung.
+
+**Live-validation results (two real-Meet runs):** clean spawn through the production path, binary reports `echo_return_loss: Some(-30.0)` on both teardowns (exact match for S225's spike measurement), bidirectional frame flow, mic-leg whisper had zero errors. M-leg captions captured 4/5 user utterances correctly attributed; 1/5 was a YouTube-meeting bleed phrase that slipped through (AEC cancelled most but residual was loud enough for whisper). That's the case the new M↔S dedupe is designed to catch when both legs successfully transcribe — couldn't catch it in this specific instance because the S-leg whisper hit the metal::Device intermittent error and never produced a caption to dedupe against. Doctor pre-warm check addresses the underlying flakiness.
+
+**Hard-won knowledge captured:**
+1. **Don't use `subprocess.Popen` for spawning long-running subprocesses in operator's process if mlx-whisper has been loaded.** Operator's Python 3.14 build doesn't take the posix_spawn fast path in `subprocess.Popen` (specifically, the `close_fds=True` default falls back to fork+exec absent `_HAVE_POSIX_SPAWN_CLOSEFROM`). A fork() in operator's process lets inherited Metal completion-queue threads fire in the child, where MLX's GPU command buffer state is invalid, and MLX's `check_error()` throws an uncaught C++ exception → child abort → macOS crash dialog. The fix is `os.posix_spawn` directly (Python builtin since 3.8), with file_actions for pipe plumbing. The spike's `subprocess.Popen` worked fine in the standalone test (mlx not loaded), masked the bug until live integration.
+2. **MLX's Metal shader compile is flaky on Python 3.14.** First-run compile can hit `XPC_ERROR_CONNECTION_INVALID` against Apple's Metal-XPC compile service intermittently. Operator already catches the exception (chat-only fallback) — but the crash dialog comes from MLX's own internal fork-helper, not operator's code path. Best mitigation we can do: doctor pre-warm to surface failure at install time. Pin to Python 3.10-3.13 if recurring.
+
+**S225 → S227 7-step plan, all complete:**
+1. Extend `aec3_spike` Rust binary to streaming mode ✅ shipped in `bc56fad`
+2. New `pipeline/aec_cleaner.py` subprocess manager ✅ shipped in `bc56fad`
+3. Wire into `connectors/attach_adapter.py` ✅ shipped in `bc56fad`
+4. Delete dead far-end bleed gate ✅ shipped in `bc56fad`
+5. Build pipeline + install path for the Rust binary ✅ shipped in `bc56fad`
+6. Unit + integration tests ✅ shipped in `bc56fad` (already landed alongside step 2)
+7. Live validation ✅ done — two clean Meet runs, -30 dB ERL match
+
+**Open question carrying to next session:** Phase 14.22 PTY-pivot refactor (the S226 architecture decision) still hasn't started. The AEC work was a parallel track that landed on top of the un-pivoted `claude -p --resume` architecture. When the PTY refactor begins, it doesn't touch the audio path — should layer cleanly.
+
+**Prior status: Session 226 (May 13, 2026) — Anthropic billing pivot.** Anthropic announced this morning that starting **2026-06-15**, `claude -p` and Agent SDK usage no longer count toward subscription limits — they draw from a small per-plan Agent SDK credit ($20 Pro / $100 Max 5x / $200 Max 20x), then pay-as-you-go API rates. Operator's entire architecture spawns `claude -p --resume <id>` per meeting; under the new rules, a Max-20x user running operator on daily meetings would drain the credit in days. The "free on your existing subscription" economic premise dies for `-p`.
 
 **Spent this session validating the pivot and committing the plan, not refactoring production code.** Seven spikes in `debug/14_22_pty_spike/`, full reasoning in `debug/14_22_pty_spike/DECISION.md`. Single commit `8816cef` (S226: 14.22 pivot spike — claude -p → interactive claude via PTY+hooks).
 
@@ -44,14 +85,14 @@ SPAWN:  cwd = user's project dir (so --resume finds the session JSONL)
 3. **AEC3's internal causal-direction delay-search window covers ~63 ms to 500 ms — over-shifting is safe.** All pre-shifts from -63 ms to -500 ms gave the same -30 dB result on test data. Past 500 ms, AEC3 falls off a cliff. So we don't need per-session calibration; a conservative hardcoded shift works.
 4. **Design pick: 150 ms hardcoded pre-shift.** Covers built-in speakers (the ~63 ms case) with 85 ms margin; well below 500 ms ceiling. Scope decision (user-confirmed): only optimize for built-in-speakers bleed. Headphones (wired or BT in-ear) have no bleed; HDMI/TV speakers are documented as "use headphones." Saved as `project_aec_design_findings` memory.
 
-**Integration plan (not yet implemented):** 7-step plan to wire AEC3 in as a separate Rust subprocess called from Python (helper unchanged, lower risk):
-1. Extend `aec3_spike` Rust binary to streaming mode (read framed PCM stdin, write framed cleaned-M stdout)
-2. New `pipeline/aec_cleaner.py` — manages subprocess + 150 ms M delay buffer + S-M frame pairing
-3. Wire into `connectors/attach_adapter.py` — route S to AudioProcessor_S + AecCleaner; route cleaned M from AecCleaner to AudioProcessor_M
-4. Delete dead bleed-suppression code from `pipeline/audio.py` (`far_end` arg, `speech_active` cross-leg coupling, `BLEED_*` rename)
-5. Build pipeline for the Rust binary (install to `~/.operator/bin/aec3_cleaner`)
-6. Unit + integration tests
-7. Live validation in real Meet
+**Integration plan — all 7 steps shipped in S227 (`bc56fad`):**
+1. ✅ Extend `aec3_spike` Rust binary to streaming mode (read framed PCM stdin, write framed cleaned-M stdout)
+2. ✅ New `pipeline/aec_cleaner.py` — manages subprocess + 150 ms M delay buffer + S-M frame pairing
+3. ✅ Wire into `connectors/attach_adapter.py` — route S to AudioProcessor_S + AecCleaner; route cleaned M from AecCleaner to AudioProcessor_M
+4. ✅ Delete dead bleed-suppression code from `pipeline/audio.py` (`far_end` arg, `speech_active` cross-leg coupling, `BLEED_*` rename)
+5. ✅ Build pipeline for the Rust binary (install to `~/.operator/bin/aec3`)
+6. ✅ Unit + integration tests (`tests/test_aec_cleaner.py` + dedupe cases in `tests/test_attach_audio_wiring.py`)
+7. ✅ Live validation in real Meet — -30 dB ERL match across two runs
 
 Spike code lives at `debug/14_23_aec_spike/`. Rust binary at `debug/14_23_aec_spike/aec3/target/release/aec3_spike`. Test recordings at `debug/14_23_aec_spike/session_{S,M}.wav` + `session_log.txt`. Archive of full-volume v1 test recording at `debug/14_23_aec_spike/archive_v1_fullvol/`.
 
