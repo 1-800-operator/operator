@@ -20,16 +20,28 @@ How it works:
     Char-by-char typing silently dropped chars on long messages.
   - Output: hook events. The operator-plugin's Stop hook appends each
     completed reply as JSONL to $OPERATOR_SESSION_DIR/replies.jsonl;
-    PreToolUse → tools.jsonl; PostToolUseFailure / PermissionDenied /
-    StopFailure → errors.jsonl. The provider tails these files for
-    structured events — no screen scraping, no TUI parsing.
+    the provider tails that file for completed turns — no screen
+    scraping, no TUI parsing. (The plugin also writes tools.jsonl /
+    errors.jsonl; the provider no longer reads them — Phase 14.22
+    section G's operator-side tool narration was dropped in favour of
+    Claude self-narrating, briefed via the first paste.)
+
+Briefing: the first bracketed-paste operator sends is an
+operator-authored context message (see _BRIEFING) telling inner-claude
+it's in a live meeting and to narrate its tool calls in its own voice.
+This rides the same channel a human types on, so it does NOT change the
+spawn signature — the naked-spawn invariant constrains spawn *flags*
+(no -p, no --append-system-prompt, no --mcp-config), not the message
+stream. Turn 0's reply is consumed by _send_briefing and never posted.
 
 Why not Stop-block input (return decision=block from Stop hook to
 inject next turn): claude's prompt-injection defense fires on it.
 Spike_framing proved every hook-injected message gets refused as a
 suspected prompt-injection attempt, even with a counter-instruction at
 session start. Filtering "Stop hook feedback:" at an API proxy would
-bypass an Anthropic safety feature — strategic non-starter.
+bypass an Anthropic safety feature — strategic non-starter. (Note: a
+*first user-turn paste* is not hook-injected and is not refused — the
+prompt-injection defense is specific to Stop-block feedback.)
 
 Why bracketed-paste (and not `claude -p` over stdin): the new spawn
 is interactive, so it owns the TTY and there is no `--input-format
@@ -105,13 +117,24 @@ _SPAWN_FALLBACK_SETTLE_SECONDS = 5.0
 # posted) stays in the noise floor of the meeting-chat send path.
 _REPLIES_POLL_SECONDS = 0.15
 
-# Tail-loop cadence for the observability files (tools.jsonl,
-# errors.jsonl). Same 0.15s as the reply tail. The poll window doubles
-# as the batch boundary for tool narration: rows that land between two
-# polls are read together and narrated as one line (a parallel tool
-# call or a sub-150ms chain), which is the operator-voice behavior
-# section G is after.
-_TAIL_POLL_SECONDS = 0.15
+# How long to wait for inner-claude to acknowledge the briefing paste
+# (turn 0) before proceeding anyway. Generous — a one-line ack is fast,
+# but a cold resume can take a few seconds. On timeout the spawn still
+# proceeds; real turns will surface a genuine hook-side failure.
+_BRIEFING_REPLY_TIMEOUT_SECONDS = 60.0
+
+# Operator's briefing — the first bracketed-paste sent to a freshly
+# spawned inner-claude, before any real meeting turn. Operator-authored
+# context, deliberately conversational (not a rigid preamble): it rides
+# the same input channel a human types on, so it carries no spawn-
+# signature weight. See the module docstring on the naked-spawn
+# invariant. _send_briefing consumes turn 0's reply so this never
+# reaches meeting chat.
+_BRIEFING = """Quick context before we start: you're in a live Google Meet right now, and whatever you say goes straight into the meeting chat for everyone on the call to read. So keep replies short and conversational — chat-length, not essay-length.
+
+Before you run a tool — reading a file, searching, running a command — say what you're about to do in a quick line, like "let me grab that file" or "searching for it now." Then post the result when you have it. The point is the room sees what you're doing instead of staring at a blank screen while a tool runs.
+
+Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
 
 class ClaudeCLINotFoundError(RuntimeError):
@@ -126,96 +149,28 @@ def _set_winsize(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _drain_pty_thread(master_fd, dump_buf, stop_event, on_eof):
+def _drain_pty_thread(master_fd, dump_buf, stop_event):
     """Drain master_fd into a rolling buffer for diagnostics on death.
 
     The TUI emits cursor-positioned bytes that aren't useful to parse —
     we capture the tail purely so a crashed-claude failure has something
     to surface in the error message. The reader runs until stop_event
     fires or the PTY closes (read() hits EOF or raises OSError).
-
-    on_eof fires exactly once if the PTY closes while stop_event is NOT
-    set — i.e. inner-claude died on its own. On a normal _terminate_inner
-    teardown stop_event is set before the kill, so on_eof does not fire
-    and the drain thread exits silently.
     """
-    def _maybe_eof():
-        if stop_event.is_set():
-            return
-        try:
-            on_eof()
-        except Exception as e:
-            log.warning(f"ClaudeCLI: PTY on_eof callback raised: {e}")
-
     while not stop_event.is_set():
         try:
             r, _, _ = select.select([master_fd], [], [], 0.2)
         except (OSError, ValueError):
-            _maybe_eof()
             return
         if not r:
             continue
         try:
             chunk = os.read(master_fd, 4096)
         except OSError:
-            _maybe_eof()
             return
         if not chunk:
-            _maybe_eof()
             return
         dump_buf.append(chunk)
-
-
-def _tail_jsonl_thread(path, stop_event, on_batch, poll_seconds):
-    """Tail an append-only JSONL file, handing each poll's new rows to
-    on_batch as a list of parsed objects.
-
-    Seeds its read position to the file's current size at start, so rows
-    written before this thread spawned (e.g. a resumed meeting's earlier
-    turns) are not replayed — the same seed-to-EOF discipline the
-    chat-message observer uses. Each poll reads everything appended since
-    the last read, splits on newlines, and parses complete lines; a
-    partial trailing line (a hook script mid-flush) is held back for the
-    next poll. A missing file is tolerated — the hook that writes it may
-    simply not have fired yet.
-    """
-    try:
-        offset = path.stat().st_size
-    except OSError:
-        offset = 0
-    buf = b""
-    while not stop_event.is_set():
-        time.sleep(poll_seconds)
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        if size <= offset:
-            continue
-        try:
-            with path.open("rb") as f:
-                f.seek(offset)
-                chunk = f.read()
-        except OSError:
-            continue
-        offset += len(chunk)
-        buf += chunk
-        parts = buf.split(b"\n")
-        buf = parts.pop()  # trailing partial line (or b"" if chunk ended on \n)
-        rows = []
-        for line in parts:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line.decode("utf-8")))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-        if rows:
-            try:
-                on_batch(rows)
-            except Exception as e:
-                log.warning(f"ClaudeCLI: jsonl tail on_batch raised: {e}")
 
 
 class ClaudeCLIProvider(LLMProvider):
@@ -251,8 +206,6 @@ class ClaudeCLIProvider(LLMProvider):
         self._session_dir = Path(session_dir)
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._replies_path = self._session_dir / "replies.jsonl"
-        self._tools_path = self._session_dir / "tools.jsonl"
-        self._errors_path = self._session_dir / "errors.jsonl"
         self._ready_flag_path = self._session_dir / "ready.flag"
         self._metadata_path = self._session_dir / "metadata.json"
 
@@ -262,26 +215,17 @@ class ClaudeCLIProvider(LLMProvider):
         self._pty_reader_thread: threading.Thread | None = None
         self._pty_dump: list[bytes] = []
 
-        # Hook-event tail loops (section G). tools.jsonl → progress
-        # narration; errors.jsonl → denial + connection narration. Both
-        # share one stop event; lifetimes match the inner-claude process.
-        self._tail_stop = threading.Event()
-        self._tools_tail_thread: threading.Thread | None = None
-        self._errors_tail_thread: threading.Thread | None = None
-
         self._spawn_lock = threading.Lock()
         self._spawn_in_progress = False
         self._spawn_exc: Exception | None = None
         self._stopping = False
 
-        # Callback slots — preserved from the prior provider shape so
-        # ChatRunner._wire_provider keeps working. progress is fed from
-        # the tools.jsonl tail, denial + connection from the errors.jsonl
-        # tail, and connection also from the PTY EOF watcher (section G).
-        self._progress_callback = None
+        # Tick callback: ChatRunner drains its off-thread send queue on
+        # every reply-tail poll. The progress/denial/connection callbacks
+        # the prior provider shape carried are gone — Claude self-narrates
+        # its tool calls now (briefed via the first paste), so operator
+        # no longer tails tools.jsonl / errors.jsonl.
         self._tick_callback = None
-        self._denial_callback = None
-        self._connection_callback = None
 
         # Captured `session_id` for archival. The Stop hook payload
         # includes `transcript_path` and `session_id`; we record the
@@ -290,35 +234,12 @@ class ClaudeCLIProvider(LLMProvider):
 
     # --- callback wiring (set by ChatRunner._wire_provider) -----------
 
-    def set_progress_callback(self, callback):
-        """Tool-use narrator. Fed by the tools.jsonl tail loop. Signature:
-        callback(batch) where batch is a list of (tool_name, tool_input)
-        pairs — one poll's worth of PreToolUse rows. A parallel tool call
-        or a sub-poll-window chain arrives as a multi-element batch.
-        """
-        self._progress_callback = callback
-
     def set_tick_callback(self, callback):
         """Per-iteration tick during the reply tail loop. Used by
         ChatRunner to drain its off-thread send queue while the
         polling thread is parked here. Signature: () -> None.
         """
         self._tick_callback = callback
-
-    def set_denial_callback(self, callback):
-        """Permission-denial narrator. Fed by errors.jsonl rows whose
-        `kind` is PermissionDenied or PostToolUseFailure. Signature:
-        callback(tool_use_id).
-        """
-        self._denial_callback = callback
-
-    def set_connection_callback(self, callback):
-        """Connection-status narrator. Fed by errors.jsonl rows whose
-        `kind` is StopFailure, and by the PTY EOF watcher when
-        inner-claude dies on its own. Signature: callback(event); the
-        only event raised here is "dropped".
-        """
-        self._connection_callback = callback
 
     # --- lifecycle ----------------------------------------------------
 
@@ -441,35 +362,10 @@ class ClaudeCLIProvider(LLMProvider):
         self._pty_dump = []
         self._pty_reader_thread = threading.Thread(
             target=_drain_pty_thread,
-            args=(
-                master_fd,
-                self._pty_dump,
-                self._pty_reader_stop,
-                lambda: self._fire_connection("dropped"),
-            ),
+            args=(master_fd, self._pty_dump, self._pty_reader_stop),
             daemon=True,
         )
         self._pty_reader_thread.start()
-
-        # Section G observability tails. Seeded to current EOF inside the
-        # thread, so a resumed meeting doesn't replay earlier rows. The
-        # files may not exist yet — the tail tolerates that until the
-        # first hook fires.
-        self._tail_stop = threading.Event()
-        self._tools_tail_thread = threading.Thread(
-            target=_tail_jsonl_thread,
-            args=(self._tools_path, self._tail_stop, self._on_tools_batch,
-                  _TAIL_POLL_SECONDS),
-            daemon=True,
-        )
-        self._errors_tail_thread = threading.Thread(
-            target=_tail_jsonl_thread,
-            args=(self._errors_path, self._tail_stop, self._on_errors_batch,
-                  _TAIL_POLL_SECONDS),
-            daemon=True,
-        )
-        self._tools_tail_thread.start()
-        self._errors_tail_thread.start()
 
         # Record metadata up-front so it survives a crash before any
         # reply lands.
@@ -488,6 +384,7 @@ class ClaudeCLIProvider(LLMProvider):
 
         self._wait_for_ready()
         log.info(f"ClaudeCLI: inner-claude live (pid={proc.pid})")
+        self._send_briefing()
 
     def _wait_for_ready(self):
         """Block until the SessionStart hook writes ready.flag, with timeout.
@@ -525,17 +422,6 @@ class ClaudeCLIProvider(LLMProvider):
             self._pty_reader_stop.set()
             self._pty_reader_thread.join(timeout=2)
             self._pty_reader_thread = None
-
-        # Stop the section G tails before the kill so the EOF watcher and
-        # the StopFailure tail don't narrate a "dropped" during our own
-        # teardown.
-        if self._tools_tail_thread is not None or self._errors_tail_thread is not None:
-            self._tail_stop.set()
-            for t in (self._tools_tail_thread, self._errors_tail_thread):
-                if t is not None:
-                    t.join(timeout=2)
-            self._tools_tail_thread = None
-            self._errors_tail_thread = None
 
         if proc is not None and proc.poll() is None:
             try:
@@ -594,72 +480,34 @@ class ClaudeCLIProvider(LLMProvider):
         except Exception as e:
             log.warning(f"ClaudeCLI: tick callback raised: {e}")
 
-    def _fire_progress(self, tool_batch):
-        cb = self._progress_callback
-        if cb is None:
-            return
-        try:
-            cb(tool_batch)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: progress callback raised: {e}")
+    # --- briefing -----------------------------------------------------
 
-    def _fire_denial(self, tool_use_id):
-        cb = self._denial_callback
-        if cb is None:
-            return
-        try:
-            cb(tool_use_id)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: denial callback raised: {e}")
+    def _send_briefing(self):
+        """Send the operator briefing (turn 0) and consume its reply.
 
-    def _fire_connection(self, event):
-        cb = self._connection_callback
-        if cb is None:
-            return
-        try:
-            cb(event)
-        except Exception as e:
-            log.warning(f"ClaudeCLI: connection callback raised: {e}")
-
-    # --- hook-event tail handlers (section G) -------------------------
-
-    def _on_tools_batch(self, rows):
-        """tools.jsonl tail handler. Each row is pretool.sh's envelope:
-        {ts, kind:"pretool", input:<PreToolUse payload>}. Collapse the
-        poll's rows into a single (name, input) batch and fire progress
-        once — rows read in one poll arrived inside one poll window
-        (a parallel tool call or a sub-150ms chain), which the
-        operator-voice narrator renders as one line.
+        The briefing tells inner-claude it's in a live meeting and to
+        narrate its tool calls — see _BRIEFING and the module docstring.
+        Whatever Claude says back is consumed here and never reaches
+        meeting chat: the first *real* turn is what the room sees.
+        Best-effort — a briefing hiccup logs and proceeds; the real
+        turns will surface any genuine hook-side failure.
         """
-        batch = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            inner = row.get("input") if isinstance(row.get("input"), dict) else row
-            name = inner.get("tool_name")
-            if not isinstance(name, str) or not name:
-                continue
-            tinput = inner.get("tool_input")
-            batch.append((name, tinput if isinstance(tinput, dict) else {}))
-        if batch:
-            self._fire_progress(batch)
-
-    def _on_errors_batch(self, rows):
-        """errors.jsonl tail handler. error.sh stamps a top-level `kind`
-        from the hook event name; dispatch denial vs connection off it.
-        """
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            kind = row.get("kind")
-            inner = row.get("input") if isinstance(row.get("input"), dict) else row
-            if kind in ("PermissionDenied", "PostToolUseFailure"):
-                tool_use_id = (
-                    inner.get("tool_use_id") or inner.get("tool_name") or ""
-                )
-                self._fire_denial(tool_use_id)
-            elif kind == "StopFailure":
-                self._fire_connection("dropped")
+        prev = self._count_replies()
+        try:
+            self._send_message(_BRIEFING)
+            reply = self._wait_for_next_reply(
+                prev, timeout=_BRIEFING_REPLY_TIMEOUT_SECONDS
+            )
+        except ClaudeCLIProtocolError as exc:
+            log.warning(f"ClaudeCLI: briefing failed ({exc}) — proceeding")
+            return
+        if reply is None:
+            log.warning(
+                "ClaudeCLI: briefing reply never landed — proceeding anyway "
+                "(operator-plugin hooks may not be installed)"
+            )
+        else:
+            log.info("ClaudeCLI: briefing acknowledged; turn 0 consumed")
 
     # --- send + tail --------------------------------------------------
 

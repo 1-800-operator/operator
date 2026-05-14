@@ -35,17 +35,6 @@ PARTICIPANT_CHECK_INTERVAL = 3  # seconds between participant count checks
 # each paragraph as a distinct message rather than a burst.
 STREAM_PARAGRAPH_MIN_INTERVAL = 0.25
 
-# Throttle for operator-voice tool-use narration (`[☎️ Operator] running
-# <tool>: <args>` posts). progress_callback fires per tool_use block as
-# the model emits them; without throttling, fast tool chains would spam
-# chat (`[☎️ Operator] running ls`, `cat`, `grep`, `ls`, `cat`...). After
-# posting one narration, suppress further posts until this many seconds
-# have passed; on the next tool_use after cooldown, post the latest tool.
-# 20s lands in the user-expressed 20-30s comfort window — long enough that
-# rapid chains collapse into one line, short enough that genuinely long
-# tool runs (90s test suite) get periodic "still working" updates.
-TOOL_NARRATION_THROTTLE_SECONDS = 20.0
-
 
 class ChatRunner:
     """Polls meeting chat and responds to messages."""
@@ -99,19 +88,6 @@ class ChatRunner:
         self._saw_others: bool = False
         self._alone_since: float | None = None
         self._last_participant_check: float = 0.0
-        # Operator-voice tool-narration throttle. Stamps the monotonic
-        # time of the last `[☎️ Operator] running <tool>` post so the
-        # progress_callback can suppress further narrations for
-        # TOOL_NARRATION_THROTTLE_SECONDS after each one. Reset to 0.0
-        # at turn start so each new @mention's first tool_use fires
-        # narration without delay.
-        self._last_tool_narration_ts: float = 0.0
-        # Per-turn dedup for `[☎️ Operator] permission denied for X`
-        # hints. Operator names `--yolo` once per @mention even if
-        # multiple tools are denied — repeating the same recovery
-        # suggestion on every chained denial is noise. Cleared at turn
-        # start in _handle_message.
-        self._denied_tool_ids_in_turn: set[str] = set()
         # Cached LLM provider. Set by _wire_provider when the provider
         # is a ClaudeCLIProvider; remains None otherwise. stop() calls
         # provider.stop() so a SIGINT shutdown doesn't race a mid-turn
@@ -130,152 +106,31 @@ class ChatRunner:
         self._send_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
     def _wire_provider(self):
-        """Cache the ClaudeCLIProvider and wire its observability callbacks.
+        """Cache the ClaudeCLIProvider and wire its tick callback.
 
         Operator does not impose its own permission layer — Claude Code's
-        native rules apply (governed by `--dangerously-skip-permissions`
-        when --yolo is set, otherwise by the user's
-        `~/.claude/settings.json`). This method wires the four
-        operator-side observability callbacks the provider exposes:
+        native rules apply. The only provider callback operator wires is:
 
-          - progress_callback: posts `[☎️ Operator] running <tool>: <args>`
-            to chat in operator's switchboard voice, throttled to one
-            post per TOOL_NARRATION_THROTTLE_SECONDS so fast tool chains
-            don't spam.
           - tick_callback: drains off-thread queued sends on the polling
-            thread during in-turn out-queue iteration (the polling
-            thread is parked inside `complete_streaming` for the duration
-            of a turn; without this drain, operator-voice sends queued
-            from the provider's pump thread would wait until the turn
-            finished and post in a burst at end-of-stream).
-          - denial_callback: posts `[☎️ Operator] permission denied for
-            X — re-run with --yolo to skip per-tool approval` once per
-            tool_use_id per turn when Claude Code blocks a tool call.
-          - connection_callback: posts switchboard-voice status when
-            inner-claude crashes mid-stream (`[☎️ Operator] connection
-            dropped — reconnecting…` → retry → `connection restored` or
-            `couldn't reach Claude`).
+            thread during the in-turn reply-tail loop (the polling thread
+            is parked inside `complete_streaming` for the duration of a
+            turn; without this drain, sends queued from another thread
+            would wait until the turn finished and post in a burst).
+
+        Tool-call narration is no longer operator's job — inner-claude
+        narrates its own tool calls in its own voice, briefed via the
+        provider's first-paste briefing. See ClaudeCLIProvider._BRIEFING.
 
         Caching `self._provider` lets stop() also stop the provider so
-        SIGINT doesn't race a mid-turn EOF retry.
+        SIGINT doesn't race a mid-turn teardown.
         """
         from _1_800_operator.pipeline.providers.claude_cli import ClaudeCLIProvider
         provider = getattr(self._llm, "_provider", None)
         if not isinstance(provider, ClaudeCLIProvider):
             return
-        provider.set_progress_callback(self._narrate_tool_use)
         provider.set_tick_callback(self._drain_pending_sends)
-        provider.set_denial_callback(self._narrate_denial)
-        provider.set_connection_callback(self._narrate_connection)
         self._provider = provider
         log.info("ChatRunner: provider wired (no permission gate; Claude Code defaults apply)")
-
-    def _narrate_tool_use(self, tools):
-        """Progress callback hooked into ClaudeCLIProvider — posts a
-        `[☎️ Operator] running <tool>: <args>` line to meeting chat,
-        throttled to one post per TOOL_NARRATION_THROTTLE_SECONDS.
-
-        `tools` is a batch: the list of (tool_name, tool_input) pairs the
-        provider read from tools.jsonl in a single poll. A lone tool
-        renders with its arg summary (`running Read: foo.py`); a parallel
-        tool call or a sub-poll-window chain arrives as a multi-element
-        batch and collapses to a names-only line (`running Read, Edit,
-        Bash`) — arg summaries are dropped there because three file paths
-        would blow the chat line length.
-
-        Runs on the provider's tail-loop thread, NOT the main Playwright-
-        owning thread, so `_send` enqueues onto `_send_queue` and the
-        provider's tick callback drains it on the polling thread.
-
-        Filter: skip ToolSearch (internal tool-schema loader the user
-        doesn't need to see) — same filter rule the old
-        `_PRE_TOOL_VOICE_RULE` carried before it was stripped.
-        """
-        named = [(n, i) for (n, i) in tools if n and n != "ToolSearch"]
-        if not named:
-            return
-        now = time.monotonic()
-        if now - self._last_tool_narration_ts < TOOL_NARRATION_THROTTLE_SECONDS:
-            return
-        try:
-            if len(named) == 1:
-                tool_name, tool_input = named[0]
-                summary = self._summarize_tool_input(tool_input or {})
-                line = f"running {tool_name}"
-                if summary:
-                    line = f"{line}: {summary}"
-            else:
-                line = "running " + ", ".join(n for n, _ in named)
-            self._send(REPLY_PREFIX_OPERATOR + line, kind="operator_status", raw=True)
-            self._last_tool_narration_ts = now
-        except Exception as e:
-            log.warning(f"ChatRunner: _narrate_tool_use failed: {e}")
-
-    def _narrate_denial(self, tool_use_id: str):
-        """Denial callback — posts an operator-voice hint about `--yolo`
-        when Claude Code blocks a tool call. Once per tool_use_id per
-        turn so chained denials don't spam the same recovery suggestion.
-        """
-        if tool_use_id in self._denied_tool_ids_in_turn:
-            return
-        self._denied_tool_ids_in_turn.add(tool_use_id)
-        try:
-            self._send(
-                REPLY_PREFIX_OPERATOR
-                + "permission denied — re-run with --yolo to skip per-tool approval",
-                kind="operator_status",
-                raw=True,
-            )
-        except Exception as e:
-            log.warning(f"ChatRunner: _narrate_denial failed: {e}")
-
-    def _narrate_connection(self, event: str):
-        """Connection callback — posts switchboard-voice status when the
-        inner-claude shellout crashes mid-stream and we're retrying with
-        `--resume`. event ∈ {"dropped", "reconnecting", "failed"}.
-        """
-        if event == "dropped":
-            text = "connection dropped — reconnecting…"
-        elif event == "reconnecting":
-            # We posted "dropped" already; "reconnecting…" is implied by
-            # the ellipsis. Suppress to avoid double-posting the same
-            # state. Kept on the callback contract for symmetry in case
-            # the provider's retry path ever fires the two events
-            # independently.
-            return
-        elif event == "failed":
-            text = "couldn't reach Claude — try @mentioning again in a moment"
-        else:
-            log.warning(f"ChatRunner: unknown connection event {event!r}")
-            return
-        try:
-            self._send(REPLY_PREFIX_OPERATOR + text, kind="operator_status", raw=True)
-        except Exception as e:
-            log.warning(f"ChatRunner: _narrate_connection failed: {e}")
-
-    @staticmethod
-    def _summarize_tool_input(tool_input: dict) -> str:
-        """Format tool args for a one-line operator-voice narration.
-
-        Picks the most informative single argument: `file_path` for
-        Read/Edit/Write, `command` for Bash, `pattern` for Grep, etc.
-        Falls back to a `(arg-key-list)` sentinel when no preferred key
-        matches. Caps individual arg length at 100 chars so a giant
-        Bash command doesn't blow the chat line length.
-        """
-        if not tool_input:
-            return ""
-        preferred_keys = (
-            "file_path", "command", "pattern", "query",
-            "url", "prompt", "path",
-        )
-        for key in preferred_keys:
-            if key in tool_input:
-                val = tool_input[key]
-                if isinstance(val, str):
-                    return val if len(val) < 100 else val[:100] + "…"
-                return str(val)[:100]
-        return "(" + ", ".join(tool_input.keys())[:80] + ")"
 
     @staticmethod
     def _wrap_meet_chat(text: str, sender: str) -> str:
@@ -608,11 +463,6 @@ class ChatRunner:
         """Process a single chat message via LLM."""
         self._turn_count += 1
         self._turn_start_ts = time.time()
-        # Reset per-turn observability state so the new @mention's first
-        # tool_use fires narration without delay (throttle stamp) and
-        # any prior turn's denial dedup doesn't leak.
-        self._last_tool_narration_ts = 0.0
-        self._denied_tool_ids_in_turn.clear()
         # Open the per-turn timing trace. _send populates t_first_visible on
         # first chat post; _emit_turn_done drains + logs `TIMING turn_complete`.
         self._turn_timing = {
