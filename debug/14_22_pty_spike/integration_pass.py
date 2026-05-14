@@ -52,9 +52,14 @@ def _banner(text):
 
 
 def _make_provider():
-    """A fresh-session provider in an isolated temp cwd (no --resume, no
-    foreign hooks from a real project dir)."""
-    cwd = tempfile.mkdtemp(prefix="operator_intg_")
+    """A fresh-session provider, spawned in the operator repo root.
+
+    Must be a dir Claude Code already trusts — a fresh tempfile.mkdtemp()
+    triggers the first-run workspace-trust dialog, which blocks
+    SessionStart and wedges the boot (exactly what item 1 detects). The
+    repo root is trusted from normal dev use, so the boot is clean.
+    """
+    cwd = str(_REPO)
     return ClaudeCLIProvider(cwd=cwd), cwd
 
 

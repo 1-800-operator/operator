@@ -247,7 +247,11 @@ def test_spawn_failure_surfaces_detail():
     with tempfile.TemporaryDirectory() as tmp:
         provider = _new_provider(tmp)
         provider._spawn_exc = RuntimeError("claude binary vanished")
-        # pre_warm is a no-op here: leave _proc None to simulate a failed spawn.
+        # Simulate a finished-but-failed boot: the real pre_warm always
+        # sets _boot_done in its finally (success or failure) and records
+        # the cause on _spawn_exc. Stub pre_warm to a no-op so _proc stays
+        # None, and set _boot_done so _run_turn's gate doesn't wait.
+        provider._boot_done.set()
         provider.pre_warm = lambda: None
         try:
             provider.complete(
@@ -255,7 +259,7 @@ def test_spawn_failure_surfaces_detail():
                 messages=[{"role": "user", "content": "hi"}],
                 model=None, max_tokens=None,
             )
-            assert False, "should raise when _proc never comes up"
+            assert False, "should raise when the boot failed"
         except ClaudeCLIProtocolError as exc:
             assert "claude binary vanished" in str(exc), (
                 f"spawn failure should surface the real cause: {exc}"
@@ -625,6 +629,10 @@ def _drive_turn(provider, user_text, transcript_events, stop_text,
         )
 
     provider._send_message = _fake_send
+    # These tests set _proc directly without going through pre_warm, so
+    # mark the boot complete — otherwise _run_turn's gate would wait out
+    # its (real) ceiling for a _boot_done that never gets set.
+    provider._boot_done.set()
     messages = [{"role": "user", "content": user_text}]
     if on_paragraph is not None:
         return provider.complete_streaming(
@@ -682,6 +690,7 @@ def test_full_turn_stop_text_backstop():
     with tempfile.TemporaryDirectory() as tmp:
         provider = _new_provider(tmp)
         provider._proc = _FakeProc(alive=True)
+        provider._boot_done.set()  # _proc set directly, skip _run_turn's boot gate
         # No transcript path set and none captured → transcript tail is inert.
         provider._transcript_path = None
 
@@ -758,6 +767,66 @@ def test_run_turn_respawns_after_crash():
     print("  _run_turn respawns after a crashed inner-claude OK")
 
 
+def test_run_turn_waits_for_boot():
+    """_run_turn gates on _boot_done: an @mention that races the boot
+    posts a one-line "still getting set up" (authorized — the turn was
+    solicited, so it's not an unprompted post), waits for the boot to
+    finish, then either proceeds or surfaces the held failure. It never
+    pastes into a half-booted TUI.
+    """
+    # Case A: boot in progress, then finishes FAILED → surface _spawn_exc.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider.pre_warm = lambda: None  # don't actually spawn
+        # _boot_done unset + _proc None == "boot still in progress".
+        paragraphs = []
+
+        def _finish_boot_failed():
+            time.sleep(0.3)
+            provider._spawn_exc = ClaudeCLIProtocolError("boot blocked on a prompt")
+            provider._boot_done.set()
+
+        threading.Thread(target=_finish_boot_failed, daemon=True).start()
+        try:
+            provider.complete_streaming(
+                system=None, messages=[{"role": "user", "content": "hi"}],
+                model=None, max_tokens=None,
+                on_paragraph=lambda p: paragraphs.append(p),
+            )
+            assert False, "a failed boot should surface as a raise"
+        except ClaudeCLIProtocolError as exc:
+            assert "boot blocked on a prompt" in str(exc), exc
+        assert paragraphs and "still getting set up" in paragraphs[0], (
+            f"should post a 'still getting set up' line during the wait: {paragraphs}"
+        )
+
+    # Case B: boot in progress, then finishes OK → the turn proceeds.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider.pre_warm = lambda: None
+        provider._transcript_path = Path(tmp) / "transcript.jsonl"
+        provider._transcript_path.touch()
+        paragraphs = []
+
+        def _finish_boot_ok():
+            time.sleep(0.3)
+            provider._proc = _FakeProc(alive=True)
+            provider._send_message = lambda msg: _write_jsonl(
+                provider._replies_path, [_stop_row("here you go")]
+            )
+            provider._boot_done.set()  # set last — this is what unblocks _run_turn
+
+        threading.Thread(target=_finish_boot_ok, daemon=True).start()
+        resp = provider.complete_streaming(
+            system=None, messages=[{"role": "user", "content": "hi"}],
+            model=None, max_tokens=None,
+            on_paragraph=lambda p: paragraphs.append(p),
+        )
+        assert paragraphs[0].startswith("still getting set up"), paragraphs
+        assert resp.text == "here you go", resp.text
+    print("  _run_turn waits for boot: warming line + surfaces outcome OK")
+
+
 # --- runner -----------------------------------------------------------
 
 
@@ -787,6 +856,7 @@ def main():
         test_full_turn_stop_text_backstop,
         test_full_turn_foreign_hook_notice,
         test_run_turn_respawns_after_crash,
+        test_run_turn_waits_for_boot,
     ]
     for t in tests:
         print(t.__name__)

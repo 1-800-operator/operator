@@ -280,6 +280,16 @@ class ClaudeCLIProvider(LLMProvider):
         self._spawn_exc: Exception | None = None
         self._stopping = False
 
+        # Boot-complete signal. pre_warm runs on a background thread
+        # (kicked off by __main__ during the meeting-join window) and sets
+        # _proc *early* — when Popen returns, before _wait_for_ready and
+        # the briefing — so "_proc is alive" does NOT mean "ready for a
+        # turn". _boot_done is set only when pre_warm has fully finished,
+        # success or failure (paired with _spawn_exc, which says which).
+        # _run_turn gates on it so an @mention that races the boot waits
+        # for readiness instead of pasting into a half-booted TUI.
+        self._boot_done = threading.Event()
+
         # Tick callback: ChatRunner drains its off-thread send queue on
         # every reply-tail poll. The progress/denial/connection callbacks
         # the prior provider shape carried are gone — Claude self-narrates
@@ -334,6 +344,10 @@ class ClaudeCLIProvider(LLMProvider):
             if self._spawn_in_progress:
                 return
             self._spawn_in_progress = True
+            # Committing to a (re)spawn — boot is no longer "done" until
+            # this run finishes. Cleared here, set in the finally below,
+            # so _run_turn's gate sees an accurate signal across respawns.
+            self._boot_done.clear()
         try:
             self._spawn_inner()
             self._spawn_exc = None
@@ -343,6 +357,7 @@ class ClaudeCLIProvider(LLMProvider):
         finally:
             with self._spawn_lock:
                 self._spawn_in_progress = False
+                self._boot_done.set()
 
     # --- spawn --------------------------------------------------------
 
@@ -1019,24 +1034,44 @@ class ClaudeCLIProvider(LLMProvider):
             )
         user_text = last.get("content") or ""
 
-        # Lazy spawn / respawn: pre_warm should already have run from
-        # __main__, but a slow join or a missed pre_warm shouldn't break
-        # the turn. If a previous spawn died (inner-claude crashed, the
-        # PTY hit EOF), tear its threads + master_fd down before
-        # respawning — otherwise the dead spawn's PTY-drain and tail
-        # threads leak and keep running against the same files.
+        # --- ensure inner-claude is booted and ready ---------------------
+        # If a previous spawn died (inner-claude crashed, the PTY hit EOF),
+        # tear its threads + master_fd down before respawning — otherwise
+        # the dead spawn's PTY-drain / tail threads leak against the same
+        # files.
         if self._proc is not None and self._proc.poll() is not None:
             log.info("ClaudeCLI: inner-claude died — tearing down before respawn")
             self._terminate_inner()
-        if self._proc is None:
+        # Boot not running and not already up → start it. Normally
+        # __main__ already kicked pre_warm off on a background thread
+        # during the join window, so this is a no-op; it covers a missed
+        # pre_warm and the post-crash respawn above.
+        if self._proc is None and not self._spawn_in_progress:
             self.pre_warm()
-            if self._proc is None:
-                detail = (
-                    f": {self._spawn_exc}" if self._spawn_exc else ""
-                )
-                raise ClaudeCLIProtocolError(
-                    f"inner-claude failed to spawn{detail}"
-                )
+        # pre_warm sets _proc EARLY — when Popen returns, before
+        # _wait_for_ready and the briefing — so "_proc is alive" is not
+        # "ready for a turn". Block until the boot has actually finished.
+        # The user @mentioned, so a one-line "still coming up" is an
+        # authorized reply: never-post-unprompted forbids *unsolicited*
+        # chat, and this turn was solicited.
+        if not self._boot_done.is_set():
+            if on_paragraph is not None:
+                on_paragraph("still getting set up — give me a moment…")
+            # Bounded by the boot ceiling + margin; if pre_warm never
+            # finishes, the checks below turn the timeout into a clear
+            # failure rather than a hang.
+            self._boot_done.wait(timeout=_READY_FLAG_CEILING_SECONDS + 30)
+        # Boot finished (or we gave up waiting). A boot failure recorded
+        # silently on _spawn_exc now reaches the room — the deferred half
+        # of never-post-unprompted: logged at boot, surfaced only here, on
+        # an actual @mention. No retry; recovery is /operator:hangup +
+        # rejoin (the held message says what to fix).
+        if self._spawn_exc is not None:
+            raise ClaudeCLIProtocolError(str(self._spawn_exc))
+        if self._proc is None or not self._boot_done.is_set():
+            raise ClaudeCLIProtocolError(
+                "inner-claude did not finish starting up in time"
+            )
 
         t_start = time.monotonic()
         prev_count = self._count_replies()
