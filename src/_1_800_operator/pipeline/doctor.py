@@ -14,6 +14,7 @@ for slip's audio helper, Phase 14.20.4) skip on other platforms.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -240,17 +241,26 @@ def _check_mlx_whisper_warm() -> CheckResult:
             fix="re-run install.sh",
             optional=True,
         )
-    # One-line stderr hint so users on a cold-cache first run know why
-    # doctor is pausing here. Printing before the call (not after) so the
-    # hint sticks even if mlx crashes via fork-child.
-    print("    warming mlx-whisper-base (3-20s on first run)…", file=sys.stderr, flush=True)
+    # Hint goes to stdout (not stderr) so the desktop-app harness doesn't
+    # treat any stderr output as a failure and silence the result.
+    # tqdm from mlx_whisper writes to fd 2 directly, so redirect the real
+    # file descriptor to /dev/null for the duration of the call.
+    print("    warming mlx-whisper-base (3-20s on first run)…", flush=True)
     t0 = time.monotonic()
     try:
-        mlx_whisper.transcribe(
-            np.zeros(16000, dtype=np.float32),
-            path_or_hf_repo="mlx-community/whisper-base-mlx",
-            language="en",
-        )
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        saved_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        os.close(devnull_fd)
+        try:
+            mlx_whisper.transcribe(
+                np.zeros(16000, dtype=np.float32),
+                path_or_hf_repo="mlx-community/whisper-base-mlx",
+                language="en",
+            )
+        finally:
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
     except Exception as e:
         # Collapse multi-line exception text to the first line so the
         # checklist line stays readable.
