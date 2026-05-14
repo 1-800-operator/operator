@@ -1,64 +1,56 @@
-# Session 224 handoff (2026-05-13) — [S] speaker attribution + lazy chat-panel send
+# Session 225 handoff (2026-05-13) — AEC bleed-mitigation spike complete; integration not yet started
 
 ## What landed this session
 
-Three commits on `main`, pushed to both `origin` and `public`:
+**No production commits.** Work was entirely in `debug/14_23_aec_spike/` (untracked). The session converted S224's open question #1 (`[M]` bleed unreliable) from "we don't know what to do" to "we have a working algorithm + concrete parameters."
 
-1. **`528587c` — Exclude local tile from [S] speaker attribution.** The DOM speaking-indicator (BlxGDf class) fires for the local tile whenever the runner's mic is active. Room audio constantly bleeds into the mic (when listening on speakers), so the local tile is frequently "speaking" — and `[S]` utterances (which only contain remote participants) were getting tagged with the runner's name. Fix: `INSTALL_SPEAKING_OBSERVER_JS` now identifies the local tile via the same predicate as `GET_SELF_NAME_JS` and skips installing a MutationObserver on it. `_drain_speaking_queue` defensively filters events whose pid matches the cached local participant id, in case the tile DOM re-renders.
+### Spike artifacts (in `debug/14_23_aec_spike/`)
 
-2. **`8a8734d` — Stale truncation-notice assertions in transcript MCP tests.** Three assertions still matched the pre-`8b4260e` wording. Brought them in line with the current "showing the most recent N of …" / "omitted to fit response size" wording.
+- `record_test_session.sh` + `record_continuous.py` — guided 90-second test recorder that walks the user through seven labeled segments (silent baseline / bleed-only / user-only / two double-talk types / quick alternation / bookend) and dumps continuous S+M WAVs.
+- Two real test recordings: archived v1 (full speaker volume) in `archive_v1_fullvol/`, live v2 (realistic volume) at `session_{S,M}.wav` + `session_log.txt`.
+- `aec3/` Rust binary using `tonarino/webrtc-audio-processing` 2.1.0 with `bundled` + `experimental-aec3-config` features. Binary at `aec3/target/release/aec3_spike`. CLI: `--mic <wav> --ref <wav> --out <wav>`.
+- `analyze_session.py` / `diagnose.py` / `aligned_rerun.py` / `run_aec3_v2.py` / `aec3_shift_sweep.py` — measurement scripts.
+- Listenable A/B output at `out_aec3/listen_aec3_shifted.wav` — user verified by ear that the cleaned audio matches the numbers.
 
-3. **`<new>` — Lazy chat-panel send + drop stale `_chat_panel_open` cache.** See "Chat-panel architecture overhaul" below.
+### Empirical findings
 
-## Corrected reading of the S223 "Jojo in [S]" observation
+1. **WebRTC AEC3 + correct alignment gives -30 dB bleed cancellation, -0.1 dB user-voice damage, -8 dB double-talk reduction.** Default config; no tuning required.
+2. **speexdsp not viable** — only -17 dB max even on aligned data.
+3. **SCStream has a 63 ms anti-causal timing skew** (mic LEADS ref). This is the bug that made S224's coincidence-VAD bleed gate ineffective. Documented as new Hard Won Knowledge entry in `docs/agent-context.md`.
+4. **AEC3's causal delay-search window: 63-500 ms.** Over-shifting is safe within that range.
+5. **Production pick: 150 ms hardcoded pre-shift.** Saved as memory `project_aec_design_findings`.
 
-S223 closed with the hypothesis that the runner's voice was leaking into `[S]`. Today we verified that's not what's happening — `/tmp/operator_audio_debug/S/` WAVs contain only remote voices. The architecture is fine. The bug was attribution, not audio capture. Fixed in commit 1 above.
+### New memories saved
 
-## Chat-panel architecture overhaul (commit 3)
+- `feedback_no_rinky_dink_deps.md` — user rejected the small-but-clean DTLN-aec CoreML library mid-session ("rinky dink repo"). Don't propose load-bearing deps on bus-factor-of-one repos.
+- `project_aec_design_findings.md` — empirical findings + 150 ms shift + algorithm decision for the future integration session.
 
-Live tests in `UvVMjhH-lXwB` confirmed three properties:
+## Exact next step
 
-- **Q1: messages flow into the DOM while panel is closed** — `delta: 1`, full message text intact (`text length: 493`, `ends with @claude: true`, no ellipsis). Tested with a 500-char message ending in the trigger phrase.
-- **Q2: the `[data-panel-id]` container persists across close→reopen** — `same node? true` and `isConnected: true`. Meet uses a CSS-only toggle.
-- **Send button is disabled while panel is closed** — `button: true disabled: true`. Meet hard-gates send on panel visibility, so no console-event hack can post a message with the panel closed.
+**Start integration with step 1 of the 7-step plan in `docs/roadmap.md`'s Current Status section.** Step 1 is contained (~1 hour, only touches `debug/14_23_aec_spike/aec3/src/main.rs`):
 
-Practical implications:
+> Extend the Rust binary from batch mode (one-WAV in, one-WAV out) to streaming mode: read framed PCM on stdin using the same `[1-byte tag][4-byte BE length][N bytes Float32 LE]` protocol the audio helper outputs, internally maintain a 150 ms M-frame delay buffer, output framed cleaned-M frames on stdout. Long-running process; clean shutdown on stdin EOF.
 
-- **Receive-side works panel-closed** because the observer stays bound to the same container and Meet keeps inserting messages into it.
-- **Send-side requires the panel open** at the moment of send.
-- **The seed-loop race** (`project_chat_observer_seed_loop_drops_pre_install_messages`) still mandates that the observer install BEFORE any chat messages arrive, otherwise the seed-mark step silently swallows the first `@claude` mention.
+Other steps in order: `pipeline/aec_cleaner.py` (subprocess manager + delay buffer + frame pairing); wire into `connectors/attach_adapter.py`; delete the dead `far_end` coupling from `pipeline/audio.py`; add build/install for the Rust binary; tests; live validation. Each step is small enough to commit independently.
 
-Net design:
+## Open follow-ups (carried)
 
-1. Keep the **join-time `_ensure_chat_open`** — establishes the chat DOM so the observer can attach before any messages land.
-2. **Drop `_ensure_chat_open` from the read path** — once attached, the observer survives panel toggles and keeps firing.
-3. **Rewrite `_ensure_chat_open`** to check Meet's own send-button `disabled` state instead of a cached `_chat_panel_open` flag. The button is the authoritative signal: enabled ⇒ panel is open enough to send, disabled ⇒ click the toggle.
-4. **Drop `self._chat_panel_open`** entirely. The flag was a stale cache — once `True` it never went back to `False` when the user closed the panel manually, so `_ensure_chat_open` short-circuited and the send path tried to fill an invisible textarea.
-
-This fixes the silent-reply bug observed in the live test today. Five `send_chat failed: Locator.wait_for: Timeout 5000ms exceeded` warnings between 12:55 and 12:58 — claude generated each reply, but operator couldn't deliver because the textarea was in DOM but invisible (panel closed by the user, stale flag, no re-open). After this change: each send checks the button state live, opens if needed, no staleness window.
-
-## Bonus observation worth flagging (not in this PR)
-
-When `send_chat` fails, the claude subprocess has no feedback channel — it sees its own streamed reply land in stdout and assumes it was delivered. In today's test, when asked "why didn't you reply to the earlier messages?", claude said "I did reply to each one" — a confident hallucination. Wiring send_chat failures back into the claude session as a tool-result error would close that loop. Worth considering for a future PR; out of scope here.
+- **Claude reply-delivery feedback loop** (carried from S224) — when `send_chat` fails, the claude subprocess gets no signal. Not addressed this session.
+- **Post-MVP: gate `operator slip` behind the plugin** (carried from S224).
 
 ## State of the repo
 
-All commits pushed to `origin` and `public`. `uv tool install --reinstall .` needed before live validation.
+- `main` is at `f1add9d` (last S224 commit), unchanged this session.
+- Tracked-but-modified files: `README.md` (user-owned billing wording, convention is not to commit), `docs/agent-context.md` + `docs/handoff.md` + `docs/roadmap.md` (this session's updates — should commit). The agent-context + roadmap + handoff updates are the only changes worth committing this session.
+- Untracked: `debug/14_23_aec_spike/` (spike artifacts — generally we leave debug/ uncommitted, follow existing convention).
 
-The `README.md` is still dirty (user-owned billing-protection wording) — not committed by convention.
+## How to verify the spike findings in a fresh session
 
-## Open follow-ups
-
-- **`[M]` bleed problem** — the mic leg picks up remote audio via room playback. Many "user"-tagged captions in `sqr-vyex-wob.jsonl` are actually echoes of Kyle/Michael/Matt. The bleed-suppressor isn't catching them. Independent from the `[S]` attribution work. Mitigations to investigate: tighter VAD threshold on the mic leg, wider far-end-activity window, or just accept that listening on speakers degrades `[M]` quality.
-- **Claude reply-delivery feedback loop** — see bonus observation above.
-- **Skip the join-time panel open entirely** — possible but requires either a heuristic seed (push the most-recent `@claude` to the queue if it's within ~3s) or moving the observer to a wider attach point (`document.body` subtree). Punted today; 1-second join blip is the cleaner tradeoff.
-
-## How to verify in a live meeting
-
-1. `cd /Users/jojo/Desktop/operator && uv tool install --reinstall .`
-2. `OPERATOR_AUDIO_DEBUG=1 operator slip claude <multi-party-meet-url>`
-3. Confirm join-time panel open works: see `AttachAdapter: chat panel open` in `/tmp/operator.log`.
-4. Manually close the chat panel.
-5. From another participant, send `@claude hello`. Claude should reply with the panel still closed (the panel auto-pops open at send time).
-6. No `send_chat failed: Locator.wait_for` warnings should appear in `/tmp/operator.log`.
-7. Cross-check `[S]` attribution: no caption in `~/.operator/history/<slug>.jsonl` should have `sender` equal to your display name with text clearly from a remote participant.
+```bash
+cd debug/14_23_aec_spike
+source venv/bin/activate
+python aec3_shift_sweep.py
+# Expect: shifts -63 to -500 ms all give ~-30 dB bleed drop; past -500 falls off
+afplay out_aec3/listen_aec3_shifted.wav
+# A/B confirms the numbers by ear
+```
