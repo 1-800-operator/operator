@@ -184,7 +184,7 @@ class ChatRunner:
         # populated; a re-fire here would be a no-op (pre_warm is
         # idempotent under its _warm_lock).
         # Fire-and-forget plugin update check. If a newer version is on
-        # the marketplace, post a single operator-voice hint to chat.
+        # the marketplace, log a hint (log-only — not posted to chat).
         # Network-bound (one HTTPS GET, 5s timeout); silent on failure.
         # Daemon thread so the join return isn't delayed.
         threading.Thread(target=self._post_update_hint_if_newer, daemon=True).start()
