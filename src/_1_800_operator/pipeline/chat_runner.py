@@ -513,6 +513,10 @@ class ChatRunner:
             # Streaming path already posted each paragraph via on_paragraph.
             if not result.get("streamed"):
                 self._send(result["content"])
+            # Operator-observed notices (e.g. a foreign hook redirected
+            # the turn) — posted after the reply, in the bot's own voice.
+            for notice in result.get("notices") or []:
+                self._send(notice, kind="chat")
             self._emit_turn_done()
         else:
             log.error(f"_dispatch_result: unknown result shape {result!r}")

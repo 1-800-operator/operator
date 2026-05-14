@@ -95,7 +95,12 @@ class LLMClient:
         reply = response.text
         log.info(f"LLM reply=\"{(reply or '')[:80]}\"")
         if on_paragraph is not None:
-            return {"type": "text", "content": reply, "streamed": True}
+            return {
+                "type": "text",
+                "content": reply,
+                "streamed": True,
+                "notices": list(response.notices),
+            }
         return reply
 
     def warmup(self):

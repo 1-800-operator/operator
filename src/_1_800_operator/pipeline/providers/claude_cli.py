@@ -131,6 +131,18 @@ _REPLIES_POLL_SECONDS = 0.15
 # do one last transcript drain before closing the turn.
 _TRANSCRIPT_FINAL_DRAIN_SETTLE = 0.3
 
+# A foreign Stop hook (the user's own ~/.claude or project
+# settings.json) can run decision=block and inject "Stop hook
+# feedback: …", redirecting inner-claude mid-meeting. DECISION.md
+# section I: observable, not preventable — operator spawns in the
+# user's project dir for --resume, so that dir's hooks fire inside
+# meetings, and operator won't mutate the user's config to stop them.
+# The detection is surfaced to chat; the turn-end delay below is a
+# noisier proxy signal — logged only. If the gap between the final
+# assistant block landing and the Stop row appearing exceeds this,
+# foreign hooks may have run in between.
+_FOREIGN_HOOK_DELAY_WARN_SECONDS = 5.0
+
 # How long to wait for inner-claude to acknowledge the briefing paste
 # (turn 0) before proceeding anyway. Generous — a one-line ack is fast,
 # but a cold resume can take a few seconds. On timeout the spawn still
@@ -705,6 +717,35 @@ class ClaudeCLIProvider(LLMProvider):
         return texts
 
     @staticmethod
+    def _has_foreign_hook_feedback(events):
+        """True if a user-role transcript event carries the literal
+        'Stop hook feedback:' marker — a foreign Stop hook ran
+        decision=block and injected a redirect this turn (DECISION.md
+        section I: observable, not preventable).
+        """
+        MARKER = "Stop hook feedback:"
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "user":
+                continue
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                if MARKER in content:
+                    return True
+            elif isinstance(content, list):
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                        and MARKER in block["text"]
+                    ):
+                        return True
+        return False
+
+    @staticmethod
     def _extract_assistant_text(reply):
         """Pull `last_assistant_message` from a Stop hook payload.
 
@@ -824,6 +865,8 @@ class ClaudeCLIProvider(LLMProvider):
         tx_offset = [self._transcript_size()]
         tx_buf = [b""]
         posted: list[str] = []
+        last_block_ts = [None]   # monotonic time operator last saw an assistant block
+        foreign_hook = [False]   # a foreign Stop hook redirected this turn
 
         def _poll_transcript():
             tx_offset[0], tx_buf[0], events = self._read_transcript_lines(
@@ -831,8 +874,11 @@ class ClaudeCLIProvider(LLMProvider):
             )
             for block in self._assistant_texts(events):
                 posted.append(block)
+                last_block_ts[0] = time.monotonic()
                 if on_paragraph is not None:
                     flush_paragraphs(block, on_paragraph, force_final=True)
+            if not foreign_hook[0] and self._has_foreign_hook_feedback(events):
+                foreign_hook[0] = True
 
         self._send_message(user_text)
 
@@ -842,7 +888,12 @@ class ClaudeCLIProvider(LLMProvider):
         reply = self._wait_for_next_reply(
             prev_count, timeout=600.0, on_poll=_poll_transcript
         )
-        elapsed = time.monotonic() - t_start
+        t_reply = time.monotonic()
+        elapsed = t_reply - t_start
+        # Snapshot before the final drain — last_block_ts keeps advancing
+        # if the drain picks up a late block, but for the Stop-lag signal
+        # we want "last block operator had seen when Stop fired".
+        last_block_at_stop = last_block_ts[0]
 
         if reply is None:
             raise ClaudeCLIProtocolError(
@@ -878,10 +929,30 @@ class ClaudeCLIProvider(LLMProvider):
 
         text = "\n\n".join(posted) if posted else stop_text
 
+        # Section I — foreign-hook observability. A foreign Stop hook
+        # that ran decision=block injects "Stop hook feedback:" as a
+        # user turn; surface that to the room as a notice. The Stop-lag
+        # gap (final visible block → Stop row) is a noisier proxy — log
+        # only, not chat-worthy.
+        notices: list[str] = []
+        if foreign_hook[0]:
+            log.warning("ClaudeCLI: foreign Stop-hook feedback detected this turn")
+            notices.append(
+                "heads up — a hook outside this meeting redirected me mid-turn"
+            )
+        if last_block_at_stop is not None:
+            stop_gap = t_reply - last_block_at_stop
+            if stop_gap > _FOREIGN_HOOK_DELAY_WARN_SECONDS:
+                log.warning(
+                    f"ClaudeCLI: {stop_gap:.1f}s gap between final assistant "
+                    f"block and Stop hook — foreign hooks may have run"
+                )
+
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
             f"reply_blocks={len(posted)} "
             f"reply_chars={len(text) if text else 0} "
+            f"foreign_hook={foreign_hook[0]} "
             f"session={sid or '?'}"
         )
 
@@ -889,4 +960,5 @@ class ClaudeCLIProvider(LLMProvider):
             text=text or None,
             tool_calls=[],
             stop_reason="end",
+            notices=notices,
         )
