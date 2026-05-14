@@ -380,6 +380,21 @@ class ClaudeCLIProvider(LLMProvider):
     def _spawn_inner(self):
         """Open the PTY, fork claude into it, start the drain thread."""
         cmd = self._build_cmd()
+
+        # Clear a stale ready.flag before spawning. The flag is written
+        # once per claude process by the plugin's SessionStart hook; on a
+        # respawn (inner-claude crashed, next turn relaunches it) the
+        # previous process's flag is still on disk, so _wait_for_ready
+        # would return instantly and the first bracketed-paste would race
+        # the new TUI's startup and be lost. Deleting it here forces
+        # _wait_for_ready to block for the *new* hook.
+        try:
+            self._ready_flag_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(f"ClaudeCLI: could not clear stale ready.flag: {exc}")
+
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         # Load-bearing: hook scripts read this to know where to write.
         # Setting it here as well as in __main__.py is belt-and-suspenders
@@ -803,9 +818,16 @@ class ClaudeCLIProvider(LLMProvider):
             )
         user_text = last.get("content") or ""
 
-        # Lazy spawn: pre_warm should already have run from __main__,
-        # but a slow join or a missed pre_warm shouldn't break the turn.
-        if self._proc is None or self._proc.poll() is not None:
+        # Lazy spawn / respawn: pre_warm should already have run from
+        # __main__, but a slow join or a missed pre_warm shouldn't break
+        # the turn. If a previous spawn died (inner-claude crashed, the
+        # PTY hit EOF), tear its threads + master_fd down before
+        # respawning — otherwise the dead spawn's PTY-drain and tail
+        # threads leak and keep running against the same files.
+        if self._proc is not None and self._proc.poll() is not None:
+            log.info("ClaudeCLI: inner-claude died — tearing down before respawn")
+            self._terminate_inner()
+        if self._proc is None:
             self.pre_warm()
             if self._proc is None:
                 detail = (
