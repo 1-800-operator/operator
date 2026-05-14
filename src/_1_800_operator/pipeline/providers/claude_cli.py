@@ -456,7 +456,7 @@ class ClaudeCLIProvider(LLMProvider):
         """Block until the SessionStart hook writes ready.flag.
 
         Three terminal outcomes, no fourth "settle and hope" path:
-          - the flag appears              → return (ready)
+          - the flag appears              → record boot timing, return (ready)
           - the process dies / PTY EOFs   → raise (inner-claude is gone)
           - the hard ceiling is hit       → raise (inner-claude is hung)
 
@@ -478,6 +478,7 @@ class ClaudeCLIProvider(LLMProvider):
         pty_last_change = started
         while time.monotonic() < deadline:
             if self._ready_flag_path.exists():
+                self._record_ready(started)
                 return
             # Hard signals that inner-claude is gone — fail now, don't
             # wait out the ceiling.
@@ -524,6 +525,45 @@ class ClaudeCLIProvider(LLMProvider):
             f"{_READY_FLAG_CEILING_SECONDS:.0f}s — {diagnosis}.\n"
             f"PTY tail:\n{self._pty_tail()}"
         )
+
+    def _record_ready(self, started):
+        """ready.flag appeared — log boot timing and capture what the
+        SessionStart payload carries.
+
+        Best-effort: the file's *existence* is the readiness signal; its
+        JSON content is enrichment. A parse failure (an older plugin
+        writes an empty ready.flag; a fallback path wrote one) just costs
+        the forensic detail, never the boot. The TIMING line lands on
+        EVERY run, so the next slow/cold boot leaves a trail with no
+        special instrumentation — which is the whole point of giving the
+        flag a payload (the original 95s boot was unreproducible because
+        nothing recorded it).
+        """
+        lag = time.monotonic() - started
+        payload = {}
+        try:
+            raw = self._ready_flag_path.read_text(encoding="utf-8")
+            parsed = json.loads(raw) if raw.strip() else {}
+            if isinstance(parsed, dict):
+                payload = parsed
+        except (OSError, ValueError):
+            pass
+        log.info(
+            f"TIMING ClaudeCLI boot_to_ready={lag:.2f}s "
+            f"source={payload.get('source', '?')} "
+            f"session={payload.get('session_id', '?')}"
+        )
+        # The SessionStart payload carries transcript_path + session_id —
+        # capture them now so real turns get the transcript tail without
+        # waiting for turn 0's Stop payload to backfill them. The existing
+        # backfill in _send_briefing / _run_turn stays as the fallback for
+        # an older plugin that writes an empty ready.flag.
+        tp = payload.get("transcript_path")
+        if isinstance(tp, str) and tp and self._transcript_path is None:
+            self._transcript_path = Path(tp)
+        sid = payload.get("session_id")
+        if isinstance(sid, str) and sid and not self._captured_session_id:
+            self._captured_session_id = sid
 
     def _diagnose_stuck_boot(self, *, had_output, quiet_secs):
         """Classify why _wait_for_ready is about to fail, structurally.

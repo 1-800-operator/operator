@@ -380,6 +380,41 @@ def test_diagnose_stuck_boot():
     print("  _diagnose_stuck_boot: structural branches + soft enrichment OK")
 
 
+def test_record_ready_captures_payload():
+    """_record_ready parses ready.flag's JSON payload — capturing
+    transcript_path + session_id early, before turn 0 — and tolerates an
+    empty or garbage flag (an older plugin, or the hook's fallback path)
+    without failing. The flag's existence is the readiness signal; its
+    content is best-effort enrichment.
+    """
+    # Full payload → transcript_path + session_id captured early.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._ready_flag_path.write_text(json.dumps({
+            "ts": 1778.0, "source": "startup",
+            "session_id": "sess-xyz", "transcript_path": "/tmp/t.jsonl",
+        }), encoding="utf-8")
+        provider._record_ready(time.monotonic() - 0.5)
+        assert provider._captured_session_id == "sess-xyz", provider._captured_session_id
+        assert provider._transcript_path == Path("/tmp/t.jsonl"), provider._transcript_path
+
+    # Empty flag (older plugin / hook fallback path) → no capture, no raise.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._ready_flag_path.write_text("", encoding="utf-8")
+        provider._record_ready(time.monotonic())
+        assert provider._captured_session_id is None
+        assert provider._transcript_path is None
+
+    # Garbage content → tolerated, no raise, no capture.
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._ready_flag_path.write_text("{not json", encoding="utf-8")
+        provider._record_ready(time.monotonic())
+        assert provider._captured_session_id is None
+    print("  _record_ready: payload capture + empty/garbage tolerance OK")
+
+
 # --- replies.jsonl tailing -------------------------------------------
 
 
@@ -738,6 +773,7 @@ def main():
         test_spawn_failure_surfaces_detail,
         test_wait_for_ready_outcomes,
         test_diagnose_stuck_boot,
+        test_record_ready_captures_payload,
         test_count_and_read_replies,
         test_wait_for_next_reply_picks_up_new_row,
         test_wait_for_next_reply_times_out,
