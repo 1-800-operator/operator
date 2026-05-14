@@ -931,14 +931,18 @@ class ClaudeCLIProvider(LLMProvider):
 
         # Section I — foreign-hook observability. A foreign Stop hook
         # that ran decision=block injects "Stop hook feedback:" as a
-        # user turn; surface that to the room as a notice. The Stop-lag
-        # gap (final visible block → Stop row) is a noisier proxy — log
+        # user turn; surface that to the room as a notice. We only know
+        # the hook *interrupted* the turn — not whether claude acted on
+        # it (claude's prompt-injection defense ignores adversarial
+        # reasons; a benign-looking project hook it may well follow), so
+        # the notice claims only the interruption. The Stop-lag gap
+        # (final visible block → Stop row) is a noisier proxy — log
         # only, not chat-worthy.
         notices: list[str] = []
         if foreign_hook[0]:
             log.warning("ClaudeCLI: foreign Stop-hook feedback detected this turn")
             notices.append(
-                "heads up — a hook outside this meeting redirected me mid-turn"
+                "heads up — a hook outside this meeting interrupted my last turn"
             )
         if last_block_at_stop is not None:
             stop_gap = t_reply - last_block_at_stop
