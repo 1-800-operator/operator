@@ -138,6 +138,64 @@ def _check_git() -> CheckResult:
     return CheckResult("git", True, version, "")
 
 
+def _check_cwd_trusted(*, registry_path: Path | None = None,
+                       cwd: Path | None = None) -> CheckResult:
+    """Claude Code's workspace-trust state for the current directory.
+
+    `operator slip` spawns inner-claude with cwd = the dir operator was
+    invoked from. If Claude Code hasn't been trusted for that dir, it
+    shows a first-run "trust this folder?" dialog and blocks on input —
+    which wedges the meeting bot's boot: the SessionStart hook never
+    fires, so the provider's _wait_for_ready hits its ceiling. This is
+    knowable upfront from ~/.claude.json, so doctor surfaces it here —
+    the user accepts the dialog once, in Claude Code, before a meeting
+    rather than discovering it mid-call.
+
+    Inform-only (optional): operator never *writes* the trust state
+    itself — programmatically suppressing a Claude Code security prompt
+    would be patterning against it. We tell the human; the human decides.
+
+    Fails open: an unreadable ~/.claude.json just skips the check.
+    """
+    cwd = cwd or Path.cwd()
+    registry = registry_path or (Path.home() / ".claude.json")
+    try:
+        data = json.loads(Path(registry).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return CheckResult(
+            "workspace trust", True,
+            "skipped (couldn't read ~/.claude.json)", "",
+            optional=True,
+        )
+    projects = data.get("projects", {}) if isinstance(data, dict) else {}
+    # ~/.claude.json keys projects by absolute path — check the cwd as-is
+    # and resolved (macOS /tmp vs /private/tmp, symlinks).
+    entry = None
+    for key in (str(cwd), str(Path(cwd).resolve())):
+        if isinstance(projects.get(key), dict):
+            entry = projects[key]
+            break
+    if entry is not None and entry.get("hasTrustDialogAccepted") is True:
+        return CheckResult(
+            "workspace trust", True,
+            f"{cwd} is trusted by Claude Code", "",
+        )
+    return CheckResult(
+        name="workspace trust",
+        ok=False,
+        detail=(
+            f"{cwd} is not trusted by Claude Code — a meeting started here "
+            f"would hang at the first-run trust dialog"
+        ),
+        fix=(
+            "open this folder in Claude Code once and accept the trust "
+            "prompt — or run /operator:slip from a folder you've already "
+            "used with Claude Code"
+        ),
+        optional=True,
+    )
+
+
 _TCC_STATUS_DETAIL = {
     "ok": "granted",
     "denied": "denied",
@@ -356,6 +414,7 @@ def run_doctor() -> int:
         _check_claude(),
         _check_chrome(),
         _check_git(),
+        _check_cwd_trusted(),
     ]
     # Slip is macOS-only — TCC checks are meaningless elsewhere.
     if sys.platform == "darwin":
