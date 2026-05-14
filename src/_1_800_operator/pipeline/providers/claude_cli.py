@@ -619,6 +619,13 @@ class ClaudeCLIProvider(LLMProvider):
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            # Clean exit on teardown: stop() sets _stopping then SIGTERMs
+            # the group. Catching the flag here returns quietly instead
+            # of letting the imminent proc death raise the alarming
+            # "inner-claude exited unexpectedly" crash dump for what is
+            # really an orderly shutdown.
+            if self._stopping:
+                return None
             self._fire_tick()
             if on_poll is not None:
                 on_poll()
@@ -896,6 +903,10 @@ class ClaudeCLIProvider(LLMProvider):
         last_block_at_stop = last_block_ts[0]
 
         if reply is None:
+            if self._stopping:
+                # _wait_for_next_reply bailed on the teardown flag, not a
+                # timeout — a clean "winding down", not a crash.
+                raise ClaudeCLIProtocolError("provider is stopping")
             raise ClaudeCLIProtocolError(
                 f"timed out after {elapsed:.0f}s waiting for Stop hook reply.\n"
                 "Likely cause: operator-plugin's hooks are not installed (no "
