@@ -18,13 +18,21 @@ How it works:
     Universal — survives quotes, backslashes, multi-line, emoji, code
     fences (proven in spike_finalize.py T1, SHA-256 byte-for-byte).
     Char-by-char typing silently dropped chars on long messages.
-  - Output: hook events. The operator-plugin's Stop hook appends each
-    completed reply as JSONL to $OPERATOR_SESSION_DIR/replies.jsonl;
-    the provider tails that file for completed turns — no screen
-    scraping, no TUI parsing. (The plugin also writes tools.jsonl /
-    errors.jsonl; the provider no longer reads them — Phase 14.22
-    section G's operator-side tool narration was dropped in favour of
-    Claude self-narrating, briefed via the first paste.)
+  - Output, two channels:
+      * The operator-plugin's Stop hook appends each completed turn as
+        JSONL to $OPERATOR_SESSION_DIR/replies.jsonl. The provider tails
+        that file purely as the turn-boundary signal — a new row means
+        "the turn is done."
+      * The actual reply *text* comes from the Claude Code transcript
+        JSONL (transcript_path, captured from turn 0's Stop payload).
+        During a turn the provider tails the transcript and posts each
+        assistant text block the moment it lands — so Claude's
+        self-narration ("let me grab that file") reaches meeting chat in
+        real time instead of being batched at end-of-turn. No screen
+        scraping, no TUI parsing. (The plugin also writes tools.jsonl /
+        errors.jsonl; the provider no longer reads them — Phase 14.22
+        section G's operator-side tool narration was dropped in favour
+        of Claude self-narrating, briefed via the first paste.)
 
 Briefing: the first bracketed-paste operator sends is an
 operator-authored context message (see _BRIEFING) telling inner-claude
@@ -114,8 +122,14 @@ _SPAWN_FALLBACK_SETTLE_SECONDS = 5.0
 
 # Tail-loop polling cadence for replies.jsonl. 0.15s matches the spike
 # and is short enough that p50 turn TTFR (Stop hook fires → reply
-# posted) stays in the noise floor of the meeting-chat send path.
+# posted) stays in the noise floor of the meeting-chat send path. The
+# same cadence drives the in-turn transcript tail (real-time narration).
 _REPLIES_POLL_SECONDS = 0.15
+
+# After the Stop hook fires, the turn's final assistant block may still
+# be a write-beat behind in the transcript JSONL. Settle this long, then
+# do one last transcript drain before closing the turn.
+_TRANSCRIPT_FINAL_DRAIN_SETTLE = 0.3
 
 # How long to wait for inner-claude to acknowledge the briefing paste
 # (turn 0) before proceeding anyway. Generous — a one-line ack is fast,
@@ -231,6 +245,12 @@ class ClaudeCLIProvider(LLMProvider):
         # includes `transcript_path` and `session_id`; we record the
         # first one we see so `metadata.json` carries it.
         self._captured_session_id: str | None = None
+
+        # Claude Code transcript JSONL for the live session — captured
+        # from turn 0's Stop payload in _send_briefing. Real turns tail
+        # this file for real-time assistant-text narration. None until
+        # the briefing reply lands (or a real turn backfills it).
+        self._transcript_path: Path | None = None
 
     # --- callback wiring (set by ChatRunner._wire_provider) -----------
 
@@ -483,14 +503,19 @@ class ClaudeCLIProvider(LLMProvider):
     # --- briefing -----------------------------------------------------
 
     def _send_briefing(self):
-        """Send the operator briefing (turn 0) and consume its reply.
+        """Send the operator briefing (turn 0), consume its reply, and
+        capture the transcript path.
 
         The briefing tells inner-claude it's in a live meeting and to
         narrate its tool calls — see _BRIEFING and the module docstring.
         Whatever Claude says back is consumed here and never reaches
         meeting chat: the first *real* turn is what the room sees.
+
+        Turn 0's Stop payload carries `transcript_path` — captured here
+        so real turns can tail the transcript for real-time narration.
         Best-effort — a briefing hiccup logs and proceeds; the real
-        turns will surface any genuine hook-side failure.
+        turns will surface any genuine hook-side failure (and backfill
+        the transcript path from their own Stop payloads).
         """
         prev = self._count_replies()
         try:
@@ -506,8 +531,17 @@ class ClaudeCLIProvider(LLMProvider):
                 "ClaudeCLI: briefing reply never landed — proceeding anyway "
                 "(operator-plugin hooks may not be installed)"
             )
-        else:
-            log.info("ClaudeCLI: briefing acknowledged; turn 0 consumed")
+            return
+        tp = self._extract_transcript_path(reply)
+        if tp:
+            self._transcript_path = tp
+        sid = self._extract_session_id(reply)
+        if sid and not self._captured_session_id:
+            self._captured_session_id = sid
+        log.info(
+            f"ClaudeCLI: briefing acknowledged; turn 0 consumed "
+            f"(transcript={'captured' if tp else 'MISSING'})"
+        )
 
     # --- send + tail --------------------------------------------------
 
@@ -561,16 +595,21 @@ class ClaudeCLIProvider(LLMProvider):
             return None
         return None
 
-    def _wait_for_next_reply(self, prev_count, timeout):
+    def _wait_for_next_reply(self, prev_count, timeout, on_poll=None):
         """Tail replies.jsonl until count > prev_count or timeout.
 
         Returns the parsed reply object (the Stop hook's payload), or
         None on timeout. Fires the tick callback on every poll so
-        ChatRunner can drain its off-thread send queue.
+        ChatRunner can drain its off-thread send queue. `on_poll`, if
+        given, is called once per poll iteration — _run_turn uses it to
+        tail the transcript for real-time narration; _send_briefing
+        passes nothing so turn 0's narration is not posted.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._fire_tick()
+            if on_poll is not None:
+                on_poll()
             if self._proc is not None and self._proc.poll() is not None:
                 raise ClaudeCLIProtocolError(
                     f"inner-claude exited unexpectedly (rc={self._proc.returncode}).\n"
@@ -583,6 +622,87 @@ class ClaudeCLIProvider(LLMProvider):
                     return reply
             time.sleep(_REPLIES_POLL_SECONDS)
         return None
+
+    # --- transcript tail (real-time narration) -----------------------
+
+    def _transcript_size(self):
+        """Current byte size of the transcript JSONL, or 0 if unknown.
+        Used as the per-turn tail start offset, captured before the send.
+        """
+        if self._transcript_path is None:
+            return 0
+        try:
+            return self._transcript_path.stat().st_size
+        except OSError:
+            return 0
+
+    def _read_transcript_lines(self, offset, buf):
+        """Read new complete JSONL events from the transcript past `offset`.
+
+        Returns (new_offset, leftover_buf, [parsed_events]). Tolerates a
+        missing file and a partial trailing line (held in buf for the
+        next call) — same seek-and-buffer discipline replies tailing uses.
+        """
+        path = self._transcript_path
+        if path is None:
+            return offset, buf, []
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return offset, buf, []
+        if size <= offset:
+            return offset, buf, []
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            return offset, buf, []
+        offset += len(chunk)
+        buf += chunk
+        parts = buf.split(b"\n")
+        buf = parts.pop()
+        events = []
+        for line in parts:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        return offset, buf, events
+
+    @staticmethod
+    def _assistant_texts(events):
+        """Extract assistant text blocks from transcript events, in order.
+
+        Transcript event shape: {"type": "assistant", "message":
+        {"content": [{"type": "text", "text": ...}, {"type": "tool_use",
+        ...}]}}. tool_use blocks and non-assistant events are skipped;
+        `content` is also tolerated as a bare string. Returns the list of
+        non-empty text strings.
+        """
+        texts = []
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "assistant":
+                continue
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                blocks = [{"type": "text", "text": content}]
+            elif isinstance(content, list):
+                blocks = content
+            else:
+                continue
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text")
+                    if isinstance(t, str) and t.strip():
+                        texts.append(t)
+        return texts
 
     @staticmethod
     def _extract_assistant_text(reply):
@@ -618,6 +738,15 @@ class ClaudeCLIProvider(LLMProvider):
         sid = inner.get("session_id")
         return sid if isinstance(sid, str) else None
 
+    @staticmethod
+    def _extract_transcript_path(reply):
+        """Pull `transcript_path` from a Stop hook payload, as a Path."""
+        if not isinstance(reply, dict):
+            return None
+        inner = reply.get("input") if isinstance(reply.get("input"), dict) else reply
+        tp = inner.get("transcript_path")
+        return Path(tp) if isinstance(tp, str) and tp else None
+
     # --- LLMProvider interface ----------------------------------------
 
     def complete(self, system, messages, model, max_tokens, tools=None, retry_rate_limits=True):
@@ -634,16 +763,15 @@ class ClaudeCLIProvider(LLMProvider):
         self, system, messages, model, max_tokens, tools=None, on_paragraph=None,
         retry_rate_limits=True,
     ):
-        """Same as complete(), but splits the reply into paragraphs.
+        """Same as complete(), but posts assistant text as it lands.
 
-        Known regression vs. the prior `claude -p` shape: paragraphs
-        flush only once the Stop hook fires (i.e. at end-of-turn).
-        Mid-generation streaming is gone because hooks are end-of-event
-        only — the TUI does emit partial text, but parsing the
-        positional TUI bytes for partials is the screen-scraping path
-        we explicitly chose not to ship (DECISION.md "Why send-keys +
-        hooks"). Users see paragraph-by-paragraph chat messages
-        delivered as a batch instead of as a drip-feed.
+        _run_turn tails the Claude Code transcript JSONL during the turn
+        and calls on_paragraph for each assistant text block the moment
+        it appears — so Claude's self-narration ("let me grab that
+        file") reaches chat in real time, not batched at end-of-turn.
+        This restores the streaming behaviour the early PTY pivot lost,
+        without screen-scraping the TUI (the transcript is structured
+        JSONL Claude Code writes itself).
         """
         if on_paragraph is None:
             return self.complete(system, messages, model, max_tokens, tools=tools)
@@ -687,12 +815,33 @@ class ClaudeCLIProvider(LLMProvider):
 
         t_start = time.monotonic()
         prev_count = self._count_replies()
+
+        # Transcript tail state — captured BEFORE the send so the user
+        # message and every assistant block this turn falls past the
+        # offset. Closure mutables because _wait_for_next_reply drives
+        # the poll loop and calls _poll_transcript back in. `posted`
+        # accumulates the text blocks already surfaced this turn.
+        tx_offset = [self._transcript_size()]
+        tx_buf = [b""]
+        posted: list[str] = []
+
+        def _poll_transcript():
+            tx_offset[0], tx_buf[0], events = self._read_transcript_lines(
+                tx_offset[0], tx_buf[0]
+            )
+            for block in self._assistant_texts(events):
+                posted.append(block)
+                if on_paragraph is not None:
+                    flush_paragraphs(block, on_paragraph, force_final=True)
+
         self._send_message(user_text)
 
         # Generous per-turn timeout — claude tool loops can run minutes
         # legitimately. The user cancels via /operator:hangup if a tool
         # chain wedges; no operator-imposed deadline.
-        reply = self._wait_for_next_reply(prev_count, timeout=600.0)
+        reply = self._wait_for_next_reply(
+            prev_count, timeout=600.0, on_poll=_poll_transcript
+        )
         elapsed = time.monotonic() - t_start
 
         if reply is None:
@@ -703,21 +852,38 @@ class ClaudeCLIProvider(LLMProvider):
                 f"{self._session_dir}`.\nPTY tail:\n{self._pty_tail()}"
             )
 
-        text = self._extract_assistant_text(reply)
+        # The final assistant block may land in the transcript a beat
+        # after the Stop hook fires — settle, then drain once more.
+        time.sleep(_TRANSCRIPT_FINAL_DRAIN_SETTLE)
+        _poll_transcript()
+
         sid = self._extract_session_id(reply)
         if sid and not self._captured_session_id:
             self._captured_session_id = sid
+        # Backfill the transcript path if the briefing missed it — the
+        # next turn then gets real-time narration.
+        if self._transcript_path is None:
+            tp = self._extract_transcript_path(reply)
+            if tp:
+                self._transcript_path = tp
+
+        # Backstop: if the Stop payload's last_assistant_message never
+        # came through the transcript tail (no transcript path captured,
+        # or a write race), post it now so the turn isn't silent.
+        stop_text = self._extract_assistant_text(reply)
+        if stop_text and stop_text not in posted:
+            posted.append(stop_text)
+            if on_paragraph is not None:
+                flush_paragraphs(stop_text, on_paragraph, force_final=True)
+
+        text = "\n\n".join(posted) if posted else stop_text
 
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
+            f"reply_blocks={len(posted)} "
             f"reply_chars={len(text) if text else 0} "
             f"session={sid or '?'}"
         )
-
-        if on_paragraph is not None and text:
-            # Batch-flush paragraphs through the existing splitter so
-            # the chat layer sees the same shape it did with streaming.
-            flush_paragraphs(text, on_paragraph, force_final=True)
 
         return ProviderResponse(
             text=text or None,
