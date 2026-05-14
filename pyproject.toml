@@ -63,6 +63,12 @@ path = "src/_1_800_operator/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/_1_800_operator"]
+exclude = [
+    # Cargo build artifacts for the aec3 cleaner — multi-hundred-MB
+    # per-architecture; install.sh runs `cargo build --release` from
+    # the shipped source at install time.
+    "src/_1_800_operator/rust/aec3/target",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -72,4 +78,7 @@ include = [
     "SECURITY.md",
     "requirements.txt",
     "pyproject.toml",
+]
+exclude = [
+    "src/_1_800_operator/rust/aec3/target",
 ]

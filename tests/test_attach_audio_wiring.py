@@ -172,9 +172,48 @@ def test_other_speaker_label():
     print("OK other_speaker_label")
 
 
+def test_bleed_dedupe_drops_matching_mic_caption():
+    """An M-leg caption that fuzzy-matches a recent S-leg caption is dropped."""
+    adapter = AttachAdapter()
+
+    # Seed an S-leg caption into the rolling buffer.
+    adapter._record_s_caption("Yes, we included in the motion.")
+
+    # An M-leg caption with the same content (punct/case drift) should match.
+    assert adapter._is_recent_s_caption("yes we included in the motion") is True
+    # A near-miss (one letter different word) still matches at threshold 0.75.
+    assert adapter._is_recent_s_caption("Yes, we included in the emotion.") is True
+    # A completely different caption does NOT match.
+    assert adapter._is_recent_s_caption("Don't worry about that.") is False
+    # An empty caption does NOT match (would otherwise compare against an
+    # empty normalized form and ratio against short strings can spike).
+    assert adapter._is_recent_s_caption("") is False
+    print("OK bleed_dedupe_drops_matching_mic_caption")
+
+
+def test_bleed_dedupe_window_expires():
+    """S-leg captions older than the configured window stop matching."""
+    import time as _time
+    from _1_800_operator import config as _config
+
+    adapter = AttachAdapter()
+    # Manually backfill an old entry past the window.
+    stale_ts = _time.time() - (_config.BLEED_DEDUPE_WINDOW_SECONDS + 1.0)
+    adapter._recent_s_captions.append((stale_ts, "yes we included in the motion"))
+
+    # A current M-leg caption with matching text should NOT dedupe because
+    # the only candidate is stale and gets evicted on lookup.
+    assert adapter._is_recent_s_caption("Yes, we included in the motion.") is False
+    # And the eviction should have actually removed the stale entry.
+    assert len(adapter._recent_s_captions) == 0
+    print("OK bleed_dedupe_window_expires")
+
+
 if __name__ == "__main__":
     test_reader_routes_by_tag()
     test_utterance_loop_fires_callback_with_speaker_label()
     test_other_speaker_label()
     test_stop_audio_pipeline_idempotent()
+    test_bleed_dedupe_drops_matching_mic_caption()
+    test_bleed_dedupe_window_expires()
     print("\nAll AttachAdapter audio-wiring tests passed.")

@@ -325,6 +325,49 @@ if [ "${OS}" = "macos" ]; then
   echo
 fi
 
+# -- 8.5. AEC3 speaker-bleed cleaner (Rust binary) ---------------------------
+
+# Slip mode runs a long-lived Rust binary that AEC3-cancels speaker bleed from
+# the mic stream before it reaches whisper. Without it, transcripts of the
+# user's mic include the remote audio playing through the user's speakers
+# (when the user is on built-in speakers; headphone users are unaffected).
+#
+# Build-from-source for now: needs `cargo` on PATH. Soft-skip if missing —
+# slip still runs, just without the bleed defense. A future release will
+# ship a prebuilt binary in the wheel (parallel to the Swift helper's
+# signed-.app path) so cargo isn't required at install time.
+
+if [ "${OS}" = "macos" ]; then
+  bold "Building aec3 (speaker-bleed cleaner)..."
+  TOOL_DIR="$(uv tool dir)/1-800-operator"
+  PY_IN_TOOL="${TOOL_DIR}/bin/python"
+  BIN_DIR="${HOME}/.operator/bin"
+  mkdir -p "${BIN_DIR}"
+
+  if [ ! -x "${PY_IN_TOOL}" ]; then
+    err "Could not find tool venv python at ${PY_IN_TOOL} — skipping aec3 build."
+  elif ! command -v cargo >/dev/null 2>&1; then
+    warn "cargo not found — skipping aec3 build."
+    warn "Slip will run without the speaker-bleed cleaner (mic transcripts may include"
+    warn "remote audio playing through your speakers; headphone users are unaffected)."
+    warn "To enable AEC: install Rust (https://rustup.rs/) and re-run install.sh."
+  else
+    PKG_RUST_DIR="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "rust" / "aec3")')"
+    if [ ! -f "${PKG_RUST_DIR}/Cargo.toml" ]; then
+      warn "Rust source not present in wheel (${PKG_RUST_DIR}) — skipping aec3 build."
+    else
+      if cargo build --release --manifest-path "${PKG_RUST_DIR}/Cargo.toml"; then
+        cp "${PKG_RUST_DIR}/target/release/aec3" "${BIN_DIR}/aec3"
+        chmod +x "${BIN_DIR}/aec3"
+        info "Installed aec3: ${BIN_DIR}/aec3"
+      else
+        err "cargo build failed — slip will run without the speaker-bleed cleaner."
+      fi
+    fi
+  fi
+  echo
+fi
+
 # -- 9. Sendoff --------------------------------------------------------------
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so

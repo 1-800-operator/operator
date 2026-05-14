@@ -43,6 +43,15 @@ ALONE_EXIT_GRACE_SECONDS    = 60     # once we've seen a peer and they leave, ex
 LOBBY_WAIT_SECONDS          = 600    # max wait in Meet waiting room for host to admit us
 MAX_TOKENS                  = 2000   # runaway guard on LLM output; "be brief" system-prompt does the real shaping
 
+# Residual-bleed dedupe (slip): drop M-leg captions that closely match an
+# S-leg caption from the last few seconds. Catches the small fraction of
+# remote audio that AEC didn't fully cancel (~-30 dB cancellation leaves a
+# usable speech residual when speakers are loud + no headphones). The
+# similarity threshold is loose enough to absorb minor whisper-text drift
+# between the two legs, tight enough not to nuke genuine short user phrases.
+BLEED_DEDUPE_WINDOW_SECONDS = 4.0
+BLEED_DEDUPE_SIMILARITY     = 0.75
+
 ENV_FILE            = str(Path.home() / ".operator" / ".env")                # shared .env for API keys
 DEBUG_DIR           = str(Path.home() / ".operator" / "debug")               # screenshots + HTML dumps from save_debug() and adapter failure paths
 

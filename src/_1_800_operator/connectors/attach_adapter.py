@@ -45,11 +45,14 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import struct
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
+from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -99,6 +102,17 @@ _AUDIO_HELPER_INSTALLED = (
 )
 _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
 
+# AEC3 cleaner binary (S225 spike → step 5 will land a proper install). Same
+# resolution pattern as the audio helper: production install wins over the
+# in-tree dev build. None means AEC is unavailable — slip falls back to
+# feeding raw mic frames straight to the M-leg AudioProcessor (transcripts
+# will then include speaker bleed when system audio plays through speakers;
+# users on headphones are unaffected).
+_AEC_BINARY_INSTALLED = Path.home() / ".operator" / "bin" / "aec3"
+_AEC_BINARY_DEV = (
+    Path(__file__).resolve().parent.parent / "rust" / "aec3" / "target" / "release" / "aec3"
+)
+
 # Frame format from the helper: [1B tag 'S'|'M'][4B BE u32 length][N bytes Float32 16kHz mono PCM].
 # 'S' = system audio (other participants), 'M' = mic (local user).
 # Source of truth: src/_1_800_operator/swift/operator-audio-capture.swift.
@@ -122,6 +136,15 @@ class SlipAttachError(RuntimeError):
     Caught by _run_slip and presented to the user as a clean stderr
     message with a fix hint, not a stack trace.
     """
+
+
+def _resolve_aec_binary() -> Path | None:
+    """Return the path to the aec3 cleaner binary, or None if missing."""
+    if _AEC_BINARY_INSTALLED.exists() and os.access(_AEC_BINARY_INSTALLED, os.X_OK):
+        return _AEC_BINARY_INSTALLED
+    if _AEC_BINARY_DEV.exists() and os.access(_AEC_BINARY_DEV, os.X_OK):
+        return _AEC_BINARY_DEV
+    return None
 
 
 def _resolve_audio_helper() -> Path | None:
@@ -352,6 +375,19 @@ class AttachAdapter(MeetingConnector):
         self._audio_processors: dict[bytes, "object"] = {}
         self._audio_threads: list[threading.Thread] = []
         self._audio_stop = threading.Event()
+        # AEC cleaner subprocess (S225 spike → step 3 integration). Stays
+        # None when the aec3 binary isn't installed/built; in that case
+        # mic frames go straight to the M-leg AudioProcessor and the
+        # M transcript will contain speaker bleed when system audio is
+        # playing — there is no bleed defense in the fallback path.
+        self._aec_cleaner: "object | None" = None
+        # Residual-bleed dedupe: small rolling buffer of recently-finalized
+        # S-leg caption texts (normalized). When an M-leg caption is about
+        # to fire, we check it against this list — if it fuzzy-matches a
+        # recent S-leg entry, it's almost certainly residual bleed that AEC
+        # didn't fully cancel and we drop it. See config.BLEED_DEDUPE_*.
+        self._recent_s_captions: deque[tuple[float, str]] = deque(maxlen=16)
+        self._recent_s_captions_lock = threading.Lock()
         # Pre-warm thread for mlx-whisper-base. Spawned at join() start so
         # the 3-20s cold model load runs in parallel with Chrome launch +
         # lobby wait; _start_audio_pipeline joins this thread before
@@ -1279,9 +1315,7 @@ class AttachAdapter(MeetingConnector):
 
         # Debug WAV dumps: set OPERATOR_AUDIO_DEBUG=1 to write every utterance
         # as a WAV file before STT. Files land in /tmp/operator_audio_debug/S/
-        # and /tmp/operator_audio_debug/M/. Bleed-suppressed utterances are
-        # written then renamed with a BLEED_ prefix so you can hear what was
-        # gated out and compare it to what passed.
+        # and /tmp/operator_audio_debug/M/.
         if os.environ.get("OPERATOR_AUDIO_DEBUG"):
             _debug_root = "/tmp/operator_audio_debug"
             for _tag, _proc in self._audio_processors.items():
@@ -1324,6 +1358,30 @@ class AttachAdapter(MeetingConnector):
         for proc in self._audio_processors.values():
             proc.capturing = True
 
+        # Bring up the AEC3 cleaner so mic frames flow through it before
+        # reaching the M-leg AudioProcessor. Best-effort: if the binary
+        # isn't installed (step 5 hasn't landed) or fails to spawn, log
+        # and continue without AEC — _audio_reader_loop routes mic frames
+        # directly to m_proc and the M transcript will then include
+        # speaker bleed (no bleed defense in the fallback path).
+        m_proc = self._audio_processors.get(_FRAME_TAG_MIC)
+        aec_binary = _resolve_aec_binary()
+        if aec_binary is not None and m_proc is not None:
+            try:
+                from _1_800_operator.pipeline.aec_cleaner import AecCleaner
+                self._aec_cleaner = AecCleaner(
+                    binary_path=aec_binary,
+                    on_clean_mic=m_proc.feed_audio,
+                )
+                self._aec_cleaner.start()
+                log.info(f"AttachAdapter: AEC cleaner up ({aec_binary})")
+            except Exception as e:
+                log.warning(f"AttachAdapter: AEC cleaner start failed ({e}) — no bleed defense")
+                self._aec_cleaner = None
+        else:
+            if aec_binary is None:
+                log.info("AttachAdapter: aec3 binary not found — running without bleed defense")
+
         reader = threading.Thread(
             target=self._audio_reader_loop,
             name="AttachAdapter-audio-reader",
@@ -1342,20 +1400,13 @@ class AttachAdapter(MeetingConnector):
         mic_label = self.get_self_name() or _SPEAKER_USER_FALLBACK
         log.info(f"AttachAdapter: mic-leg speaker label = {mic_label!r}")
 
-        s_proc = self._audio_processors.get(_FRAME_TAG_SYSTEM)
         for tag, label in (
             (_FRAME_TAG_SYSTEM, _SPEAKER_OTHER),
             (_FRAME_TAG_MIC, mic_label),
         ):
-            # Pass the system-audio processor as far_end only for the mic leg.
-            # capture_next_utterance uses it as a reference signal: if [S] had
-            # active speech when [M]'s VAD first triggered, the utterance is
-            # dropped as speaker bleed (remote audio playing through speakers
-            # bleeding into the mic).
-            far_end = s_proc if tag == _FRAME_TAG_MIC else None
             t = threading.Thread(
                 target=self._audio_utterance_loop,
-                args=(tag, label, far_end),
+                args=(tag, label),
                 name=f"AttachAdapter-utterance-{label}",
                 daemon=True,
             )
@@ -1396,32 +1447,85 @@ class AttachAdapter(MeetingConnector):
                 if len(pcm) < length:
                     log.info("AttachAdapter: audio reader truncated read — helper exited mid-frame")
                     break
-                target = self._audio_processors.get(tag)
-                if target is None:
+                aec = self._aec_cleaner
+                if tag == _FRAME_TAG_SYSTEM:
+                    # [S] always feeds the system-audio processor (whisper
+                    # path for remote-participant transcripts). If AEC is
+                    # alive it ALSO feeds the render side so the cleaner
+                    # has the reference signal it needs to cancel bleed.
+                    s_proc = self._audio_processors.get(_FRAME_TAG_SYSTEM)
+                    if s_proc is not None:
+                        s_proc.feed_audio(pcm)
+                    if aec is not None:
+                        aec.feed_render(pcm)
+                elif tag == _FRAME_TAG_MIC:
+                    # [M] goes through AEC when up; otherwise straight to
+                    # the mic-leg processor (pre-AEC fallback). AEC's own
+                    # on_clean_mic callback hands cleaned bytes back to
+                    # m_proc.feed_audio, so the downstream whisper path
+                    # is unchanged in shape.
+                    if aec is not None:
+                        aec.feed_capture(pcm)
+                    else:
+                        m_proc = self._audio_processors.get(_FRAME_TAG_MIC)
+                        if m_proc is not None:
+                            m_proc.feed_audio(pcm)
+                else:
                     log.warning(f"AttachAdapter: unknown frame tag {tag!r} — dropping {length}B")
                     continue
-                target.feed_audio(pcm)
         except Exception as e:
             log.warning(f"AttachAdapter: audio reader loop crashed: {e}")
 
-    def _audio_utterance_loop(self, tag: bytes, speaker_label: str, far_end=None) -> None:
+    @staticmethod
+    def _normalize_for_dedupe(text: str) -> str:
+        """Lowercase, strip punctuation, collapse whitespace.
+
+        Makes the SequenceMatcher comparison robust to minor whisper drift
+        like trailing periods, capitalization, doubled spaces — without
+        affecting what's actually delivered to the caption callback.
+        """
+        return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
+
+    def _is_recent_s_caption(self, text: str) -> bool:
+        """True if `text` fuzzy-matches an S-leg caption from the last few seconds."""
+        needle = self._normalize_for_dedupe(text)
+        if not needle:
+            return False
+        now = time.time()
+        window = config.BLEED_DEDUPE_WINDOW_SECONDS
+        threshold = config.BLEED_DEDUPE_SIMILARITY
+        with self._recent_s_captions_lock:
+            # Drop stale entries lazily so the deque doesn't fill with junk.
+            while self._recent_s_captions and now - self._recent_s_captions[0][0] > window:
+                self._recent_s_captions.popleft()
+            candidates = [n for _, n in self._recent_s_captions]
+        for c in candidates:
+            if SequenceMatcher(None, needle, c).ratio() >= threshold:
+                return True
+        return False
+
+    def _record_s_caption(self, text: str) -> None:
+        """Add an S-leg caption to the rolling dedupe buffer."""
+        normalized = self._normalize_for_dedupe(text)
+        if not normalized:
+            return
+        with self._recent_s_captions_lock:
+            self._recent_s_captions.append((time.time(), normalized))
+
+    def _audio_utterance_loop(self, tag: bytes, speaker_label: str) -> None:
         """Drain finalized utterances from one processor, fire caption callback.
 
         Loop exits when the processor flips capturing=False (set by
         _stop_audio_pipeline). Each utterance is delivered exactly once;
         the callback is captured by reference at call time so a late
         set_caption_callback also works.
-
-        far_end: the system-audio AudioProcessor, passed only for the mic leg.
-        When provided, capture_next_utterance drops utterances whose VAD was
-        triggered while far-end speech was active (speaker bleed suppression).
         """
         proc = self._audio_processors.get(tag)
         if proc is None:
             return
         while proc.capturing and not self._audio_stop.is_set():
             try:
-                text = proc.capture_next_utterance(far_end=far_end)
+                text = proc.capture_next_utterance()
             except Exception as e:
                 log.warning(f"AttachAdapter: utterance loop ({speaker_label}) raised: {e}")
                 continue
@@ -1445,10 +1549,21 @@ class AttachAdapter(MeetingConnector):
                     effective_label = active[0]
                 elif last:
                     effective_label = last
+            # Bleed dedupe: if this is the M leg and the same text just
+            # came through the S leg, drop it as residual speaker bleed.
+            if tag == _FRAME_TAG_MIC and self._is_recent_s_caption(text):
+                log.info(
+                    f"AttachAdapter: dropped M-leg caption (S-leg dedupe) {text!r}"
+                )
+                continue
             try:
                 cb(effective_label, text, time.time())
             except Exception as e:
                 log.warning(f"AttachAdapter: caption callback raised: {e}")
+            # Record S-leg captions AFTER the callback so the dedupe lookup
+            # by a near-simultaneous M-leg utterance sees this entry.
+            if tag == _FRAME_TAG_SYSTEM:
+                self._record_s_caption(text)
 
     def _stop_audio_pipeline(self) -> None:
         """Tear down the audio pipeline. Idempotent.
@@ -1458,7 +1573,11 @@ class AttachAdapter(MeetingConnector):
         then close helper stdin (which the helper watches for EOF and
         exits on). SIGTERM + a short wait is the fallback.
         """
-        if self._audio_helper_proc is None and not self._audio_processors:
+        if (
+            self._audio_helper_proc is None
+            and not self._audio_processors
+            and self._aec_cleaner is None
+        ):
             return
         for proc in self._audio_processors.values():
             proc.capturing = False
@@ -1484,6 +1603,18 @@ class AttachAdapter(MeetingConnector):
             except Exception as e:
                 log.debug(f"AttachAdapter: helper wait raised: {e}")
             self._audio_helper_proc = None
+        # Helper is gone (or being killed) — the reader loop will EOF on
+        # its next read. Stop the AEC cleaner only AFTER that path is
+        # quiet so we don't drop frames the reader was still forwarding.
+        # Any cleaned frames emitted during the EOF drain are pushed into
+        # m_proc.feed_audio (no-ops past this point since capturing is
+        # already False and the M utterance loop has exited).
+        if self._aec_cleaner is not None:
+            try:
+                self._aec_cleaner.stop()
+            except Exception as e:
+                log.debug(f"AttachAdapter: AEC cleaner stop raised: {e}")
+            self._aec_cleaner = None
         for t in self._audio_threads:
             t.join(timeout=1.5)
         self._audio_threads.clear()

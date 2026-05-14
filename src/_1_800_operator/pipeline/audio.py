@@ -73,14 +73,8 @@ class AudioProcessor:
         self._audio_lock = threading.Lock()
         self.capturing = False
         # Set to a directory path to enable per-utterance WAV dumps (debug).
-        # BLEED_-prefixed files are utterances suppressed by the far-end gate.
         self.debug_dir: str | None = None
         self._debug_seq = 0
-        # True during VAD ticks where RMS >= UTTERANCE_SILENCE_RMS.  Written
-        # by this processor's utterance thread; read by the far-end bleed
-        # gate in the mic-leg's capture_next_utterance().  CPython GIL makes
-        # single-bool reads/writes atomic — no explicit lock needed.
-        self.speech_active = False
 
     def feed_audio(self, chunk: bytes) -> None:
         """Append raw PCM bytes to the buffer. Called from the helper-reader thread."""
@@ -93,26 +87,19 @@ class AudioProcessor:
             self._audio_buffer = b""
         return data
 
-    def capture_next_utterance(self, far_end: "AudioProcessor | None" = None) -> str:
+    def capture_next_utterance(self) -> str:
         """Block until a complete utterance is detected. Returns text or ''.
 
         Loops at UTTERANCE_CHECK_INTERVAL, accumulating PCM until either
         SILENCE_THRESHOLD consecutive silent ticks (utterance done) or
         MAX_DURATION elapsed (forced cut). Returns '' if self.capturing
         flipped False before any speech was detected.
-
-        far_end: optional reference to the system-audio AudioProcessor.
-        When provided and speech is first detected on this (mic) channel
-        while far_end.speech_active is True, the utterance is considered
-        speaker-bleed and discarded — the far-end signal is the reference
-        for what's currently playing through the user's speakers.
         """
         speech_detected = False
         silence_count = 0
         utterance_audio = b""
         speech_start_time: float | None = None
         silence_start_time: float | None = None
-        far_end_active_at_trigger = False
 
         while self.capturing:
             time.sleep(UTTERANCE_CHECK_INTERVAL)
@@ -120,27 +107,20 @@ class AudioProcessor:
             if raw:
                 rms = float(np.sqrt(np.mean(np.frombuffer(raw, dtype=np.float32) ** 2)))
                 if rms >= UTTERANCE_SILENCE_RMS:
-                    self.speech_active = True
                     if not speech_detected:
                         speech_start_time = time.time()
-                        far_end_active_at_trigger = far_end is not None and far_end.speech_active
-                        log.info(
-                            f"AudioProcessor: speech_first rms={rms:.4f}"
-                            + (" (far-end active — bleed candidate)" if far_end_active_at_trigger else "")
-                        )
+                        log.info(f"AudioProcessor: speech_first rms={rms:.4f}")
                     speech_detected = True
                     silence_count = 0
                     silence_start_time = None
                     utterance_audio += raw
                 else:
-                    self.speech_active = False
                     if speech_detected:
                         utterance_audio += raw
                         silence_count += 1
                         if silence_count == 1:
                             silence_start_time = time.time()
             else:
-                self.speech_active = False
                 if speech_detected:
                     silence_count += 1
                     if silence_count == 1:
@@ -154,22 +134,10 @@ class AudioProcessor:
                     log.info("AudioProcessor: utterance_done (max_duration)")
                     break
 
-        self.speech_active = False
-
         if not utterance_audio:
             return ""
 
-        wav_path = self._write_debug_wav(utterance_audio)
-
-        if far_end_active_at_trigger:
-            if wav_path:
-                try:
-                    bleed_path = wav_path.replace("/utterance_", "/BLEED_")
-                    os.rename(wav_path, bleed_path)
-                except Exception:
-                    pass
-            log.info("AudioProcessor: dropped utterance (far-end was active at trigger — speaker bleed)")
-            return ""
+        self._write_debug_wav(utterance_audio)
 
         audio = np.frombuffer(utterance_audio, dtype=np.float32)
         text = self.transcribe(audio)

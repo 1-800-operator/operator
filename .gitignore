@@ -54,3 +54,6 @@ debug/pre_camera_toggle.png
 
 # Compiled Swift helper — built by install.sh (or local swiftc) per machine
 src/_1_800_operator/swift/operator-audio-capture
+
+# Cargo build artifacts for the aec3 cleaner — built by install.sh per machine
+src/_1_800_operator/rust/aec3/target/

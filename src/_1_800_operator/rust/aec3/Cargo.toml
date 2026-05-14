@@ -1,0 +1,15 @@
+[package]
+name = "aec3"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "aec3"
+path = "src/main.rs"
+
+[dependencies]
+webrtc-audio-processing = { version = "2.1.0", features = ["bundled", "experimental-aec3-config"] }
+hound = "3.5"
+
+[profile.release]
+opt-level = 3

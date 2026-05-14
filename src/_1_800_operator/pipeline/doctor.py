@@ -42,9 +42,25 @@ _AUDIO_HELPER_INSTALLED = (
 )
 _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
 
+# AEC3 speaker-bleed cleaner. Production is the cargo-built binary installed
+# under ~/.operator/bin/; dev fallback is the in-tree build. Mirrors
+# attach_adapter.py:_AEC_BINARY_INSTALLED. Optional — missing AEC isn't fatal,
+# slip just runs without the bleed defense.
+_AEC_BINARY_INSTALLED = Path.home() / ".operator" / "bin" / "aec3"
+_AEC_BINARY_DEV = (
+    Path(__file__).resolve().parent.parent / "rust" / "aec3" / "target" / "release" / "aec3"
+)
+
 
 def _audio_helper() -> Path | None:
     for p in (_AUDIO_HELPER_INSTALLED, _AUDIO_HELPER_DEV):
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def _aec_binary() -> Path | None:
+    for p in (_AEC_BINARY_INSTALLED, _AEC_BINARY_DEV):
         if p.exists() and p.is_file():
             return p
     return None
@@ -56,6 +72,7 @@ class CheckResult:
     ok: bool
     detail: str   # one-line status (green or red)
     fix: str      # exact command(s) to run; empty when ok
+    optional: bool = False  # if True, a failure renders as a warning and doesn't drive exit code
 
 
 def _check_claude() -> CheckResult:
@@ -180,6 +197,33 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
     )
 
 
+def _check_aec_binary() -> CheckResult:
+    """aec3 speaker-bleed cleaner. Optional but recommended on built-in speakers."""
+    binary = _aec_binary()
+    if binary is not None:
+        return CheckResult(
+            "aec3 cleaner (slip)",
+            True,
+            f"installed at {binary}",
+            "",
+        )
+    if shutil.which("cargo") is None:
+        return CheckResult(
+            name="aec3 cleaner (slip)",
+            ok=False,
+            detail="not installed and cargo missing — mic transcripts may include speaker bleed",
+            fix="install Rust (https://rustup.rs/), then re-run install.sh",
+            optional=True,
+        )
+    return CheckResult(
+        name="aec3 cleaner (slip)",
+        ok=False,
+        detail="not installed — mic transcripts may include speaker bleed",
+        fix="re-run install.sh to build aec3",
+        optional=True,
+    )
+
+
 def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
     """TCC Microphone — slip mic capture (AVAudioEngine.inputNode)."""
     if _audio_helper() is None or probe is None:
@@ -224,22 +268,36 @@ def run_doctor() -> int:
         probe = _probe_audio_helper()
         checks.append(_check_screen_recording(probe))
         checks.append(_check_microphone(probe))
+        checks.append(_check_aec_binary())
 
     print()
     print("operator doctor")
     print("───────────────")
     failures = 0
+    warnings = 0
     for c in checks:
-        glyph = "✓" if c.ok else "✗"
+        if c.ok:
+            glyph = "✓"
+        elif c.optional:
+            glyph = "!"
+        else:
+            glyph = "✗"
         print(f"  {glyph} {c.name}: {c.detail}")
         if not c.ok:
-            failures += 1
+            if c.optional:
+                warnings += 1
+            else:
+                failures += 1
             if c.fix:
                 print(f"      fix: {c.fix}")
     print()
 
-    if failures == 0:
+    if failures == 0 and warnings == 0:
         print("All checks passed. You're ready to slip.")
+        return 0
+    if failures == 0:
+        word = "warning" if warnings == 1 else "warnings"
+        print(f"{warnings} optional {word} above — slip will still run.")
         return 0
     word = "issue" if failures == 1 else "issues"
     print(f"{failures} {word} above. Fix and re-run `operator doctor`.")
