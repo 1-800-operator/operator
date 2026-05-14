@@ -1,0 +1,19 @@
+78[>0q╭───ClaudeCodev2.1.141─────────────────────────────────────────────────────────────────────────────────────────────╮
+││Tipsforgettingstarted│
+│Welcomebackjojo!│Run/inittocreateaCLAUDE.mdfilewithinstructionsforCla…│
+││───────────────────────────────────────────────────────────────│
+│▐▛███▜▌│What'snew│
+│▝▜█████▛▘│Added`terminalSequence`fieldtohookJSONoutputsohooksca…│
+│▘▘▝▝│Added`CLAUDE_CODE_PLUGIN_PREFER_HTTPS`tocloneGitHubplugin…│
+│Opus4.7(1Mcontext)withhi…·ClaudeMax·│Added`ANTHROPIC_WORKSPACE_ID`environmentvariableforworklo…│
+│shapirojojo@gmail.com'sOrganization│/release-notesformore│
+│/private/tmp││
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try"howdoIloganerror?"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+?forshortcuts●high·/effort
+read /etc/hostname and tell mewhatitcontainsinoneshortsentence   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+●high·/effort
+IDE extension install failed (see /status for info)

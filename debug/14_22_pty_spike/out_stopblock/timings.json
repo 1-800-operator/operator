@@ -1,0 +1,17 @@
+[
+  {
+    "turn": "bootstrap",
+    "elapsed_since_prev": 2.9534237080079038,
+    "last_assistant_message": "READY"
+  },
+  {
+    "turn": "msg1",
+    "elapsed_since_prev": 1.6951592920231633,
+    "last_assistant_message": "ALPHA"
+  },
+  {
+    "turn": "msg2",
+    "elapsed_since_prev": 1.7479117920156568,
+    "last_assistant_message": "BRAVO"
+  }
+]

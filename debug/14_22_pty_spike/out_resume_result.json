@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "session_id_a": "47c73465-beb2-4d25-a5a6-b9ae7a7ae393",
+  "session_id_b": "47c73465-beb2-4d25-a5a6-b9ae7a7ae393",
+  "reply_a": "REMEMBERED",
+  "reply_b": "fuchsia",
+  "same_session": true,
+  "recalled": true
+}

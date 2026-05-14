@@ -1,0 +1,17 @@
+[
+  {
+    "msg": "Respond with only the word ALPHA and nothing else.",
+    "elapsed": 3.8224737079872284,
+    "last_assistant_message": "ALPHA"
+  },
+  {
+    "msg": "Now respond with only the word BRAVO and nothing else.",
+    "elapsed": 3.45996787500917,
+    "last_assistant_message": "BRAVO"
+  },
+  {
+    "msg": "Read /etc/hostname and tell me what it contains in 5 words or less.",
+    "elapsed": 6.421077083010459,
+    "last_assistant_message": "File does not exist."
+  }
+]

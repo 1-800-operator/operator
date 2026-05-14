@@ -1,0 +1,38 @@
+[
+  {
+    "test": "T1_tough_inputs",
+    "verdict": "PASS",
+    "expected_sha": "d395e08947a0bc5a50f5e876734d99f91fe7abc9f6aeef0e912b06baf2725591",
+    "got_sha": "d395e08947a0bc5a50f5e876734d99f91fe7abc9f6aeef0e912b06baf2725591",
+    "reply_preview": "d395e08947a0bc5a50f5e876734d99f91fe7abc9f6aeef0e912b06baf2725591"
+  },
+  {
+    "test": "T2_multiturn_d",
+    "verdict": "PASS",
+    "expected": [
+      "ALPHA",
+      "BRAVO",
+      "CHARLIE"
+    ],
+    "got": [
+      "ALPHA",
+      "BRAVO",
+      "CHARLIE"
+    ]
+  },
+  {
+    "test": "T3_tool_loop",
+    "verdict": "PASS",
+    "pretool_count": 3,
+    "stop_count": 1,
+    "elapsed_sec": 14.984550416003913,
+    "reply": "DONE"
+  },
+  {
+    "test": "T4_failure_event",
+    "verdict": "PASS",
+    "tool_events": 1,
+    "failure_events": 1,
+    "reply": "HANDLED"
+  }
+]

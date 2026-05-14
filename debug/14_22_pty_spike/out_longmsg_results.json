@@ -1,0 +1,22 @@
+[
+  {
+    "strategy": "A_chars_25ms",
+    "verdict": "TIMEOUT \u2014 no reply",
+    "reply": null
+  },
+  {
+    "strategy": "B_chars_50ms",
+    "verdict": "TIMEOUT \u2014 no reply",
+    "reply": null
+  },
+  {
+    "strategy": "C_paste_disabled",
+    "verdict": "TIMEOUT \u2014 no reply",
+    "reply": null
+  },
+  {
+    "strategy": "D_bracketed_paste",
+    "verdict": "PASS",
+    "reply": "SUBMITTED"
+  }
+]
