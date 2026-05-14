@@ -105,6 +105,14 @@ _SPAWN_FALLBACK_SETTLE_SECONDS = 5.0
 # posted) stays in the noise floor of the meeting-chat send path.
 _REPLIES_POLL_SECONDS = 0.15
 
+# Tail-loop cadence for the observability files (tools.jsonl,
+# errors.jsonl). Same 0.15s as the reply tail. The poll window doubles
+# as the batch boundary for tool narration: rows that land between two
+# polls are read together and narrated as one line (a parallel tool
+# call or a sub-150ms chain), which is the operator-voice behavior
+# section G is after.
+_TAIL_POLL_SECONDS = 0.15
+
 
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` CLI is missing from PATH."""
@@ -118,28 +126,96 @@ def _set_winsize(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _drain_pty_thread(master_fd, dump_buf, stop_event):
+def _drain_pty_thread(master_fd, dump_buf, stop_event, on_eof):
     """Drain master_fd into a rolling buffer for diagnostics on death.
 
     The TUI emits cursor-positioned bytes that aren't useful to parse —
     we capture the tail purely so a crashed-claude failure has something
     to surface in the error message. The reader runs until stop_event
-    fires or read() raises OSError (PTY closed).
+    fires or the PTY closes (read() hits EOF or raises OSError).
+
+    on_eof fires exactly once if the PTY closes while stop_event is NOT
+    set — i.e. inner-claude died on its own. On a normal _terminate_inner
+    teardown stop_event is set before the kill, so on_eof does not fire
+    and the drain thread exits silently.
     """
+    def _maybe_eof():
+        if stop_event.is_set():
+            return
+        try:
+            on_eof()
+        except Exception as e:
+            log.warning(f"ClaudeCLI: PTY on_eof callback raised: {e}")
+
     while not stop_event.is_set():
         try:
             r, _, _ = select.select([master_fd], [], [], 0.2)
         except (OSError, ValueError):
+            _maybe_eof()
             return
         if not r:
             continue
         try:
             chunk = os.read(master_fd, 4096)
         except OSError:
+            _maybe_eof()
             return
         if not chunk:
+            _maybe_eof()
             return
         dump_buf.append(chunk)
+
+
+def _tail_jsonl_thread(path, stop_event, on_batch, poll_seconds):
+    """Tail an append-only JSONL file, handing each poll's new rows to
+    on_batch as a list of parsed objects.
+
+    Seeds its read position to the file's current size at start, so rows
+    written before this thread spawned (e.g. a resumed meeting's earlier
+    turns) are not replayed — the same seed-to-EOF discipline the
+    chat-message observer uses. Each poll reads everything appended since
+    the last read, splits on newlines, and parses complete lines; a
+    partial trailing line (a hook script mid-flush) is held back for the
+    next poll. A missing file is tolerated — the hook that writes it may
+    simply not have fired yet.
+    """
+    try:
+        offset = path.stat().st_size
+    except OSError:
+        offset = 0
+    buf = b""
+    while not stop_event.is_set():
+        time.sleep(poll_seconds)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size <= offset:
+            continue
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            continue
+        offset += len(chunk)
+        buf += chunk
+        parts = buf.split(b"\n")
+        buf = parts.pop()  # trailing partial line (or b"" if chunk ended on \n)
+        rows = []
+        for line in parts:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        if rows:
+            try:
+                on_batch(rows)
+            except Exception as e:
+                log.warning(f"ClaudeCLI: jsonl tail on_batch raised: {e}")
 
 
 class ClaudeCLIProvider(LLMProvider):
@@ -186,15 +262,22 @@ class ClaudeCLIProvider(LLMProvider):
         self._pty_reader_thread: threading.Thread | None = None
         self._pty_dump: list[bytes] = []
 
+        # Hook-event tail loops (section G). tools.jsonl → progress
+        # narration; errors.jsonl → denial + connection narration. Both
+        # share one stop event; lifetimes match the inner-claude process.
+        self._tail_stop = threading.Event()
+        self._tools_tail_thread: threading.Thread | None = None
+        self._errors_tail_thread: threading.Thread | None = None
+
         self._spawn_lock = threading.Lock()
         self._spawn_in_progress = False
         self._spawn_exc: Exception | None = None
         self._stopping = False
 
         # Callback slots — preserved from the prior provider shape so
-        # ChatRunner._wire_provider keeps working. progress/denial/
-        # connection are no-ops in this commit; section G will wire
-        # them off tools.jsonl + errors.jsonl + PTY EOF.
+        # ChatRunner._wire_provider keeps working. progress is fed from
+        # the tools.jsonl tail, denial + connection from the errors.jsonl
+        # tail, and connection also from the PTY EOF watcher (section G).
         self._progress_callback = None
         self._tick_callback = None
         self._denial_callback = None
@@ -208,7 +291,11 @@ class ClaudeCLIProvider(LLMProvider):
     # --- callback wiring (set by ChatRunner._wire_provider) -----------
 
     def set_progress_callback(self, callback):
-        """Tool-use narrator. No-op until section G wires tools.jsonl tail."""
+        """Tool-use narrator. Fed by the tools.jsonl tail loop. Signature:
+        callback(batch) where batch is a list of (tool_name, tool_input)
+        pairs — one poll's worth of PreToolUse rows. A parallel tool call
+        or a sub-poll-window chain arrives as a multi-element batch.
+        """
         self._progress_callback = callback
 
     def set_tick_callback(self, callback):
@@ -219,11 +306,18 @@ class ClaudeCLIProvider(LLMProvider):
         self._tick_callback = callback
 
     def set_denial_callback(self, callback):
-        """Permission-denial narrator. No-op until section G wires errors.jsonl tail."""
+        """Permission-denial narrator. Fed by errors.jsonl rows whose
+        `kind` is PermissionDenied or PostToolUseFailure. Signature:
+        callback(tool_use_id).
+        """
         self._denial_callback = callback
 
     def set_connection_callback(self, callback):
-        """Connection-status narrator. No-op until section G wires PTY EOF watch."""
+        """Connection-status narrator. Fed by errors.jsonl rows whose
+        `kind` is StopFailure, and by the PTY EOF watcher when
+        inner-claude dies on its own. Signature: callback(event); the
+        only event raised here is "dropped".
+        """
         self._connection_callback = callback
 
     # --- lifecycle ----------------------------------------------------
@@ -332,10 +426,35 @@ class ClaudeCLIProvider(LLMProvider):
         self._pty_dump = []
         self._pty_reader_thread = threading.Thread(
             target=_drain_pty_thread,
-            args=(master_fd, self._pty_dump, self._pty_reader_stop),
+            args=(
+                master_fd,
+                self._pty_dump,
+                self._pty_reader_stop,
+                lambda: self._fire_connection("dropped"),
+            ),
             daemon=True,
         )
         self._pty_reader_thread.start()
+
+        # Section G observability tails. Seeded to current EOF inside the
+        # thread, so a resumed meeting doesn't replay earlier rows. The
+        # files may not exist yet — the tail tolerates that until the
+        # first hook fires.
+        self._tail_stop = threading.Event()
+        self._tools_tail_thread = threading.Thread(
+            target=_tail_jsonl_thread,
+            args=(self._tools_path, self._tail_stop, self._on_tools_batch,
+                  _TAIL_POLL_SECONDS),
+            daemon=True,
+        )
+        self._errors_tail_thread = threading.Thread(
+            target=_tail_jsonl_thread,
+            args=(self._errors_path, self._tail_stop, self._on_errors_batch,
+                  _TAIL_POLL_SECONDS),
+            daemon=True,
+        )
+        self._tools_tail_thread.start()
+        self._errors_tail_thread.start()
 
         # Record metadata up-front so it survives a crash before any
         # reply lands.
@@ -392,6 +511,17 @@ class ClaudeCLIProvider(LLMProvider):
             self._pty_reader_thread.join(timeout=2)
             self._pty_reader_thread = None
 
+        # Stop the section G tails before the kill so the EOF watcher and
+        # the StopFailure tail don't narrate a "dropped" during our own
+        # teardown.
+        if self._tools_tail_thread is not None or self._errors_tail_thread is not None:
+            self._tail_stop.set()
+            for t in (self._tools_tail_thread, self._errors_tail_thread):
+                if t is not None:
+                    t.join(timeout=2)
+            self._tools_tail_thread = None
+            self._errors_tail_thread = None
+
         if proc is not None and proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -438,7 +568,7 @@ class ClaudeCLIProvider(LLMProvider):
         except Exception:
             return "<undecodable>"
 
-    # --- callback firing helpers (tick is the only live one for now) --
+    # --- callback firing helpers -------------------------------------
 
     def _fire_tick(self):
         cb = self._tick_callback
@@ -448,6 +578,73 @@ class ClaudeCLIProvider(LLMProvider):
             cb()
         except Exception as e:
             log.warning(f"ClaudeCLI: tick callback raised: {e}")
+
+    def _fire_progress(self, tool_batch):
+        cb = self._progress_callback
+        if cb is None:
+            return
+        try:
+            cb(tool_batch)
+        except Exception as e:
+            log.warning(f"ClaudeCLI: progress callback raised: {e}")
+
+    def _fire_denial(self, tool_use_id):
+        cb = self._denial_callback
+        if cb is None:
+            return
+        try:
+            cb(tool_use_id)
+        except Exception as e:
+            log.warning(f"ClaudeCLI: denial callback raised: {e}")
+
+    def _fire_connection(self, event):
+        cb = self._connection_callback
+        if cb is None:
+            return
+        try:
+            cb(event)
+        except Exception as e:
+            log.warning(f"ClaudeCLI: connection callback raised: {e}")
+
+    # --- hook-event tail handlers (section G) -------------------------
+
+    def _on_tools_batch(self, rows):
+        """tools.jsonl tail handler. Each row is pretool.sh's envelope:
+        {ts, kind:"pretool", input:<PreToolUse payload>}. Collapse the
+        poll's rows into a single (name, input) batch and fire progress
+        once — rows read in one poll arrived inside one poll window
+        (a parallel tool call or a sub-150ms chain), which the
+        operator-voice narrator renders as one line.
+        """
+        batch = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            inner = row.get("input") if isinstance(row.get("input"), dict) else row
+            name = inner.get("tool_name")
+            if not isinstance(name, str) or not name:
+                continue
+            tinput = inner.get("tool_input")
+            batch.append((name, tinput if isinstance(tinput, dict) else {}))
+        if batch:
+            self._fire_progress(batch)
+
+    def _on_errors_batch(self, rows):
+        """errors.jsonl tail handler. error.sh stamps a top-level `kind`
+        from the hook event name; dispatch denial vs connection off it.
+        """
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            kind = row.get("kind")
+            inner = row.get("input") if isinstance(row.get("input"), dict) else row
+            if kind in ("PermissionDenied", "PostToolUseFailure"):
+                tool_use_id = (
+                    inner.get("tool_use_id") or inner.get("tool_name") or ""
+                )
+                self._fire_denial(tool_use_id)
+            elif kind == "StopFailure":
+                self._fire_connection("dropped")
 
     # --- send + tail --------------------------------------------------
 

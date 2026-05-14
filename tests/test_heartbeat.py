@@ -74,15 +74,15 @@ def _make_runner():
 
 
 def test_narrate_tool_use_throttles_rapid_chains(monkeypatch):
-    """First tool_use posts narration; subsequent ones within
+    """First tool_use batch posts narration; subsequent ones within
     TOOL_NARRATION_THROTTLE_SECONDS are suppressed."""
     runner = _make_runner()
     fake_now = [1000.0]
     monkeypatch.setattr(cr_mod.time, "monotonic", lambda: fake_now[0])
 
-    runner._narrate_tool_use("Read", {"file_path": "/tmp/foo.txt"})
-    runner._narrate_tool_use("Bash", {"command": "ls -la"})
-    runner._narrate_tool_use("Grep", {"pattern": "BLOCKS"})
+    runner._narrate_tool_use([("Read", {"file_path": "/tmp/foo.txt"})])
+    runner._narrate_tool_use([("Bash", {"command": "ls -la"})])
+    runner._narrate_tool_use([("Grep", {"pattern": "BLOCKS"})])
 
     raw = runner._connector.sent_raw
     assert len(raw) == 1, f"throttle should suppress chained narrations; got {raw}"
@@ -92,9 +92,35 @@ def test_narrate_tool_use_throttles_rapid_chains(monkeypatch):
 
     # Advance past the throttle window — next tool fires.
     fake_now[0] += cr_mod.TOOL_NARRATION_THROTTLE_SECONDS + 0.1
-    runner._narrate_tool_use("Edit", {"file_path": "/tmp/bar.txt"})
+    runner._narrate_tool_use([("Edit", {"file_path": "/tmp/bar.txt"})])
     assert len(runner._connector.sent_raw) == 2
     assert "running Edit" in runner._connector.sent_raw[1]
+
+
+def test_narrate_tool_use_collapses_multi_tool_batch(monkeypatch):
+    """A parallel tool call (multi-element batch) collapses to one
+    names-only line; arg summaries are dropped."""
+    runner = _make_runner()
+    fake_now = [1000.0]
+    monkeypatch.setattr(cr_mod.time, "monotonic", lambda: fake_now[0])
+
+    runner._narrate_tool_use([
+        ("Read", {"file_path": "/tmp/foo.txt"}),
+        ("Edit", {"file_path": "/tmp/bar.txt"}),
+        ("Bash", {"command": "ls -la"}),
+    ])
+
+    raw = runner._connector.sent_raw
+    assert len(raw) == 1, f"a batch posts exactly one line; got {raw}"
+    assert raw[0] == REPLY_PREFIX_SLIP + "running Read, Edit, Bash"
+    # ToolSearch is filtered out of the batch before the count is taken,
+    # so a batch of [ToolSearch, Read] narrates as a lone Read with args.
+    fake_now[0] += cr_mod.TOOL_NARRATION_THROTTLE_SECONDS + 0.1
+    runner._narrate_tool_use([
+        ("ToolSearch", {"query": "x"}),
+        ("Read", {"file_path": "/tmp/baz.txt"}),
+    ])
+    assert "running Read: /tmp/baz.txt" in runner._connector.sent_raw[1]
 
 
 def test_narrate_tool_use_skips_internal_tools(monkeypatch):
@@ -104,7 +130,7 @@ def test_narrate_tool_use_skips_internal_tools(monkeypatch):
     fake_now = [1000.0]
     monkeypatch.setattr(cr_mod.time, "monotonic", lambda: fake_now[0])
 
-    runner._narrate_tool_use("ToolSearch", {"query": "Read"})
+    runner._narrate_tool_use([("ToolSearch", {"query": "Read"})])
     assert runner._connector.sent_raw == []
     assert runner._last_tool_narration_ts == 0.0  # throttle stamp untouched
 
@@ -196,6 +222,7 @@ def main():
     import os
     tests = [
         test_narrate_tool_use_throttles_rapid_chains,
+        test_narrate_tool_use_collapses_multi_tool_batch,
         test_narrate_tool_use_skips_internal_tools,
         test_narrate_denial_dedupes_per_tool_use_id,
         test_narrate_connection_dropped_posts_switchboard_voice,

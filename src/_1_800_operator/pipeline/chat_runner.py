@@ -170,12 +170,20 @@ class ChatRunner:
         self._provider = provider
         log.info("ChatRunner: provider wired (no permission gate; Claude Code defaults apply)")
 
-    def _narrate_tool_use(self, tool_name: str, tool_input: dict):
+    def _narrate_tool_use(self, tools):
         """Progress callback hooked into ClaudeCLIProvider — posts a
         `[☎️ Operator] running <tool>: <args>` line to meeting chat,
         throttled to one post per TOOL_NARRATION_THROTTLE_SECONDS.
 
-        Runs on the provider's reader thread, NOT the main Playwright-
+        `tools` is a batch: the list of (tool_name, tool_input) pairs the
+        provider read from tools.jsonl in a single poll. A lone tool
+        renders with its arg summary (`running Read: foo.py`); a parallel
+        tool call or a sub-poll-window chain arrives as a multi-element
+        batch and collapses to a names-only line (`running Read, Edit,
+        Bash`) — arg summaries are dropped there because three file paths
+        would blow the chat line length.
+
+        Runs on the provider's tail-loop thread, NOT the main Playwright-
         owning thread, so `_send` enqueues onto `_send_queue` and the
         provider's tick callback drains it on the polling thread.
 
@@ -183,18 +191,21 @@ class ChatRunner:
         doesn't need to see) — same filter rule the old
         `_PRE_TOOL_VOICE_RULE` carried before it was stripped.
         """
-        if not tool_name:
-            return
-        if tool_name == "ToolSearch":
+        named = [(n, i) for (n, i) in tools if n and n != "ToolSearch"]
+        if not named:
             return
         now = time.monotonic()
         if now - self._last_tool_narration_ts < TOOL_NARRATION_THROTTLE_SECONDS:
             return
         try:
-            summary = self._summarize_tool_input(tool_input or {})
-            line = f"running {tool_name}"
-            if summary:
-                line = f"{line}: {summary}"
+            if len(named) == 1:
+                tool_name, tool_input = named[0]
+                summary = self._summarize_tool_input(tool_input or {})
+                line = f"running {tool_name}"
+                if summary:
+                    line = f"{line}: {summary}"
+            else:
+                line = "running " + ", ".join(n for n, _ in named)
             self._send(REPLY_PREFIX_SLIP + line, kind="operator_status", raw=True)
             self._last_tool_narration_ts = now
         except Exception as e:
