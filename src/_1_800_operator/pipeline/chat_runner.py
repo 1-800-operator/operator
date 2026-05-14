@@ -13,7 +13,6 @@ import time
 from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_quoteattr
 
 from _1_800_operator import config
-from _1_800_operator.bridges.claude import REPLY_PREFIX_OPERATOR
 from _1_800_operator.pipeline import ui
 from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
 
@@ -526,10 +525,13 @@ class ChatRunner:
             )
 
     def _post_update_hint_if_newer(self):
-        """Daemon-thread worker: query the marketplace, post a hint if
-        a newer plugin version exists. Off-thread routing through
-        _send_queue (we're not the main thread) so the polling loop
-        drains it on its next tick.
+        """Daemon-thread worker: query the marketplace, log a hint if a
+        newer plugin version exists.
+
+        Log-only — a plugin-version notice is noise for the meeting
+        participants (it concerns whoever runs operator, not the room),
+        so it never reaches chat. The `/operator:update` skill is the
+        actual update path.
         """
         try:
             from _1_800_operator.pipeline.update_check import check_for_newer_plugin
@@ -539,26 +541,22 @@ class ChatRunner:
             return
         if not hint:
             return
-        try:
-            self._send(REPLY_PREFIX_OPERATOR + hint, kind="operator_status", raw=True)
-        except Exception as e:
-            log.warning(f"ChatRunner: failed to post update hint: {e}")
+        log.info(f"ChatRunner: operator-plugin update available — {hint}")
 
     def _narrate_failure(self, message: str):
-        """Post an operator-voice failure line and close the turn.
+        """Post a plain failure line and close the turn.
 
-        Switchboard-voice direct post — no model in the loop, no
-        operator-authored prompts fed into `claude -p`. Pre-14.22.3 this
-        method spawned a one-shot LLM call to author a model-voice
-        failure narration; that pattern was harness-shaped (operator-
-        authored prompt → claude -p subprocess) and got stripped in
-        S211 along with the heartbeat side-channel. The replacement is
-        a direct chat post in operator's voice — visible, transparent,
-        and free of any spawn-signature impact.
+        When operator *itself* can't render a result (an unknown result
+        shape, a crashed subprocess), it still owes the room a reply —
+        the user @mentioned and silence is worse than a stumble. The
+        message goes out on the normal `[🤖 Claude] ` path: from the
+        meeting's point of view there is no "operator," just the bot,
+        so the bot says it stumbled. No model in the loop, no
+        operator-authored prompt — a direct chat post.
 
         Skipped during shutdown: the only "failures" reaching us post-
         stop are subprocess-killed-by-safety-net and other shutdown
-        artifacts — narrating them would post into a chat panel that's
+        artifacts — posting them would land in a chat panel that's
         already detaching.
         """
         if self._stop_event.is_set():
@@ -566,7 +564,7 @@ class ChatRunner:
             self._emit_turn_done(failed=True)
             return
         try:
-            self._send(REPLY_PREFIX_OPERATOR + message, kind="operator_status", raw=True)
+            self._send(message, kind="chat")
         except Exception as e:
             log.warning(f"ChatRunner: _narrate_failure post failed: {e}")
         self._emit_turn_done(failed=True)
@@ -588,19 +586,15 @@ class ChatRunner:
             last[0] = time.monotonic()
         return on_paragraph
 
-    def _send(self, text, kind: str = "chat", raw: bool = False):
+    def _send(self, text, kind: str = "chat"):
         """Send a chat message, append it to the meeting record, and track it as our own.
 
         `kind` is persisted to the record but filtered by `pipeline/llm.py` when
-        building the LLM prompt (only `chat` and `caption` are replayed;
-        `operator_status` is recorded for the local JSONL but not replayed
-        back into the model's prompt context).
+        building the LLM prompt (only `chat` and `caption` are replayed).
 
-        `raw=True` posts via the connector's `send_chat_raw` (no slip
-        reply-prefix prepended), used for operator-voice status lines that
-        already carry `[☎️ Operator] `. Without raw=True the connector
-        prepends the slip bot prefix `[🤖 Claude] ` so meeting participants
-        can tell Claude's replies apart from the user's own messages.
+        Everything goes out through the connector's `send_chat`, which
+        prepends the slip bot prefix `[🤖 Claude] ` — there is no
+        unprefixed/operator-voice send path anymore (removed S228).
 
         Own-message dedup: primary path is by message ID — when the connector
         returns the new `data-message-id` it captured post-send, we add it to
@@ -610,8 +604,7 @@ class ChatRunner:
         times out; we store text stripped so DOM normalization (trailing
         newlines etc.) doesn't break the comparison.
 
-        Off-thread callers (provider's reader thread for operator-voice
-        narration) get their send enqueued instead of executed inline —
+        Off-thread callers get their send enqueued instead of executed inline —
         Playwright's sync API rejects calls from any thread other than the
         one that opened the Page, and silent failure inside the connector
         would otherwise look like a successful post in the log. The polling
@@ -619,16 +612,13 @@ class ChatRunner:
         thread.
         """
         if threading.current_thread() is not self._main_thread:
-            self._send_queue.put((text, kind, raw))
+            self._send_queue.put((text, kind))
             return
         text_normalized = text.strip()
         with self._send_lock:
             self._own_messages.add(text_normalized)
             try:
-                if raw and hasattr(self._connector, "send_chat_raw"):
-                    msg_id = self._connector.send_chat_raw(text)
-                else:
-                    msg_id = self._connector.send_chat(text)
+                msg_id = self._connector.send_chat(text)
             except Exception as e:
                 log.error(f"ChatRunner: send_chat failed: {e}")
                 self._own_messages.discard(text_normalized)
@@ -642,11 +632,10 @@ class ChatRunner:
                 self._seen_ids.add(msg_id)
             self._last_send_time = time.time()
             # First-paragraph DOM-visibility stamp for the end-to-end TIMING
-            # trace. Only counts genuine claude replies (kind=="chat"), not
-            # operator-voice status posts, and only the first one of the turn.
-            # Stamped post-send so it reflects when send_chat actually
-            # returned (i.e. when the message landed in Meet's DOM), not
-            # when it was enqueued.
+            # trace. Only counts genuine claude replies (kind=="chat") and
+            # only the first one of the turn. Stamped post-send so it
+            # reflects when send_chat actually returned (i.e. when the
+            # message landed in Meet's DOM), not when it was enqueued.
             if (
                 kind == "chat"
                 and self._turn_timing is not None
@@ -666,8 +655,8 @@ class ChatRunner:
         drained = 0
         while drained < 16:
             try:
-                text, kind, raw = self._send_queue.get_nowait()
+                text, kind = self._send_queue.get_nowait()
             except queue.Empty:
                 return
-            self._send(text, kind=kind, raw=raw)
+            self._send(text, kind=kind)
             drained += 1

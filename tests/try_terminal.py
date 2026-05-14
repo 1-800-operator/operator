@@ -113,13 +113,6 @@ class TerminalConnector(MeetingConnector):
         sys.stdout.flush()
         return str(uuid.uuid4())
 
-    def send_chat_raw(self, message):
-        """Operator-voice post — caller already prepended `[☎️ Operator] `,
-        so don't double-prefix."""
-        sys.stdout.write(message + "\n")
-        sys.stdout.flush()
-        return str(uuid.uuid4())
-
     def read_chat(self):
         msgs = []
         while True:
