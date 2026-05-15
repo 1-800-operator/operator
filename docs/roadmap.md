@@ -1,6 +1,53 @@
 # Operator — Roadmap
 
-*Last updated: May 14, 2026 (session 230 — DECISION.md 20–24 integration pass complete (test 25 `--fresh` cut from scope); turn-0 briefing leak found + fixed; failure model fully consolidated — one boot ceiling, kill-on-failure, retry-once, one uniform "claude is unavailable" message; doctor faceleted with a structured `last_failure.json` section read at `/operator:doctor` time. Phase 14.22 is now closed end-to-end against real-world failure shapes; pre-launch polish + plugin 0.1.17 publish are the remaining follow-ups).*
+*Last updated: May 14, 2026 (session 232 — yolo-off mode landed. New `/operator:slip-guarded` slash command spawns inner-claude with `--permission-mode default`; the operator-plugin PermissionRequest hook bridges each ask into meeting chat; a separate long-lived classifier claude per meeting interprets the participant's verbatim reply via one ~2-3s normal-channel turn, $0 marginal cost. Phases 0-4 complete (hook hardening + new hook + classifier + slash command + docs); Phase 5 = live-meeting validation, deferred to next session with checklist at debug/14_24_permreq_spike/PHASE_5_LIVE_TEST_CHECKLIST.md. Default `/operator:slip` unchanged — no regression. Three new spike chains 14_24/14_25/14_26 recorded the design path (deny+verbatim killed by claude's prompt-injection defense; classifier sidecar 19/19 PASS).*
+
+**Session 232 (May 14, 2026) — yolo-off mode (`/operator:slip-guarded`).** Designed and built operator's first non-yolo permission mode after the research report flagged the absence of any user-controllable gating as an adoption blocker. Spike chain in `debug/14_24_permreq_spike/DECISION.md`: 14_24 verified `PermissionRequest` fires in PTY mode and JSON-only deny is the right hook contract (T3 found `exit 2` retry-loops claude — generalised to all hooks); 14_25 rejected the deny+verbatim+retry approach (claude's prompt-injection defense quarantines tool-result-channel text — same dynamic that killed Stop-block); 14_26 validated the classifier sidecar (19/19 scenarios match, 2.6s avg, $0 marginal cost on subscription pool).
+
+**Phase 0 — hook hardening foundation.** `operator-plugin/hooks/scripts/_common.sh` now carries the *operator hook contract* doc block (always exit 0; decisions in JSON; never bare non-zero); dropped `set -e`; new `safe_emit_permreq_deny()` helper. `session_start.sh` and `stop.sh` refactored with explicit safe-fallbacks. `stop.sh` now writes a `{"kind":"crashed"}` row even on internal failure — pre-refactor a python crash silently left operator hanging at the 600s turn timeout. 10/10 fault-injection harness PASS.
+
+**Phase 1 — `permission_request.sh`** added to operator-plugin/hooks/scripts/ and registered in hooks.json. Always exits 0 with JSON; round-trip ceiling 120s (env-overridable). 12/12 fault-path harness PASS.
+
+**Phase 2 redux — operator-side plumbing + classifier sidecar.** New `pipeline/classifier.py` (`PermissionClassifier`, slim sibling of `ClaudeCLIProvider`, ~330 lines, separate session_dir suffixed `-classifier`). `pipeline/chat_runner.py` takes the first non-self post-question chat reply and hands it verbatim to the classifier — no operator-side word-bag matching. `pipeline/providers/claude_cli.py` gets `_poll_permreqs()` in the existing transcript-tail loop. Deleted `pipeline/confirmation.py`. 12 mocked round-trip tests with `FakeClassifier` + 8 classifier unit tests — all green.
+
+**Phase 3 — `/operator:slip-guarded` surface.** New `slip-guarded` subcommand in `__main__.py` (parallel to `slip`, both flow through `_run_slip(name, rest, *, guarded=…)`). `_build_cmd` flips between `--dangerously-skip-permissions` and `--permission-mode default`. `_BRIEFING_GUARDED_SUFFIX` appended in guarded mode. New `operator-plugin/skills/slip-guarded/SKILL.md`. Updated `slip` SKILL.md to drop the misleading `--yolo` mention and point at slip-guarded as alternative.
+
+**Phase 4 — docs.** `docs/security.md` got the new "Yolo-off mode" section + the bypassed-permissions section retitled "Operator's default" with a pointer. `README.md` "Permissions & safety" rewritten as Default vs Alternative subsections. `SECURITY.md` got the "Known design tradeoffs" pre-emption + fixed Scope.
+
+**Test suite: 15 files, all green** (no regression; closes S231's "Parallel async workstream broken" flag — that was this work mid-flight).
+
+**Carries forward, NOT touched this session:**
+- S231's caption-quality real-meeting validation tomorrow (still pending, not pre-empted by Phase 5).
+- S231's deferred bug #3 (overflow pagination at 10+ participants).
+- `model-log.md` still missing per S231 + S230. New log lines from S232: `slip: guarded mode — classifier sidecar spawning in parallel`, `PermissionClassifier spawning sidecar claude: cwd=… session_dir=…`, `PermissionClassifier: sidecar ready (pid=…)`, `PermissionClassifier: classify() while stopping → deny`, `PermissionClassifier: classifier unavailable → deny`, `TIMING classifier_turn=Xs verdict=allow|deny`, `ChatRunner: permreq <id> active — tool=…`, `ChatRunner: permreq <id> got chat reply from sender=…: '<text>'`, `ChatRunner: permreq <id> chat post failed — eager deny`, `ChatRunner: permreq <id> hit Xs safety timeout — clearing`. Document when reconstituted.
+
+**Next:** Phase 5 — live-meeting validation of `/operator:slip-guarded` per `debug/14_24_permreq_spike/PHASE_5_LIVE_TEST_CHECKLIST.md`. Bump operator-plugin to 0.1.17 + matching marketplace.json as part of Phase 5 prep so the live test runs against a consistently versioned plugin. Push both repos when ready.
+
+**Session 231 (May 14, 2026) — caption attribution + STT model swap.** User flagged two real meetings (morning `sqr-vyex-wob`, afternoon `gte-dmiw-spw`) where transcripts had attendees missing entirely + one attendee massively over-attributed. Investigation surfaced three compounding bugs and a separate STT-quality concern; fixes shipped for the bugs that data supported.
+
+**Speaker-attribution bugs (#1 + #2 fixed, #3 deferred):**
+- **#1 — self-name scrape.** `GET_SELF_NAME_JS`'s `button[data-idom-class]` predicate matched every tile, so "first in DOM order" won — slip Chrome's first-rendered remote tile got mis-identified as local. Consequence: every mic-leg utterance (the user's own voice) got tagged with a random remote name (`Michael Powell` morning, `Adam Swanson` afternoon); that person's tile also got *excluded* from the speaking observer via the same predicate, so their actual speech got latched onto whoever pipped most recently. DOM-capture session in a 3–7 person test Meet confirmed the negative-space predicate: every remote tile has a `"Pin <name> to your main screen"` button (idomButtonCount=3); the local tile doesn't (idomButtonCount=2). New predicate: `tile.querySelector('button[aria-label^="Pin "]')` → if present, remote; if absent, local.
+- **#2 — late-joiner blind spot.** Speaking observer installed once at meeting entry (`attach_adapter.py:558`), never rescanned. New participants rendered new tiles but no observer attached — their speech got attributed via `_last_s_speaker` fallback (whoever pipped most recently). Fixed by making `INSTALL_SPEAKING_OBSERVER_JS` idempotent at the per-tile level (observers, state, queue persist across calls; only new pids get wired up) and re-invoking it every `_SPEAKING_RESCAN_INTERVAL_S = 2.0s` from inside the existing `_drain_speaking_queue` tick. Late joiners get attribution within ~2s of rendering.
+- **#3 — overflow pagination.** DOM capture session reached 7 participants with no pagination — Meet's grid view fit them all. Deferred; revisit if a future big meeting actually drops participants from the transcript.
+
+**STT quality — model swap shipped, prompt lever rejected.** User flagged transcripts as "nonsensical" and "fractured." Built a scrappy benchmark (`debug_snapshots/.../benchmark_initial_prompt.py`) against 12 hand-corrected ground-truth utterances (67.9s mid-meeting from `gte-dmiw-spw`). Findings:
+- **Aggregate WER on whisper-base: ~22%.** Failure distribution bimodal — 3/12 utterances at 0% (long clean single-speaker speech), 5/12 at 50-300% (short utterances, proper nouns, near-silence hallucinations).
+- **Initial_prompt with attendees-only: -1.4 WER points.** A cheated version with project terms (`Janus DTC`, `flagging`, etc.) hit -11.6 points, but project terms aren't derivable at runtime from a user's meeting — only attendee names are. Honest test confirmed the lever is small.
+- **Model swap whisper-base → whisper-large-v3-turbo: ~22% → ~13% WER.** 40% relative reduction from one line. Latency budget OK on M-series (p50 650ms, worst-case 6.2s for a 10s utterance — 0.57x realtime). Initial_prompt actively *hurts* on top of the bigger model (+1.4 points) because the stronger decoder reads the audio unaided and the prompt becomes biasing noise. Dropped the prompt lever entirely.
+
+**Slip-profile decoupling clarified.** User confirmed the slip Chrome profile signs in to a different Google account than what they join meetings as — so self-name has to come from the in-meeting tile, not from the Chrome profile. Saved to memory.
+
+**Memory artifacts:** ground-truth worksheet + benchmark script + audio snapshots all preserved at `~/.operator/debug_snapshots/{sqr-vyex-wob-2026-05-14-am, gte-dmiw-spw-2026-05-14-pm}/` for future STT work.
+
+**Next** — real-meeting validation tomorrow:
+- Watch `/tmp/operator.log` for `mic-leg speaker label = 'Jojo Shapiro'` (Bug #1 confirmation) and `speaking observer rescan — added N tile(s) (<names>)` (Bug #2 confirmation when someone joins late).
+- Read the resulting transcript — proper-noun recovery, longer coherent utterances, less "fogging"/"refuel"-class nonsense.
+
+**Other workstreams active in parallel (not this session):**
+- ~~`pipeline/chat_runner.py` + `pipeline/providers/claude_cli.py` + new `pipeline/classifier.py` + `tests/test_permreq_round_trip.py` have uncommitted async work on a PermissionRequest round-trip feature (yolo-off mode). The work imports `pipeline.confirmation` which doesn't exist on disk — 3 tests broken until that lands. Flagged for that workstream.~~ **Resolved in S232** — the missing module was deleted as part of the redesign and chat_runner no longer imports it; all 15 test files green.
+- `model-log.md` is still missing. New log lines this session: `speaking observer installed — observing N remote tile(s) (added M this call); local_pid=<pid>` (CHANGED — was `installed on N remote tile(s)`) and `speaking observer rescan — added N tile(s) (<names>); now observing M` (NEW). Document when reconstituted.
+
+
 
 **Session 230 (May 14, 2026) — integration pass closed; failure surface consolidated; doctor faceleted.** Closed out the DECISION.md 20–24 integration pass that S229 left half-done, then collapsed claude's whole failure surface into one shape and gave doctor a post-failure section so users never need to read `/tmp/operator.log`.
 
