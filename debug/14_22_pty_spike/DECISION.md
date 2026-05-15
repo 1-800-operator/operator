@@ -62,7 +62,7 @@ We can't filter foreign hooks (Claude Code merges all sources into one execution
 - Slow foreign hooks delay our Stop hook firing → measure and warn (operator-voice: `[☎️ Operator] hook delay detected — N seconds`)
 - `operator doctor` can pre-warn: *"Your global hooks include N handlers — review for slow/blocking handlers before relying on operator for time-sensitive meetings."*
 
-**Escape hatch:** `/operator:slip <url> --fresh` (or equivalent) starts the inner-claude with a brand-new session (no `--resume`), `cwd = ~/.operator/sessions/<id>/`. No foreign project-level hooks fire (different cwd → different project), only user-level hooks remain. Cost: no inherited context. Use for clean-room meetings or when a foreign hook is suspected of misbehaving.
+**A `--fresh` clean-room escape hatch was considered and cut from scope.** The idea: spawn inner-claude with no `--resume` and `cwd = ~/.operator/sessions/<id>/` so foreign project-level hooks don't fire. Dropped — foreign hooks are observable (above) and the no-resume default already exists; a dedicated flag isn't worth the surface area pre-launch.
 
 ## Production refactor plan
 
@@ -70,9 +70,9 @@ We can't filter foreign hooks (Claude Code merges all sources into one execution
 
 1. **Drop**: `-p`, `--resume <id>` *as currently passed*, `--output-format stream-json`.
    **Add**: `--dangerously-skip-permissions` (unconditional — operator already requires `--yolo` semantics; the `--yolo` flag in `__main__.py` becomes a no-op or is removed since it's now always on).
-   **Add (conditional)**: `--resume <user-main-session-id>` when bridged from the plugin slash command, OR no `--resume` for `--fresh` mode.
+   **Add (conditional)**: `--resume <user-main-session-id>` when bridged from the plugin slash command; no `--resume` otherwise (a fresh session is born on first @mention).
 2. **PTY-wrap the spawn**: `pty.openpty()`, set winsize 40×120, `os.setsid` for process-group isolation. Keep stderr on the same PTY as stdout — hook events surface errors structurally, but stderr is still useful for debugging crashes.
-3. **Spawn `cwd`**: `<user-project-dir>` (the cwd of the user's main Claude Code session when bridged; falls back to `~/.operator/sessions/<id>/` for `--fresh` mode). Inner-claude needs this cwd to (a) find the resumed session JSONL and (b) load the user's project `CLAUDE.md` for free context. No `--working-directory` flag exists; the process's actual cwd is the only knob.
+3. **Spawn `cwd`**: `<user-project-dir>` (the cwd of the user's main Claude Code session when bridged; falls back to `os.getcwd()` otherwise). Inner-claude needs this cwd to (a) find the resumed session JSONL and (b) load the user's project `CLAUDE.md` for free context. No `--working-directory` flag exists; the process's actual cwd is the only knob.
 
 ### B. Spawn-ready handshake
 
@@ -157,7 +157,6 @@ We can't filter foreign hooks (Claude Code merges all sources into one execution
 22. **Foreign-hook interference.** Run a meeting on a machine where the user has a Stop hook with `decision: "block"` configured globally; verify operator's detector surfaces the anomaly and the meeting flow doesn't silently break.
 23. **Tear-down race.** Run a meeting that ends immediately after a long claude response; verify the final reply lands in chat before operator exits.
 24. **Resume from desktop-app session.** With Claude Code Desktop running, invoke `/operator:slip <url>` from inside a real project. Verify `CLAUDE_CODE_SESSION_ID` is captured, passed as `--resume`, and the inner-claude inherits the user's project context.
-25. **`--fresh` mode.** Verify it spawns cleanly in `~/.operator/sessions/<id>/`, foreign project hooks don't fire, meeting works end-to-end without inherited context.
 
 ## Open questions / known unknowns
 

@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from _1_800_operator import config
 from _1_800_operator.pipeline.claude_code_import import _probe_claude_code
 
 CHROME_PATH = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -400,6 +401,82 @@ def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
     )
 
 
+def _render_last_failure() -> None:
+    """Print the post-failure snapshot (if one exists) verbatim.
+
+    Doctor does NOT classify or translate the failure data into a fix —
+    that's the model's job. We just dump the structured record so the
+    outer Claude Code session reading `operator doctor`'s output has
+    everything it needs to interpret what happened in plain language
+    for the user (see the doctor SKILL.md for the interpretation
+    instruction). Same shape as the other doctor sections: dump signals,
+    let the model translate.
+
+    Skips silently if no failure file exists or the file is unreadable —
+    a clean run has nothing to say here.
+    """
+    path = Path(config.LAST_FAILURE_PATH)
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    print()
+    print("Last meeting failure")
+    print("────────────────────")
+    # Single-line scalars first, then the multi-line tails. Use the
+    # field's value verbatim — no abridgement or rewriting.
+    scalar_fields = (
+        "ts", "meeting_url", "meeting_slug",
+        "exception_class", "phase", "message",
+    )
+    for key in scalar_fields:
+        if key not in data:
+            continue
+        val = data[key]
+        if key == "ts" and isinstance(val, (int, float)):
+            try:
+                age = max(0.0, time.time() - val)
+                stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(val))
+                print(f"  when:            {stamp}  ({_fmt_age(age)} ago)")
+                continue
+            except (OSError, ValueError):
+                pass
+        # Long single-line strings (message can be ~2KB) — print on its
+        # own line below the label so it's readable.
+        sval = str(val)
+        if "\n" in sval or len(sval) > 60:
+            print(f"  {key}:")
+            for line in sval.splitlines() or [sval]:
+                print(f"    {line}")
+        else:
+            print(f"  {key:<16} {sval}")
+
+    for block_key, label in (
+        ("pty_tail", "pty_tail"),
+        ("operator_log_tail", "operator_log_tail"),
+    ):
+        if not data.get(block_key):
+            continue
+        print(f"  {label}:")
+        for line in str(data[block_key]).splitlines():
+            print(f"    {line}")
+
+
+def _fmt_age(seconds: float) -> str:
+    """Short human-readable age — '23s', '4m', '2h', '3d'. No locale, no commas."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
 def run_doctor() -> int:
     """Run every check, print a checklist, return shell exit code.
 
@@ -444,6 +521,12 @@ def run_doctor() -> int:
                 failures += 1
             if c.fix:
                 print(f"      fix: {c.fix}")
+    print()
+
+    # Post-failure context (if any) — printed before the verdict so the
+    # model reading our output has the last failure's raw signals in
+    # hand when it interprets the overall state for the user.
+    _render_last_failure()
     print()
 
     if failures == 0 and warnings == 0:

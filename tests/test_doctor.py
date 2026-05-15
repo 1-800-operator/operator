@@ -16,7 +16,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from _1_800_operator.pipeline.doctor import _check_cwd_trusted
+import contextlib
+import io
+import time
+
+from _1_800_operator import config
+from _1_800_operator.pipeline.doctor import _check_cwd_trusted, _render_last_failure
 
 
 def _registry(tmp, projects):
@@ -98,6 +103,88 @@ def test_resolved_path_match():
     print("  resolved-path match OK")
 
 
+def _render_with_failure_file(tmp_path: Path, payload: dict | str) -> str:
+    """Point config.LAST_FAILURE_PATH at a temp file holding `payload`,
+    capture _render_last_failure()'s stdout, restore the path."""
+    p = tmp_path / "last_failure.json"
+    if isinstance(payload, str):
+        p.write_text(payload, encoding="utf-8")
+    else:
+        p.write_text(json.dumps(payload), encoding="utf-8")
+    saved = config.LAST_FAILURE_PATH
+    config.LAST_FAILURE_PATH = str(p)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _render_last_failure()
+        return buf.getvalue()
+    finally:
+        config.LAST_FAILURE_PATH = saved
+
+
+def test_render_last_failure_absent_is_silent():
+    """No file → nothing printed (a clean run has nothing to say)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = config.LAST_FAILURE_PATH
+        config.LAST_FAILURE_PATH = str(Path(tmp) / "missing.json")
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _render_last_failure()
+            assert buf.getvalue() == "", f"expected silence, got: {buf.getvalue()!r}"
+        finally:
+            config.LAST_FAILURE_PATH = saved
+    print("  no-file → silent OK")
+
+
+def test_render_last_failure_dumps_structured_record():
+    """A populated file is dumped verbatim — scalars on their lines, the
+    PTY tail and log tail printed below their labels. No classification
+    or rewriting — the model reading doctor's output is the translator."""
+    with tempfile.TemporaryDirectory() as tmp:
+        payload = {
+            "ts": time.time() - 90,
+            "meeting_url": "https://meet.google.com/sim-abcd-efg",
+            "meeting_slug": "sim-abcd-efg",
+            "exception_class": "ClaudeCLIProtocolError",
+            "message": "briefing (turn 0) produced no reply before the 180s boot ceiling — inner-claude is wedged.",
+            "phase": "boot",
+            "pty_tail": "Starting Claude Code...\nLoading session 24f38462\n",
+            "operator_log_tail": "2026-05-14 21:55:01 INFO ClaudeCLI spawning interactive claude",
+        }
+        out = _render_with_failure_file(Path(tmp), payload)
+        assert "Last meeting failure" in out, out
+        # Header / scalars surface verbatim from the record.
+        assert "ClaudeCLIProtocolError" in out
+        assert "phase            boot" in out
+        assert "https://meet.google.com/sim-abcd-efg" in out
+        assert "1m ago" in out, "age should render in short form"
+        # Multi-line + long fields land below their label.
+        assert "message:\n" in out
+        assert "boot ceiling" in out
+        assert "pty_tail:\n" in out
+        assert "Loading session 24f38462" in out
+        assert "operator_log_tail:\n" in out
+        assert "ClaudeCLI spawning interactive claude" in out
+        # No classifier output sneaks in — doctor never translates.
+        for forbidden in (
+            "usually means", "try re-running", "looks like",
+            "likely cause", "your claude is",
+        ):
+            assert forbidden.lower() not in out.lower(), (
+                f"doctor must not classify ({forbidden!r} found)"
+            )
+    print("  populated file → structured dump, no classification OK")
+
+
+def test_render_last_failure_garbage_is_silent():
+    """Unparseable JSON in the file → render silently skips, doesn't raise."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = _render_with_failure_file(Path(tmp), "{ not json")
+        assert out == "", f"garbage → silent, got: {out!r}"
+    print("  garbage file → silent OK")
+
+
 def main():
     tests = [
         test_trusted_cwd,
@@ -106,6 +193,9 @@ def main():
         test_registry_missing_fails_open,
         test_registry_garbage_fails_open,
         test_resolved_path_match,
+        test_render_last_failure_absent_is_silent,
+        test_render_last_failure_dumps_structured_record,
+        test_render_last_failure_garbage_is_silent,
     ]
     for t in tests:
         print(t.__name__)

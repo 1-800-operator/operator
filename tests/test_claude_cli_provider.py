@@ -316,14 +316,13 @@ def test_wait_for_ready_outcomes():
             assert "EOF" in str(exc), f"should name the PTY EOF: {exc}"
 
     # 4. process alive, no flag, ceiling hit → raises "never became ready".
-    #    Monkeypatch the ceiling tiny so the test doesn't wait 180s.
+    #    Set the shared boot deadline tiny so the test doesn't wait 180s.
     with tempfile.TemporaryDirectory() as tmp:
         provider = _new_provider(tmp)
         provider._proc = _FakeProc(alive=True)
-        saved = cc._READY_FLAG_CEILING_SECONDS
-        cc._READY_FLAG_CEILING_SECONDS = 0.3
+        provider._boot_deadline = time.monotonic() + 0.3
+        t0 = time.monotonic()
         try:
-            t0 = time.monotonic()
             provider._wait_for_ready()
             assert False, "ceiling should raise when no flag ever appears"
         except ClaudeCLIProtocolError as exc:
@@ -332,8 +331,6 @@ def test_wait_for_ready_outcomes():
             # output was captured (_pty_dump is empty) → "no terminal output".
             assert "no terminal output" in str(exc), f"diagnosis should be wired in: {exc}"
             assert time.monotonic() - t0 >= 0.3, "should wait out the ceiling"
-        finally:
-            cc._READY_FLAG_CEILING_SECONDS = saved
     print("  _wait_for_ready: flag / dead-proc / PTY-EOF / ceiling outcomes OK")
 
 

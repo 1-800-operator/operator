@@ -8,16 +8,12 @@ layer, which this harness reaches directly by constructing a provider,
 pre-warming it, and driving turns through `complete_streaming`.
 
 Not covered here, and why:
-  - Test 22 (foreign-hook interference) mutates ~/.claude/settings.json
-    and is a known write-hazard under --dangerously-skip-permissions
-    (S228 Hard Won Knowledge). Run by hand, watched.
+  - Test 22 (foreign-hook interference) has its own standalone script,
+    test22_foreign_hook.py — it pre-trusts bench/ and touches
+    ~/.claude.json (not ~/.claude/settings.json), so it's kept separate
+    from this harness's `all` run.
   - Test 24 (resume from desktop-app session) needs Claude Code Desktop
     running + a real project session to bridge. Not automatable here.
-  - Test 25 (--fresh mode) can't run: `--fresh` was never implemented.
-    `__main__.py` has only `--resume-session` + the CLAUDE_CODE_SESSION_ID
-    env tier; the implicit "fresh" default spawns in os.getcwd(), NOT
-    `~/.operator/sessions/<id>/`, so foreign project hooks DO fire. The
-    DECISION.md section-M `--fresh` escape hatch is still a TODO.
 
 Requires: operator-plugin installed (so the hooks fire) and `claude`
 logged in. Spawns a real `--dangerously-skip-permissions` claude — it
@@ -352,9 +348,8 @@ def main():
     _banner("INTEGRATION PASS SUMMARY")
     for k in sorted(results):
         print(f"  test {k}: {'PASS' if results[k] else 'FAIL / INCONCLUSIVE'}")
-    print("  test 22 (foreign-hook): run by hand — settings.json write hazard")
+    print("  test 22 (foreign-hook): run test22_foreign_hook.py separately")
     print("  test 24 (desktop resume): needs Claude Code Desktop + real project")
-    print("  test 25 (--fresh mode): BLOCKED — --fresh was never implemented")
     sys.exit(0 if all(results.values()) else 1)
 
 

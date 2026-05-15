@@ -54,6 +54,7 @@ BLEED_DEDUPE_SIMILARITY     = 0.75
 
 ENV_FILE            = str(Path.home() / ".operator" / ".env")                # shared .env for API keys
 DEBUG_DIR           = str(Path.home() / ".operator" / "debug")               # screenshots + HTML dumps from save_debug() and adapter failure paths
+LAST_FAILURE_PATH   = str(Path.home() / ".operator" / "last_failure.json")   # post-failure snapshot doctor reads to explain "claude is unavailable" — cleared on each successful slip start, overwritten by the next failure
 
 
 def relativize_home(p):

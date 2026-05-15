@@ -5,11 +5,14 @@ Usage:
     runner = ChatRunner(connector, llm)
     runner.run(meeting_url)   # blocks until stop() is called
 """
+import json
 import logging
+import os
 import queue
 import re
 import threading
 import time
+from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_quoteattr
 
 from _1_800_operator import config
@@ -17,6 +20,75 @@ from _1_800_operator.pipeline import ui
 from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
 
 log = logging.getLogger(__name__)
+
+
+# Cap each string field in the failure snapshot — bounds disk + keeps
+# doctor's rendered output legible. PTY tail typically <2KB anyway.
+_FAILURE_MESSAGE_MAX = 2000
+_FAILURE_PTY_TAIL_MAX = 2000
+_FAILURE_LOG_TAIL_LINES = 30
+
+
+def _operator_log_tail(n_lines: int = _FAILURE_LOG_TAIL_LINES) -> str:
+    """Return the last n_lines of /tmp/operator.log, or '' if unreadable.
+
+    Best-effort: the log lives in /tmp and may not exist in tests or
+    short-lived processes; we just return empty rather than raising.
+    """
+    try:
+        with open("/tmp/operator.log", "rb") as f:
+            try:
+                f.seek(-200 * n_lines, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail_bytes = f.read()
+    except OSError:
+        return ""
+    text = tail_bytes.decode("utf-8", errors="replace")
+    return "\n".join(text.splitlines()[-n_lines:])
+
+
+def _write_last_failure(record, provider, exc):
+    """Snapshot the failure for doctor to read.
+
+    Schema is deliberately flat + small. Doctor dumps it pretty-printed
+    so the model (the actual consumer of `operator doctor`'s output) has
+    structured signals to interpret in plain language — see the doctor
+    SKILL.md. No classification at write time.
+
+    Best-effort: a failure to write must not interfere with the
+    in-meeting failure narration, so all errors are caught + logged.
+    """
+    payload = {
+        "ts": time.time(),
+        "meeting_url": (getattr(record, "meta", {}) or {}).get("meet_url", ""),
+        "meeting_slug": getattr(record, "slug", "") or "",
+        "exception_class": type(exc).__name__,
+        "message": str(exc)[:_FAILURE_MESSAGE_MAX],
+        "phase": "unknown",
+        "pty_tail": "",
+        "operator_log_tail": _operator_log_tail(),
+    }
+    # Provider may not expose the snapshot hook (non-claude_cli provider,
+    # or stub in a test) — best-effort merge.
+    try:
+        ctx = provider.snapshot_failure_context()
+    except (AttributeError, Exception) as e:  # noqa: BLE001
+        log.debug(f"_write_last_failure: provider snapshot unavailable: {e}")
+        ctx = {}
+    if isinstance(ctx, dict):
+        if "phase" in ctx:
+            payload["phase"] = str(ctx["phase"])
+        if "pty_tail" in ctx:
+            payload["pty_tail"] = str(ctx["pty_tail"])[:_FAILURE_PTY_TAIL_MAX]
+    path = Path(config.LAST_FAILURE_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning(f"_write_last_failure: could not write {path}: {e}")
 
 # Seconds between read_chat() calls. Dropped from 0.5 → 0.1 after S220
 # instrumentation showed a consistent ~500ms `poll_lag_ms` on every turn —
@@ -103,6 +175,12 @@ class ChatRunner:
         # out_q.get every 0.5s and we drain on each cycle).
         self._main_thread = threading.current_thread()
         self._send_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        # "claude is unavailable" gets posted exactly once per meeting.
+        # The provider's _run_turn does its own retry-once + latch; by
+        # the time an exception reaches us here, recovery has already
+        # been attempted. So: say it once, then go quiet — repeated
+        # @mentions after the latch are logged but never re-narrated.
+        self._claude_unavailable_announced = False
 
     def _wire_provider(self):
         """Cache the ClaudeCLIProvider and wire its tick callback.
@@ -476,24 +554,21 @@ class ChatRunner:
             )
         except Exception as e:
             log.error(f"ChatRunner: LLM call failed: {e}")
-            # Map the exception class to a plain chat line. Never echo
-            # str(e) into chat — it can carry response payloads,
-            # token-bearing URLs, or upstream secrets. Full detail still
-            # lands in /tmp/operator.log via the log.error above.
-            exc_name = type(e).__name__
-            if "NotFound" in exc_name:
-                msg = "claude CLI not found — install from claude.ai/code"
-            elif "Subscription" in exc_name:
-                msg = "claude subscription not detected — run `claude auth status`"
-            elif "Protocol" in exc_name:
-                # inner-claude crashed or the PTY broke mid-turn. The
-                # next @mention respawns it (see _run_turn's teardown-
-                # before-respawn path) — tell the room so this turn
-                # isn't a silent drop.
-                msg = "lost the connection to Claude — try @mentioning again in a moment"
-            else:
-                msg = f"hit an unexpected snag ({exc_name}) — try @mentioning again"
-            self._narrate_failure(msg)
+            # One uniform failure surface: by the time we get here, the
+            # provider has already done its single retry. We never echo
+            # str(e) into chat (it can carry response payloads / tokens
+            # / upstream secrets — the full detail lives in operator.log
+            # via the log.error above, and the snapshot below is what
+            # doctor reads). Say "unavailable" exactly once per meeting;
+            # subsequent failures stay log-only.
+            _write_last_failure(self._record, self._provider, e)
+            if self._claude_unavailable_announced:
+                self._emit_turn_done(failed=True)
+                return
+            self._claude_unavailable_announced = True
+            self._narrate_failure(
+                "claude is unavailable — run /operator:doctor to see what's wrong"
+            )
             return
         self._dispatch_result(result)
 

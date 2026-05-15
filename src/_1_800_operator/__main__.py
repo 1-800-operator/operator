@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _1_800_operator import config
+
 # Bot names operator's slip dispatch accepts as the first positional after
 # `slip`. v1 ships claude only; a future codex bridge would add "codex"
 # here. Keeping the set explicit (vs. checking against a registry import)
@@ -634,6 +636,15 @@ def _run_slip(name, rest):
     # shell, etc.) a one-line success acknowledgement, then detach so
     # the long-running meeting work doesn't block the response. See
     # _daemonize_and_announce docstring for why.
+    #
+    # Clear last_failure.json — a new slip is the user's "try again";
+    # doctor's "last meeting failure" section means "since you started
+    # the most recent slip", not "ever". A fresh failure during this
+    # meeting will overwrite the (now-absent) file.
+    try:
+        Path(config.LAST_FAILURE_PATH).unlink(missing_ok=True)
+    except OSError:
+        pass
     _daemonize_and_announce(url)
 
     import logging

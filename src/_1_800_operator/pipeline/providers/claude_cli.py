@@ -111,21 +111,21 @@ _BRACKET_CLOSE_DELAY = 0.2
 _PTY_ROWS = 40
 _PTY_COLS = 120
 
-# Spawn-ready handshake. Operator-plugin's SessionStart hook writes
-# `ready.flag` into the session dir; the provider polls for it after
-# spawn. The ceiling is a HARD ceiling, not a soft timeout: a healthy
-# boot writes the flag in well under a second (instrumented: 0.37s
-# fresh, 0.37s resuming a 13 MB session — SessionStart fires before MCP
-# connects and isn't gated on session size). 180s is generous enough
-# that a slow-but-healthy boot is never false-flagged as hung, while
-# still bounding the wait so a genuinely wedged claude is declared dead
-# in finite time. There is NO blind-settle fallback: either the flag
-# appears (ready), the process dies / the PTY hits EOF (fail now), or
-# the ceiling is hit (fail) — never a "sleep and hope" guess, which is
-# what silently lost the briefing on a slow boot before this rework.
-_READY_FLAG_CEILING_SECONDS = 180.0
+# Boot ceiling — ONE hard ceiling across the whole boot: spawn →
+# ready.flag (SessionStart hook) → briefing (turn 0) consumed. A healthy
+# boot is fast: ready.flag lands in well under a second (instrumented:
+# 0.37s fresh, 0.37s resuming a 13 MB session — SessionStart fires
+# before MCP connects), and the briefing round-trip is a few seconds
+# more. 180s is generous enough that a slow-but-healthy boot is never
+# false-flagged, while bounding the wait: past 3 minutes, claude is
+# wedged on something operator can't see (a huge resume, a hung MCP
+# attach, an interactive prompt) and isn't worth waiting on. There is NO
+# blind-settle fallback — either boot completes, the process dies / the
+# PTY hits EOF (fail now), or the ceiling is hit (fail). On any failure
+# pre_warm kills the proc, so "alive but wedged" never persists.
+_BOOT_CEILING_SECONDS = 180.0
 _READY_FLAG_POLL_SECONDS = 0.1
-# One-time internal log breadcrumb if the flag is slower than a healthy
+# One-time internal log breadcrumb if ready.flag is slower than a healthy
 # boot — no behaviour change, just a forensic marker so the next slow
 # boot leaves a trail (the 95s boot that motivated this was unreproducible).
 _READY_FLAG_SLOW_WARN_SECONDS = 15.0
@@ -176,12 +176,6 @@ _TRANSCRIPT_FINAL_DRAIN_SETTLE = 0.3
 # assistant block landing and the Stop row appearing exceeds this,
 # foreign hooks may have run in between.
 _FOREIGN_HOOK_DELAY_WARN_SECONDS = 5.0
-
-# How long to wait for inner-claude to acknowledge the briefing paste
-# (turn 0) before proceeding anyway. Generous — a one-line ack is fast,
-# but a cold resume can take a few seconds. On timeout the spawn still
-# proceeds; real turns will surface a genuine hook-side failure.
-_BRIEFING_REPLY_TIMEOUT_SECONDS = 60.0
 
 # Operator's briefing — the first bracketed-paste sent to a freshly
 # spawned inner-claude, before any real meeting turn. Operator-authored
@@ -290,6 +284,27 @@ class ClaudeCLIProvider(LLMProvider):
         # for readiness instead of pasting into a half-booted TUI.
         self._boot_done = threading.Event()
 
+        # Per-meeting "claude is dead and a retry already failed" latch.
+        # Set in _run_turn when an attempt fails AND its one retry also
+        # fails; once latched, every further turn short-circuits. A
+        # successful turn never sets it, so it only ever latches on a
+        # genuine give-up. The meeting recovers via /operator:hangup +
+        # rejoin, not by accumulating retries.
+        self._unavailable = False
+
+        # Best-effort phase tag for the post-failure snapshot doctor
+        # reads: "boot" if the failure latched while inner-claude was
+        # still starting up, "turn" if it latched mid-turn. Set when
+        # _run_turn latches _unavailable; consumed by
+        # snapshot_failure_context().
+        self._last_failure_phase: str | None = None
+
+        # Shared boot deadline — the whole boot (spawn → ready.flag →
+        # briefing consumed) races one ceiling. _spawn_inner re-stamps it
+        # at the real boot start; initialised here so _wait_for_ready can
+        # also be exercised standalone.
+        self._boot_deadline = time.monotonic() + _BOOT_CEILING_SECONDS
+
         # Tick callback: ChatRunner drains its off-thread send queue on
         # every reply-tail poll. The progress/denial/connection callbacks
         # the prior provider shape carried are gone — Claude self-narrates
@@ -316,6 +331,21 @@ class ClaudeCLIProvider(LLMProvider):
         polling thread is parked here. Signature: () -> None.
         """
         self._tick_callback = callback
+
+    def snapshot_failure_context(self) -> dict:
+        """Provider-side pieces of the post-failure snapshot.
+
+        ChatRunner calls this when it's about to announce "claude is
+        unavailable" and writes the combined record to
+        config.LAST_FAILURE_PATH for doctor to read. The provider
+        contributes what only it knows: which boot phase failed and the
+        tail of inner-claude's PTY (useful when a startup crash printed
+        an error to the terminal before exiting).
+        """
+        return {
+            "phase": self._last_failure_phase or "unknown",
+            "pty_tail": self._pty_tail(),
+        }
 
     # --- lifecycle ----------------------------------------------------
 
@@ -347,13 +377,20 @@ class ClaudeCLIProvider(LLMProvider):
             # Committing to a (re)spawn — boot is no longer "done" until
             # this run finishes. Cleared here, set in the finally below,
             # so _run_turn's gate sees an accurate signal across respawns.
+            # _spawn_exc is cleared too: a fresh spawn makes the prior
+            # run's failure moot (a retry must not surface a stale exc).
             self._boot_done.clear()
+            self._spawn_exc = None
         try:
             self._spawn_inner()
             self._spawn_exc = None
         except Exception as exc:
             log.warning(f"ClaudeCLI: pre_warm spawn failed: {exc}")
             self._spawn_exc = exc
+            # Kill the proc on any boot failure so it can't linger
+            # "alive but wedged" — after this, a failed boot always
+            # leaves _proc dead, the one state _run_turn reasons about.
+            self._terminate_inner()
         finally:
             with self._spawn_lock:
                 self._spawn_in_progress = False
@@ -463,6 +500,9 @@ class ClaudeCLIProvider(LLMProvider):
         except OSError:
             pass
 
+        # One shared deadline across the whole boot — ready.flag AND the
+        # briefing round-trip both race the same _BOOT_CEILING_SECONDS.
+        self._boot_deadline = time.monotonic() + _BOOT_CEILING_SECONDS
         self._wait_for_ready()
         log.info(f"ClaudeCLI: inner-claude live (pid={proc.pid})")
         self._send_briefing()
@@ -482,7 +522,9 @@ class ClaudeCLIProvider(LLMProvider):
         comes, operator stays silent and just leaves on auto-leave.
         """
         started = time.monotonic()
-        deadline = started + _READY_FLAG_CEILING_SECONDS
+        # Shared boot deadline — ready.flag and the briefing race the
+        # same ceiling (set in _spawn_inner).
+        deadline = self._boot_deadline
         slow_warned = False
         # PTY-activity tracking for the structural stuck-boot signal.
         # The drain thread appends one entry per chunk, so chunk-count
@@ -525,8 +567,8 @@ class ClaudeCLIProvider(LLMProvider):
                 log.warning(
                     f"ClaudeCLI: ready.flag not yet seen after "
                     f"{elapsed:.0f}s — slower than a healthy boot "
-                    f"(~0.4s). Still waiting (ceiling "
-                    f"{_READY_FLAG_CEILING_SECONDS:.0f}s)."
+                    f"(~0.4s). Still waiting (boot ceiling "
+                    f"{_BOOT_CEILING_SECONDS:.0f}s)."
                 )
             time.sleep(_READY_FLAG_POLL_SECONDS)
         # Ceiling hit, process still alive — classify why, structurally.
@@ -536,8 +578,8 @@ class ClaudeCLIProvider(LLMProvider):
             had_output=had_output, quiet_secs=quiet_secs
         )
         raise ClaudeCLIProtocolError(
-            f"inner-claude never became ready within "
-            f"{_READY_FLAG_CEILING_SECONDS:.0f}s — {diagnosis}.\n"
+            f"inner-claude never became ready within the "
+            f"{_BOOT_CEILING_SECONDS:.0f}s boot ceiling — {diagnosis}.\n"
             f"PTY tail:\n{self._pty_tail()}"
         )
 
@@ -717,31 +759,45 @@ class ClaudeCLIProvider(LLMProvider):
 
         Turn 0's Stop payload carries `transcript_path` — captured here
         so real turns can tail the transcript for real-time narration.
-        Best-effort — a briefing hiccup logs and proceeds; the real
-        turns will surface any genuine hook-side failure (and backfill
-        the transcript path from their own Stop payloads).
+        This blocks until turn 0's reply row lands: a real turn must not
+        start while turn 0 is in flight (see the inline comment). A
+        briefing that never lands raises — caught by pre_warm onto
+        _spawn_exc and surfaced on the next @mention, the deferred half
+        of never-post-unprompted.
         """
         prev = self._count_replies()
-        try:
-            self._send_message(_BRIEFING)
-            reply = self._wait_for_next_reply(
-                prev, timeout=_BRIEFING_REPLY_TIMEOUT_SECONDS
-            )
-        except ClaudeCLIProtocolError as exc:
-            log.warning(f"ClaudeCLI: briefing failed ({exc}) — proceeding")
-            return
+        self._send_message(_BRIEFING)
+        # Block until turn 0's reply row lands — no soft "proceed
+        # anyway". If a real turn starts while turn 0 is still in
+        # flight, turn 0's reply row and trailing transcript blocks get
+        # misattributed to that turn and leak into meeting chat. The
+        # only non-arrival paths are inner-claude dying (raised inside
+        # _wait_for_next_reply) or a genuinely wedged claude (the shared
+        # boot ceiling running out) — both abort the spawn, the same
+        # fail-loud shape as _wait_for_ready. A briefing hiccup is a
+        # boot failure, not a "carry on". The budget is whatever's left
+        # of the shared boot deadline after _wait_for_ready spent its
+        # share.
+        budget = max(0.0, self._boot_deadline - time.monotonic())
+        reply = self._wait_for_next_reply(prev, timeout=budget)
         if reply is None:
-            log.warning(
-                "ClaudeCLI: briefing reply never landed — proceeding anyway "
-                "(operator-plugin hooks may not be installed)"
+            raise ClaudeCLIProtocolError(
+                f"briefing (turn 0) produced no reply before the "
+                f"{_BOOT_CEILING_SECONDS:.0f}s boot ceiling — inner-claude is "
+                f"wedged, or the operator-plugin Stop hook is not writing "
+                f"replies.jsonl. Verify with `ls {self._session_dir}`.\n"
+                f"PTY tail:\n{self._pty_tail()}"
             )
-            return
         tp = self._extract_transcript_path(reply)
         if tp:
             self._transcript_path = tp
         sid = self._extract_session_id(reply)
         if sid and not self._captured_session_id:
             self._captured_session_id = sid
+        # Let turn 0's trailing assistant block flush to the transcript
+        # before boot completes — otherwise it can land a write-beat
+        # after the next turn snapshots its tail offset and bleed in.
+        time.sleep(_TRANSCRIPT_FINAL_DRAIN_SETTLE)
         log.info(
             f"ClaudeCLI: briefing acknowledged; turn 0 consumed "
             f"(transcript={'captured' if tp else 'MISSING'})"
@@ -1022,6 +1078,43 @@ class ClaudeCLIProvider(LLMProvider):
         return None
 
     def _run_turn(self, messages, on_paragraph):
+        """One turn, with a single retry on failure.
+
+        Per-incident retry: each call gets exactly one retry, structural
+        in the nested try/except — no counter. The first attempt fails →
+        terminate the (now-dead-or-wedged) inner-claude → one fresh
+        attempt → if that also fails, latch `_unavailable` and raise.
+        A successful turn never latches. Recovery from a latched meeting
+        is /operator:hangup + rejoin, not accumulating retries.
+        """
+        if self._unavailable:
+            raise ClaudeCLIProtocolError("claude is unavailable")
+        try:
+            return self._attempt_turn(messages, on_paragraph)
+        except ClaudeCLIProtocolError as first_exc:
+            if self._stopping:
+                # Teardown, not a failure — let the orderly-shutdown
+                # path raise without burning the retry.
+                raise
+            log.warning(f"ClaudeCLI: turn failed ({first_exc}) — retrying once")
+            self._terminate_inner()
+            try:
+                return self._attempt_turn(messages, on_paragraph)
+            except ClaudeCLIProtocolError as second_exc:
+                self._unavailable = True
+                # Tag the phase for the post-failure snapshot. _spawn_exc
+                # is set by pre_warm whenever boot itself failed; if it's
+                # set, the retry attempted a fresh boot and that boot
+                # failed. Otherwise the retry got past boot and the turn
+                # itself raised.
+                self._last_failure_phase = "boot" if self._spawn_exc is not None else "turn"
+                log.error(
+                    f"ClaudeCLI: claude unavailable — retry also failed "
+                    f"({second_exc})"
+                )
+                raise
+
+    def _attempt_turn(self, messages, on_paragraph):
         if self._stopping:
             raise ClaudeCLIProtocolError("provider is stopping")
         if not messages:
@@ -1060,12 +1153,12 @@ class ClaudeCLIProvider(LLMProvider):
             # Bounded by the boot ceiling + margin; if pre_warm never
             # finishes, the checks below turn the timeout into a clear
             # failure rather than a hang.
-            self._boot_done.wait(timeout=_READY_FLAG_CEILING_SECONDS + 30)
+            self._boot_done.wait(timeout=_BOOT_CEILING_SECONDS + 30)
         # Boot finished (or we gave up waiting). A boot failure recorded
         # silently on _spawn_exc now reaches the room — the deferred half
         # of never-post-unprompted: logged at boot, surfaced only here, on
-        # an actual @mention. No retry; recovery is /operator:hangup +
-        # rejoin (the held message says what to fix).
+        # an actual @mention. The raise propagates to _run_turn, which
+        # gives it one retry before latching _unavailable.
         if self._spawn_exc is not None:
             raise ClaudeCLIProtocolError(str(self._spawn_exc))
         if self._proc is None or not self._boot_done.is_set():

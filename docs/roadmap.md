@@ -1,6 +1,39 @@
 # Operator — Roadmap
 
-*Last updated: May 14, 2026 (session 229 — 14.22 section L + branch merge shipped; a follow-on 14.22 boot-hardening pass shipped (items 1/3/5/6; 2/4 cut as pre-launch-premature); operator-plugin 0.1.16 published. The PTY+hooks refactor is code-complete and merged; the DECISION.md 20–25 integration pass is partly done — 21/23 pass — and is the remaining work).*
+*Last updated: May 14, 2026 (session 230 — DECISION.md 20–24 integration pass complete (test 25 `--fresh` cut from scope); turn-0 briefing leak found + fixed; failure model fully consolidated — one boot ceiling, kill-on-failure, retry-once, one uniform "claude is unavailable" message; doctor faceleted with a structured `last_failure.json` section read at `/operator:doctor` time. Phase 14.22 is now closed end-to-end against real-world failure shapes; pre-launch polish + plugin 0.1.17 publish are the remaining follow-ups).*
+
+**Session 230 (May 14, 2026) — integration pass closed; failure surface consolidated; doctor faceleted.** Closed out the DECISION.md 20–24 integration pass that S229 left half-done, then collapsed claude's whole failure surface into one shape and gave doctor a post-failure section so users never need to read `/tmp/operator.log`.
+
+**Integration pass (20/22/24 — 21/23 done last session):**
+- Cut **test 25 (`--fresh` mode)** from scope — never implemented, not worth the surface area pre-launch. `DECISION.md`, `integration_pass.py`, and the handoff all cleaned up.
+- **Test 20** (long-meeting compaction) — PASS. 40/40 turns coherent in 2.6 min, compaction triggered (2 transcript markers), Stop hook kept firing through it.
+- **Test 22** (foreign-hook interference) — PASS. New standalone harness `debug/14_22_pty_spike/test22_foreign_hook.py`: pre-trusts `bench/` via `~/.claude.json` (never touches `~/.claude/settings.json` — the S229 hazard), seeds the bench Stop hook's `decision:block` queue, verifies operator's `notices` path surfaces the foreign-hook interruption and the turn still returns a real reply.
+- **Test 24** (resume from desktop-app session) — PASS, but only after catching that the first run used stale installed code. `CLAUDE_CODE_SESSION_ID=24f38462…` bridged correctly, `boot_to_ready=1.27s source=resume session=24f38462…`, inner-claude quoted the outer session's content back accurately. Doc-staleness gotcha: the handoff's `TIMING ClaudeCLI boot_to_ready` line wasn't appearing because the installed CLI was pre-PTY-pivot — `uv tool install --reinstall .` then it appeared.
+
+**Turn-0 briefing leak (the bug live-test-24 surfaced).** On plugin 0.1.16, resuming a large session made `_send_briefing`'s 60s timeout expire; operator "proceeded anyway" with turn 0 still in flight; the briefing's reply (`"No response requested."` — claude's compliant ack of the briefing's "don't reply" instruction) bled into the next real turn via the transcript tail. Fix: `_send_briefing` now blocks until turn 0 is **genuinely consumed** — timeout means **abort with raise**, not **proceed**. Marker-based, not timeout-based.
+
+**Failure surface consolidation (the bigger lever).** The user pushed: stop piling on code, find the consolidation. Result:
+- **Two ceilings → one.** `_READY_FLAG_CEILING_SECONDS` (180s) + `_BRIEFING_REPLY_CEILING_SECONDS` (300s) collapsed to one `_BOOT_CEILING_SECONDS = 180s` shared deadline across the whole boot (spawn → ready.flag → briefing). The two phases stop being reasoned about separately.
+- **Kill-on-failure → "alive but wedged" stops existing.** `pre_warm`'s except adds `_terminate_inner()`. After any boot failure, `_proc` is dead — only two states (working / dead), no third state to reason about.
+- **Retry-once-per-incident, structural.** `_run_turn` is now a thin wrapper around `_attempt_turn`: try → catch `ClaudeCLIProtocolError` → terminate → retry once → on second failure, latch `self._unavailable` + raise. The "once" is the single nested `except` — no counter, no flag.
+- **ChatRunner's exception-class ladder collapsed.** `NotFound/Subscription/Protocol` ladder → one path: any exception → `"claude is unavailable — run /operator:doctor to see what's wrong"`, said once per meeting (gated by `_claude_unavailable_announced`).
+
+Net: **deleted more than was added.** Verified end-to-end via a new simulation harness (`debug/14_22_pty_spike/simulate_boot_scenarios.py`) driving real `ChatRunner` + `LLMClient` through a `FakeConnector` that prints what the meeting room would see — both the slow-boot-then-success path and the ceiling-abort path.
+
+**Doctor facelift.** Per the user's "don't make users read logs" steer:
+- New `~/.operator/last_failure.json` (path in `config.LAST_FAILURE_PATH`) written by `ChatRunner._write_last_failure` at unavailable-announcement time. Schema: `ts, meeting_url, meeting_slug, exception_class, message, phase, pty_tail, operator_log_tail`. Phase is set on the provider when `_unavailable` latches; PTY tail captured via a new `ClaudeCLIProvider.snapshot_failure_context()`.
+- Cleared on each successful slip start (`__main__._run_slip` does `Path(config.LAST_FAILURE_PATH).unlink(missing_ok=True)`) — doctor's "Last meeting failure" always means "since your most recent attempt."
+- Doctor's `_render_last_failure()` reads + **dumps verbatim**. Crucial design call (the user spotted my inconsistency): **no classification in code**. The model reading doctor's output is the translator — same pattern as the rest of doctor (which dumps `claude CLI: not on PATH`, never `"please install claude"`). The doctor SKILL.md (operator-plugin) was updated with a per-shape interpretation guide for the model.
+- Tested end-to-end: sim produces a real failure record → `operator doctor` renders the section → the model reading it can pinpoint specific MCP servers as the wedge cause from the PTY tail (much better than a regex classifier).
+
+**MeetingRecord.meta** is now kept on `self` (was passed in and discarded — small fix to support the failure snapshot's `meeting_url` lookup).
+
+**Next** — pre-launch polish + plugin re-publish:
+- Bump operator-plugin to **0.1.17** (the new doctor SKILL.md content). Optional, not required for `/operator:doctor` to work (the new section renders regardless; the SKILL.md update just gives the model better interpretation guidance).
+- `model-log.md` is still missing from the repo; new lines this session — `briefing acknowledged; turn 0 consumed`, `ClaudeCLI: turn failed (…) — retrying once`, `ClaudeCLI: claude unavailable — retry also failed (…)` — should be documented when it's reconstituted. The old `briefing reply never landed — proceeding anyway` warning is **gone**.
+- A "wart" flagged from `_run_turn`'s wrapper that wasn't acted on: `_run_turn` line `raise ClaudeCLIProtocolError("claude is unavailable")` on the latch short-circuit could carry the original exception via `from` for log traceability. Trivial follow-up.
+
+
 
 **Session 229 (May 13–14, 2026) — 14.22 section L, branch merge, and a boot-hardening pass.** Closed out the last 14.22 refactor item, merged the branch, and shipped a follow-on boot-hardening pass that grew out of the integration testing.
 

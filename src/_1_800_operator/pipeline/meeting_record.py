@@ -57,6 +57,9 @@ class MeetingRecord:
     def __init__(self, slug: str | None = None, root: Path | None = None,
                  meta: dict | None = None):
         self.slug = slug
+        # Kept on self so callers can read back meeting_url, mode, etc.
+        # without re-parsing the JSONL header.
+        self.meta = dict(meta or {})
         self._lock = threading.Lock()
         self._memory: list[dict] = []
         # In-memory chat tail — serves tail_chat() without re-reading the
