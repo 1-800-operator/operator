@@ -188,6 +188,8 @@ _BRIEFING = """Quick context before we start: you're in a live Google Meet right
 
 Before you run a tool — reading a file, searching, running a command — say what you're about to do in a quick line, like "let me grab that file" or "searching for it now." Then post the result when you have it. The point is the room sees what you're doing instead of staring at a blank screen while a tool runs.
 
+Don't use any tool that pops up a UI for the user to click — specifically AskUserQuestion and plan mode (EnterPlanMode / ExitPlanMode). Both will hang the meeting because participants can't click anything here. If you need to ask something, type it as a normal chat message and wait for a reply. If you'd normally use plan mode, just write the plan inline as chat text instead.
+
 Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
 # Appended to _BRIEFING when guarded mode is on. Operator's

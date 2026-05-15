@@ -1,0 +1,43 @@
+7[r8[?25h[?25l[?2004h[?1004h[?2031h[?2026h
+[38;2;255;193;7m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[1C[38;2;255;193;7m[1mAccessing[1Cworkspace:[22m[39m
+
+[1C[1m/private/var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/aukq_spike_96z33047[22m
+
+[1CQuick[1Csafety[1Ccheck:[1CIs[1Cthis[1Ca[1Cproject[1Cyou[1Ccreated[1Cor[1Cone[1Cyou[1Ctrust?[1C(Like[1Cyour[1Cown[1Ccode,[1Ca[1Cwell-known[1Copen[1Csource
+[1Cproject,[1Cor[1Cwork[1Cfrom[1Cyour[1Cteam).[1CIf[1Cnot,[1Ctake[1Ca[1Cmoment[1Cto[1Creview[1Cwhat's[1Cin[1Cthis[1Cfolder[1Cfirst.
+
+[1CClaude[1CCode'll[1Cbe[1Cable[1Cto[1Cread,[1Cedit,[1Cand[1Cexecute[1Cfiles[1Chere.
+
+[1C]8;id=zaxmda;https://code.claude.com/docs/en/security[38;2;153;153;153mSecurity guide[39m]8;;
+
+[1C[38;2;177;185;249m❯[1C[38;2;153;153;153m1.[1C[38;2;177;185;249mYes,[1CI[1Ctrust[1Cthis[1Cfolder[39m
+[3C[38;2;153;153;153m2.[1C[39mNo,[1Cexit
+
+[1C[38;2;153;153;153mEnter[1Cto[1Cconfirm[1C·[1CEsc[1Cto[1Ccancel[39m
+[1C[4A[?2026l[>0q[c[?2026h[1D[4B[6C[4A[38;2;78;186;101mYes, I trust this folder[1C✔[39m
+
+
+
+[1C[4A[?2026l[?2026h[1D[4B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[16A[?2026l]0;✳ Claude Code[?2026h[38;2;215;119;87m╭───[1CClaude[1CCode[1C[38;2;153;153;153mv2.1.142[1C[38;2;215;119;87m─────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+[38;2;215;119;87m│[52C[2m│[1C[22m[1mTips[1Cfor[1Cgetting[1Cstarted[40C[22m│[39m
+[38;2;215;119;87m│[17C[39m[1mWelcome[1Cback[1Cjojo![17C[22m[2m[38;2;215;119;87m│[1C[39m[22mAsk[1CClaude[1Cto[1Ccreate[1Ca[1Cnew[1Capp[1Cor[1Cclone[1Ca[1Crepository[12C[38;2;215;119;87m│[39m
+[38;2;215;119;87m│[52C[2m│[1C[22m───────────────────────────────────────────────────────────────[1C│[39m
+[38;2;215;119;87m│[23C▐[48;2;0;0;0m▛███▜[49m▌[22C[2m│[1C[22m[1mWhat's[1Cnew[54C[22m│[39m
+[38;2;215;119;87m│[22C▝▜[48;2;0;0;0m█████[49m▛▘[21C[2m│[1C[39m[22mAdded[1Cnew[1C`claude[1Cagents`[1Cflags:[1C`--add-dir`,[1C`--settings`,[1C`-…[1C[38;2;215;119;87m│[39m
+[38;2;215;119;87m│[24C▘▘[1C▝▝[23C[2m│[1C[39m[22mFast[1Cmode[1Cnow[1Cuses[1COpus[1C4.7[1Cby[1Cdefault[1C(previously[1COpus[1C4.6).[1C…[1C[38;2;215;119;87m│[39m
+[38;2;215;119;87m│[3C[38;2;153;153;153mOpus[1C4.7[1C(1M[1Ccontext)[1Cwith[1Chi…[1C·[1CClaude[1CMax[1C·[4C[2m[38;2;215;119;87m│[1C[39m[22mPlugins[1Cwith[1Ca[1Croot-level[1C`SKILL.md`[1Cand[1Cno[1C`skills/`[1Csubdirec…[1C[38;2;215;119;87m│[39m
+[38;2;215;119;87m│[3C[38;2;153;153;153mshapirojojo@gmail.com's[1COrganization[13C[2m[38;2;215;119;87m│[1C[22m[38;2;153;153;153m[3m/release-notes[1Cfor[1Cmore[41C[23m[38;2;215;119;87m│[39m
+[38;2;215;119;87m│[14C[38;2;153;153;153m/…/T/aukq_spike_96z33047[14C[2m[38;2;215;119;87m│[65C[22m│[39m
+[38;2;215;119;87m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+❯ [7mT[27m[2mry[1C"fix[1Ctypecheck[1Cerrors"[22m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[2C[38;2;255;107;128m⏵⏵[1Cbypass[1Cpermissions[1Con[38;2;153;153;153m (shift+tab[1Cto[1Ccycle)[55C●[1Chigh[1C·[1C/effort[39m
+[2C[3A[?2026l[?2026h[2D[3B[2C[3A[7m [27m[K
+
+
+[2C[3A[?2026l[?2026h[2D[3B[67C[1A[38;2;255;107;128mIDE extension install failed (see /status for info)[39m
+[2C[3A[?2026l[?2026h[2D[3B[67C[1A[K
+[2C[3A[?2026l
