@@ -97,7 +97,7 @@ def test_repetition_hallucination_filter():
 
 
 if __name__ == "__main__":
-    print("Loading mlx-whisper-base (first run downloads ~145MB)…")
+    print("Loading faster-whisper-large-v3-turbo (first run downloads ~1.5GB)…")
     test_silence_only_returns_empty()
     test_speech_burst_finalizes_on_silence()
     test_repetition_hallucination_filter()

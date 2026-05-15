@@ -397,10 +397,11 @@ class AttachAdapter(MeetingConnector):
         # didn't fully cancel and we drop it. See config.BLEED_DEDUPE_*.
         self._recent_s_captions: deque[tuple[float, str]] = deque(maxlen=16)
         self._recent_s_captions_lock = threading.Lock()
-        # Pre-warm thread for mlx-whisper-base. Spawned at join() start so
-        # the 3-20s cold model load runs in parallel with Chrome launch +
-        # lobby wait; _start_audio_pipeline joins this thread before
-        # spawning the helper. None until first join().
+        # Pre-warm thread for faster-whisper-large-v3-turbo. Spawned at
+        # join() start so the cold model load (1-2s warm cache, up to ~100s
+        # first run when the ~1.5GB model downloads from HuggingFace) runs
+        # in parallel with Chrome launch + lobby wait; _start_audio_pipeline
+        # joins this thread before spawning the helper. None until first join().
         self._whisper_warmup_thread: threading.Thread | None = None
         # Latency anchors for the TIMING listening_ready line:
         #   _slip_start_at    — set at join() entry (≈ when operator slip fired)
@@ -1248,14 +1249,15 @@ class AttachAdapter(MeetingConnector):
     # ------------------------------------------------------------------
 
     def _warm_whisper(self) -> None:
-        """Pre-load mlx-whisper-base ahead of meeting entry.
+        """Pre-load faster-whisper-large-v3-turbo ahead of meeting entry.
 
-        Fired on a daemon thread at join() start so the 3-20s cold model
-        load runs in parallel with Chrome launch + lobby admission rather
-        than gating the audio pipeline (and therefore the chat observer
-        install) the moment the user admits the bot. Populates
-        self._audio_processors; _start_audio_pipeline joins this thread
-        and reuses whatever it finished loading.
+        Fired on a daemon thread at join() start so the cold model load
+        (1-2s warm cache, up to ~100s on first run when ~1.5GB downloads
+        from HuggingFace) runs in parallel with Chrome launch + lobby
+        admission rather than gating the audio pipeline (and therefore
+        the chat observer install) the moment the user admits the bot.
+        Populates self._audio_processors; _start_audio_pipeline joins this
+        thread and reuses whatever it finished loading.
 
         Best-effort: silent on non-mac, missing helper, or import failures
         — _start_audio_pipeline retries the warm synchronously in those
@@ -1270,7 +1272,7 @@ class AttachAdapter(MeetingConnector):
         except ImportError:
             return
         try:
-            log.info("AudioProcessor: warming mlx-whisper-base (async, one-time per process)…")
+            log.info("AudioProcessor: warming faster-whisper-large-v3-turbo (async, one-time per process)…")
             self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
             self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
         except Exception as e:
@@ -1325,7 +1327,7 @@ class AttachAdapter(MeetingConnector):
 
         if not self._audio_processors:
             try:
-                log.info("AudioProcessor: warming mlx-whisper-base (one-time per process)…")
+                log.info("AudioProcessor: warming faster-whisper-large-v3-turbo (one-time per process)…")
                 self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
                 self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
             except Exception as e:

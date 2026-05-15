@@ -263,43 +263,43 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
     )
 
 
-def _check_mlx_whisper_warm() -> CheckResult:
-    """Run the same mlx-whisper warmup operator does at slip meeting entry.
+def _check_faster_whisper_warm() -> CheckResult:
+    """Run the same faster-whisper warmup operator does at slip meeting entry.
 
     Surfaces two failure modes at install/diagnostic time rather than mid-
     meeting:
 
-      1. `[metal::Device] Unable to build metal library from source` — MLX
-         can't compile its Metal shader library against the local Xcode
-         toolchain. operator catches this exception cleanly and falls back
-         to chat-only mode (no transcripts), but MLX *also* spawns an
-         internal helper to invoke the Metal compiler, and that helper can
-         crash as a fork-child, producing a noisy macOS crash dialog. By
-         running this check at doctor time, the user hits any breakage in
-         a diagnostic context (manageable) instead of mid-call (panic).
+      1. First-time model download — ~1.5GB from HuggingFace into
+         ~/.cache/huggingface/. On a slow connection this can take
+         100s+. Running it here means the user pays that cost at install,
+         not at meeting-join. Warm-cache subsequent runs are 1-2s.
 
-      2. Model download / disk / network failures on first run.
+      2. CTranslate2 binary / architecture / disk issues — operator catches
+         these cleanly at slip entry (falls back to chat-only), but the
+         failure-now-vs-mid-meeting framing applies.
+
+    S233 swapped this from `mlx-whisper` after two production crashes from
+    MLX's async Metal command-buffer abort path. See HWK S227 + S233 in
+    docs/agent-context.md. The MLX/Metal crash family no longer exists.
 
     Optional check: a failure here doesn't fail `operator doctor`'s exit
-    code — slip still runs (chat-only), so this is a warning, not a
-    blocker. Cold-cache first run takes 3-20s while MLX compiles Metal
-    shaders; subsequent runs return in under a second.
+    code — slip still runs (chat-only), so this is a warning, not a blocker.
     """
     if sys.platform != "darwin":
         return CheckResult(
-            "mlx-whisper warmup",
+            "faster-whisper warmup",
             True,
             "skipped (slip audio is mac-only)",
             "",
             optional=True,
         )
-    # Lazy imports so a missing mlx dep doesn't break the other checks.
+    # Lazy imports so a missing dep doesn't break the other checks.
     try:
         import numpy as np
-        import mlx_whisper
+        from faster_whisper import WhisperModel
     except ImportError as e:
         return CheckResult(
-            name="mlx-whisper warmup",
+            name="faster-whisper warmup",
             ok=False,
             detail=f"import failed: {e} — slip will run chat-only",
             fix="re-run install.sh",
@@ -307,9 +307,13 @@ def _check_mlx_whisper_warm() -> CheckResult:
         )
     # Hint goes to stdout (not stderr) so the desktop-app harness doesn't
     # treat any stderr output as a failure and silence the result.
-    # tqdm from mlx_whisper writes to fd 2 directly, so redirect the real
-    # file descriptor to /dev/null for the duration of the call.
-    print("    warming mlx-whisper-base (3-20s on first run)…", flush=True)
+    # faster-whisper writes a download progress bar to fd 2 on first run,
+    # so redirect the real file descriptor for the duration of the call.
+    print(
+        "    warming faster-whisper-large-v3-turbo "
+        "(1-2s warm cache, up to 100s on first run — downloads ~1.5GB)…",
+        flush=True,
+    )
     t0 = time.monotonic()
     try:
         devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -317,11 +321,22 @@ def _check_mlx_whisper_warm() -> CheckResult:
         os.dup2(devnull_fd, 2)
         os.close(devnull_fd)
         try:
-            mlx_whisper.transcribe(
-                np.zeros(16000, dtype=np.float32),
-                path_or_hf_repo="mlx-community/whisper-base-mlx",
-                language="en",
+            model = WhisperModel(
+                "deepdml/faster-whisper-large-v3-turbo-ct2",
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=0,
             )
+            segments, _info = model.transcribe(
+                np.zeros(16000, dtype=np.float32),
+                language="en",
+                beam_size=5,
+                vad_filter=False,
+            )
+            # Materialise the generator — faster-whisper does no compute
+            # until you iterate.
+            for _ in segments:
+                pass
         finally:
             os.dup2(saved_stderr_fd, 2)
             os.close(saved_stderr_fd)
@@ -330,20 +345,18 @@ def _check_mlx_whisper_warm() -> CheckResult:
         # checklist line stays readable.
         first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
         return CheckResult(
-            name="mlx-whisper warmup",
+            name="faster-whisper warmup",
             ok=False,
             detail=f"{first_line} — slip will run chat-only (no transcripts)",
             fix=(
-                "often transient (Metal-XPC compile race): retry `operator doctor`. "
-                "If it persists: install Xcode Command Line Tools (`xcode-select --install`), "
-                "or pin to Python 3.10-3.13 (mlx Metal-shader compile is flakier on bleeding-edge "
-                "Python builds)."
+                "check network (model downloads from HuggingFace on first run) and "
+                "that ~/.cache/huggingface/ is writable. Re-run `operator doctor` to retry."
             ),
             optional=True,
         )
     elapsed = time.monotonic() - t0
     return CheckResult(
-        "mlx-whisper warmup",
+        "faster-whisper warmup",
         True,
         f"ready ({elapsed:.1f}s)",
         "",
@@ -499,7 +512,7 @@ def run_doctor() -> int:
         checks.append(_check_screen_recording(probe))
         checks.append(_check_microphone(probe))
         checks.append(_check_aec_binary())
-        checks.append(_check_mlx_whisper_warm())
+        checks.append(_check_faster_whisper_warm())
 
     print()
     print("operator doctor")

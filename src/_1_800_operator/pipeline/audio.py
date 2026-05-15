@@ -3,14 +3,25 @@ AudioProcessor — utterance detection + Whisper STT for slip mode.
 
 The connector (AttachAdapter) feeds raw Float32 16kHz mono PCM bytes from
 the operator-audio-capture helper into feed_audio(); this module handles
-silence-based utterance segmentation and transcription via mlx-whisper.
+silence-based utterance segmentation and transcription via faster-whisper.
 
-Ported from voice-preserved:pipeline/audio.py with the slip-only
-simplifications spec'd in 14.20.4:
-  - mlx-whisper only (no faster-whisper branch — slip is Mac-only because
-    the Swift helper requires ScreenCaptureKit)
+Backend: `faster-whisper` (CTranslate2) on CPU. S233 swapped from
+mlx-whisper after two production crashes from MLX's async Metal
+command-buffer abort path (see docs/agent-context.md HWK S227 + S233 and
+the bench in debug/14_28_cpu_whisper_spike/). CPU is materially slower at
+p50 (~3.5s vs ~650ms) but identical WER, lower worst-case latency, and
+kills the entire MLX/Metal crash family. Captions don't need to be
+real-time — they're queried via the transcript MCP, not consumed live.
+
+The CTranslate2 generator returned by `model.transcribe()` is not
+thread-safe. Operator runs two AudioProcessors (S leg = system audio,
+M leg = mic) on separate threads. We share a single module-level
+WhisperModel and serialise transcribe calls under a lock. 1.5GB model
+shared across both legs (vs ~3GB if each leg held its own).
+
+Other slip-only simplifications carried from voice-preserved:pipeline/audio.py:
+  - mlx-whisper-only branch removed (this module is the new sole backend)
   - no is_speaking echo guard (slip is chat-only, the bot never speaks audio)
-  - no debug WAV dump
   - no is_prompt / no_speech_timeout (slip listens continuously)
 """
 from __future__ import annotations
@@ -46,24 +57,47 @@ WHISPER_HALLUCINATIONS = {
     "the end", "i'm sorry", "sorry",
 }
 
-# whisper-large-v3-turbo replaced whisper-base after the 14.23 STT
-# benchmark — same 12 ground-truth utterances dropped from ~22% WER to
-# ~13% WER (40% relative reduction) with no other pipeline changes.
-# Wins were concentrated on the failure modes that hurt readability the
-# most: proper-noun recovery ("Kyle", "Ariel"), acoustically-similar
-# confusions ("review end of call sure" vs "refuel and of course sir"),
-# and word-shape mismatches ("flagging" vs "fogging").
-#
-# Latency budget OK on M-series — p50 ~650ms, worst-case ~6s for a 10s
-# utterance (~0.57x realtime). The live caption-to-write path stays
-# inside the 5-10s ceiling.
-#
-# Cost: ~800MB on disk (vs ~140MB for base), ~1.6GB resident at runtime.
-# An attendees-only initial_prompt was also tested and dropped — it
-# helped marginally on whisper-base but actively hurt on -large-v3-turbo
-# by biasing the decoder away from filler/short words; once the model
-# is strong enough to read the audio unaided, the prompt becomes noise.
-MLX_REPO = "mlx-community/whisper-large-v3-turbo"
+# faster-whisper-large-v3-turbo via CTranslate2 — same underlying model as
+# the prior mlx-whisper-large-v3-turbo (S231), different inference engine.
+# Bench: 13.7% WER (float32) / 14.4% WER (int8) vs mlx's 13.0% on the same
+# 12-utterance set (within noise). Production pick is int8 — slightly
+# faster wall-clock, +0.7 WER vs float32 (sub-noise), ~4 cores during
+# transcribe on M-series. See debug/14_28_cpu_whisper_spike/.
+_FW_MODEL_REPO = "deepdml/faster-whisper-large-v3-turbo-ct2"
+_FW_COMPUTE_TYPE = "int8"
+
+# Module-level singleton + locks. _MODEL_LOAD_LOCK guards lazy instantiation
+# in _get_model(); _MODEL_USE_LOCK serialises concurrent transcribe calls
+# from the S-leg and M-leg threads (faster-whisper's segment generator is
+# not thread-safe). Splitting load vs use keeps load contention out of the
+# hot transcribe path.
+_MODEL = None
+_MODEL_LOAD_LOCK = threading.Lock()
+_MODEL_USE_LOCK = threading.Lock()
+
+
+def _get_model():
+    """Return the shared WhisperModel, instantiating on first call.
+
+    Cold-cache first call downloads ~1.5GB to ~/.cache/huggingface/ — can
+    take 100s+ on a slow network. Warm-cache load is ~1-2s. Caller pays
+    this cost; AudioProcessor.__init__ triggers it so it happens on the
+    warming thread, not mid-meeting on the audio thread.
+    """
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
+    with _MODEL_LOAD_LOCK:
+        if _MODEL is not None:
+            return _MODEL
+        from faster_whisper import WhisperModel
+        _MODEL = WhisperModel(
+            _FW_MODEL_REPO,
+            device="cpu",
+            compute_type=_FW_COMPUTE_TYPE,
+            cpu_threads=0,  # 0 = use all available cores
+        )
+        return _MODEL
 
 
 class AudioProcessor:
@@ -72,20 +106,29 @@ class AudioProcessor:
     Each meeting runs two of these — one fed by the helper's [S] frames
     (system audio = remote participants) and one fed by [M] frames (mic =
     local user). Each owns its own buffer and runs its own
-    capture_next_utterance() loop on its own thread.
+    capture_next_utterance() loop on its own thread. The Whisper model
+    itself is module-global and serialised under _MODEL_USE_LOCK.
     """
 
     def __init__(self):
-        import mlx_whisper
-        self._mlx_whisper = mlx_whisper
-        # Warm up: first call downloads + compiles the model (cached after).
-        # Without this, the first real utterance pays a multi-second hit.
-        mlx_whisper.transcribe(
-            np.zeros(SAMPLE_RATE, dtype=np.float32),
-            path_or_hf_repo=MLX_REPO,
-            language="en",
-        )
-        log.info("AudioProcessor: mlx-whisper-base ready")
+        # Trigger lazy model load on the construction thread. First-ever
+        # call downloads the model; subsequent constructions are cheap.
+        _get_model()
+        # Warmup pass — one transcribe on a second of silence to JIT any
+        # compute-type-specific kernels. Without this the first real
+        # utterance pays the JIT cost.
+        with _MODEL_USE_LOCK:
+            segments, _info = _MODEL.transcribe(
+                np.zeros(SAMPLE_RATE, dtype=np.float32),
+                language="en",
+                beam_size=5,
+                vad_filter=False,
+            )
+            # Materialise the generator — faster-whisper does no compute
+            # until you iterate.
+            for _ in segments:
+                pass
+        log.info("AudioProcessor: faster-whisper-large-v3-turbo ready")
         self._audio_buffer = b""
         self._audio_lock = threading.Lock()
         self.capturing = False
@@ -209,14 +252,24 @@ class AudioProcessor:
         return False
 
     def transcribe(self, audio: np.ndarray) -> str:
-        """Transcribe a Float32 mono 16kHz array via mlx-whisper.
+        """Transcribe a Float32 mono 16kHz array via faster-whisper.
 
         Prepends 0.5s of silence — without it whisper drops the first word
-        of short utterances. Carried over from voice-preserved verbatim.
+        of short utterances. Carried over from the mlx-whisper era verbatim.
+        Serialised against the shared model under _MODEL_USE_LOCK; the
+        CTranslate2 generator is not thread-safe and S/M legs both call here.
         """
         silence_pad = np.zeros(int(SAMPLE_RATE * 0.5), dtype=np.float32)
         audio = np.concatenate([silence_pad, audio])
-        result = self._mlx_whisper.transcribe(
-            audio, path_or_hf_repo=MLX_REPO, language="en",
-        )
-        return result["text"].strip()
+        with _MODEL_USE_LOCK:
+            segments, _info = _MODEL.transcribe(
+                audio,
+                language="en",
+                beam_size=5,
+                vad_filter=False,
+            )
+            # Materialise inside the lock — faster-whisper does no compute
+            # until iteration, so releasing early would let a second thread
+            # enter transcribe() concurrently with this one's compute.
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+        return text

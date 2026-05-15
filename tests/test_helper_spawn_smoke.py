@@ -34,7 +34,7 @@ def main() -> int:
     captured: list[tuple] = []
     adapter.set_caption_callback(lambda s, t, ts: captured.append((s, t, ts)))
 
-    print("warming AudioProcessor + spawning helper (this loads mlx-whisper-base)…")
+    print("warming AudioProcessor + spawning helper (this loads faster-whisper-large-v3-turbo)…")
     t0 = time.monotonic()
     adapter._start_audio_pipeline()
     warm_ms = (time.monotonic() - t0) * 1000

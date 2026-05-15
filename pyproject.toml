@@ -40,9 +40,12 @@ dependencies = [
     "mcp==1.27.0",
     "pyyaml==6.0.3",
     "rich==14.3.3",
-    # Audio pipeline (Phase 14.20.4) — slip mode's local STT path. Mac-only at
-    # runtime (mlx-whisper requires Apple Silicon); Linux dial doesn't import.
-    "mlx-whisper==0.4.3",
+    # Audio pipeline (Phase 14.20.4, S233 backend swap) — slip mode's local
+    # STT path. CTranslate2-based; runs CPU-only with no Metal/MLX dependency.
+    # S233 swapped from mlx-whisper after two production crashes from MLX's
+    # async Metal command-buffer abort path; see HWK S227 + S233 in
+    # docs/agent-context.md and the bench in debug/14_28_cpu_whisper_spike/.
+    "faster-whisper==1.2.1",
     "numpy==2.4.3",
     # Security floors for transitive deps (pip-audit, session 138) — left as
     # `>=` so future CVE patches land on `pip install -U` without edits here.
