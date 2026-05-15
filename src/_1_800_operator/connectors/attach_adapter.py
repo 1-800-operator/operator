@@ -129,6 +129,15 @@ _FRAME_HEADER_LEN = 5  # 1 byte tag + 4 byte BE u32 length
 _SPEAKER_USER_FALLBACK = "user"
 _SPEAKER_OTHER = "other"
 
+# How often the speaking observer rescans the DOM for new participant
+# tiles. Tile structure is stable across a meeting, but new tiles render
+# whenever someone joins; the JS install is idempotent at the per-tile
+# level, so calling it every few seconds is cheap. 2s is short enough
+# that a late joiner who immediately starts talking gets attributed
+# correctly within their first utterance, and long enough that the
+# per-call DOM walk doesn't pile up.
+_SPEAKING_RESCAN_INTERVAL_S = 2.0
+
 
 class SlipAttachError(RuntimeError):
     """Raised when the slip-mode attach lifecycle fails fatally.
@@ -414,6 +423,15 @@ class AttachAdapter(MeetingConnector):
         # JS observer skips this tile, but we also filter at drain time
         # in case a stale event slips through (e.g. tile DOM re-renders).
         self._local_participant_id: str = ""
+        # Speaking-observer rescan cadence. The observer is installed once
+        # at meeting entry, but new participants render new tiles after
+        # that — without a rescan, late joiners never get an observer and
+        # their speech falls through to _last_s_speaker (i.e. gets stamped
+        # with whoever pipped most recently). Browser thread re-runs the
+        # JS install no more than once per _SPEAKING_RESCAN_INTERVAL_S
+        # to attach observers to any new tiles. JS is idempotent at the
+        # per-tile level so this is cheap on the no-op case.
+        self._last_speaking_rescan_at: float = 0.0
 
     # ------------------------------------------------------------------
     # MeetingConnector interface
@@ -885,18 +903,53 @@ class AttachAdapter(MeetingConnector):
             return ""
 
     def _install_speaking_observer(self, page):
-        """Install the tile speaking-indicator MutationObserver. Browser thread only."""
+        """Install the tile speaking-indicator MutationObserver. Browser thread only.
+
+        The JS install is idempotent at the per-tile level: re-running it
+        attaches observers to NEW tiles (late joiners) without touching
+        existing ones. _maybe_rescan_speaking_observer re-invokes this on
+        a cadence so late-arriving participants get wired up.
+        """
         try:
             result = page.evaluate(INSTALL_SPEAKING_OBSERVER_JS) or {}
-            count = result.get("count", 0)
+            total = result.get("total_observed", 0)
+            added = result.get("added", 0)
             local_pid = result.get("local_pid", "") or ""
             self._local_participant_id = local_pid
+            self._last_speaking_rescan_at = time.monotonic()
             log.info(
-                f"AttachAdapter: speaking observer installed on {count} remote tile(s); "
+                f"AttachAdapter: speaking observer installed — "
+                f"observing {total} remote tile(s) (added {added} this call); "
                 f"local_pid={local_pid!r}"
             )
         except Exception as e:
             log.warning(f"AttachAdapter: speaking observer install failed: {e}")
+
+    def _maybe_rescan_speaking_observer(self, page):
+        """Re-run the install JS if the rescan interval has elapsed.
+
+        Picks up late-joining participants by attaching observers to any
+        new tiles. No-op on the JS side when nothing changed. Logs only
+        when new tiles were actually wired up so the steady-state run
+        doesn't spam the log.
+        """
+        now = time.monotonic()
+        if now - self._last_speaking_rescan_at < _SPEAKING_RESCAN_INTERVAL_S:
+            return
+        self._last_speaking_rescan_at = now
+        try:
+            result = page.evaluate(INSTALL_SPEAKING_OBSERVER_JS) or {}
+        except Exception as e:
+            log.debug(f"AttachAdapter: speaking observer rescan raised: {e}")
+            return
+        added = result.get("added", 0)
+        if added > 0:
+            names = result.get("added_names") or []
+            total = result.get("total_observed", 0)
+            log.info(
+                f"AttachAdapter: speaking observer rescan — "
+                f"added {added} tile(s) ({names!r}); now observing {total}"
+            )
 
     def _drain_speaking_queue(self, page):
         """Drain the DOM speaking-event queue and update _speaking_participants.
@@ -904,8 +957,10 @@ class AttachAdapter(MeetingConnector):
         Called from _process_chat_queue on the browser thread every ~200ms.
         Updates _last_s_speaker with the most-recent named speaker so
         _audio_utterance_loop can attribute [S] utterances even after the
-        DOM indicator has cleared.
+        DOM indicator has cleared. Also runs the speaking-observer rescan
+        on its own cadence so late-joining participants get wired up.
         """
+        self._maybe_rescan_speaking_observer(page)
         try:
             events = page.evaluate(DRAIN_SPEAKING_QUEUE_JS) or []
         except Exception:

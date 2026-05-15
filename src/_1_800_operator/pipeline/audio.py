@@ -46,7 +46,24 @@ WHISPER_HALLUCINATIONS = {
     "the end", "i'm sorry", "sorry",
 }
 
-MLX_REPO = "mlx-community/whisper-base-mlx"
+# whisper-large-v3-turbo replaced whisper-base after the 14.23 STT
+# benchmark — same 12 ground-truth utterances dropped from ~22% WER to
+# ~13% WER (40% relative reduction) with no other pipeline changes.
+# Wins were concentrated on the failure modes that hurt readability the
+# most: proper-noun recovery ("Kyle", "Ariel"), acoustically-similar
+# confusions ("review end of call sure" vs "refuel and of course sir"),
+# and word-shape mismatches ("flagging" vs "fogging").
+#
+# Latency budget OK on M-series — p50 ~650ms, worst-case ~6s for a 10s
+# utterance (~0.57x realtime). The live caption-to-write path stays
+# inside the 5-10s ceiling.
+#
+# Cost: ~800MB on disk (vs ~140MB for base), ~1.6GB resident at runtime.
+# An attendees-only initial_prompt was also tested and dropped — it
+# helped marginally on whisper-base but actively hurt on -large-v3-turbo
+# by biasing the decoder away from filler/short words; once the model
+# is strong enough to read the audio unaided, the prompt becomes noise.
+MLX_REPO = "mlx-community/whisper-large-v3-turbo"
 
 
 class AudioProcessor:

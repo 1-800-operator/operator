@@ -138,19 +138,24 @@ GET_PARTICIPANT_NAMES_JS = """() => {
 
 
 # Return the operator-runner's Meet display name from the slip Chrome.
-# The slip Chrome's LOCAL tile has camera-control buttons with a
-# data-idom-class attribute; remote participant tiles don't. The local
-# tile IS the slip Chrome's Google account (the operator-runner's
-# account), so we read span.notranslate from the tile WITH the button.
-# Prior logic read the first remote tile on the assumption the runner
-# was also joined from a separate device — that fails in multi-person
-# meetings where gallery layout adds button[data-idom-class] to remote
-# tiles too, causing all tiles to be skipped.
+# Identifies the LOCAL tile by negative-space: every REMOTE tile has a
+# "Pin <name> to your main screen" button; the local tile does NOT
+# (you can't pin yourself). We pick the unique tile with no descendant
+# button whose aria-label starts with "Pin ".
+#
+# Prior predicates (presence of button[data-idom-class], or the first
+# tile in DOM order with a non-empty name span) silently mis-identified
+# remote tiles as local in multi-person meetings, attributing the
+# runner's mic captures to whichever remote participant Meet rendered
+# first. The slip Chrome's Google account also differs from the meeting
+# identity (operator's slip profile is signed in to a separate test
+# account), so the only reliable source is the in-meeting tile.
+#
 # Returns "" on failure — caller falls back to a generic label.
 GET_SELF_NAME_JS = """() => {
     const tiles = document.querySelectorAll('[data-requested-participant-id]');
     for (const tile of tiles) {
-        if (!tile.querySelector('button[data-idom-class]')) continue;
+        if (tile.querySelector('button[aria-label^="Pin "]')) continue;
         const span = tile.querySelector('span.notranslate');
         if (span) {
             const name = (span.textContent || '').trim();
@@ -163,24 +168,32 @@ GET_SELF_NAME_JS = """() => {
 
 # Install a MutationObserver on every REMOTE participant tile that fires
 # when the speaking-indicator class (BlxGDf) appears or disappears on any
-# descendant element. The local tile is identified via the same predicate
-# as GET_SELF_NAME_JS (presence of button[data-idom-class] + non-empty
-# name) and deliberately skipped — slip Chrome's system-audio output
+# descendant element. The local tile is identified by the same negative-
+# space predicate as GET_SELF_NAME_JS (the unique tile with NO "Pin <name>"
+# button) and deliberately skipped — slip Chrome's system-audio output
 # never contains the runner's own voice (Meet doesn't echo your mic back
-# to your speakers), so a "speaking" local tile is just mic activity and
-# would misattribute remote [S] audio to the runner.
+# to your speakers), so a "speaking" local tile would be mic activity and
+# misattribute remote [S] audio to the runner.
+#
+# Idempotent at the per-tile level: re-running the install attaches
+# observers to NEW tiles (late joiners) without disconnecting existing
+# observers or clearing the speaking queue. Callers can — and should —
+# invoke this periodically as a rescan. Observers, state, and queue are
+# preserved across calls.
 #
 # Pushes {participant_id, name, speaking, t} events to
 # window.__operatorSpeakingQueue; Python drains via DRAIN_SPEAKING_QUEUE_JS.
-# Idempotent — disconnects any prior observers before reinstalling.
-# Returns {count, local_pid} where count is the number of remote tiles
-# being observed and local_pid is the skipped local tile's id (or "").
+# Returns {total_observed, added, added_names, local_pid}:
+#   total_observed — current size of the observer dict
+#   added          — new tiles wired up on this call (0 on a no-op rescan)
+#   added_names    — display names of tiles added on this call
+#   local_pid      — skipped local tile's participant id (or "")
 INSTALL_SPEAKING_OBSERVER_JS = """() => {
-    if (window.__operatorSpeakingObservers) {
-        window.__operatorSpeakingObservers.forEach(function(o) { o.disconnect(); });
+    if (!window.__operatorSpeakingObservers) {
+        window.__operatorSpeakingObservers = {};
+        window.__operatorSpeakingState = {};
+        window.__operatorSpeakingQueue = [];
     }
-    window.__operatorSpeakingQueue = [];
-    window.__operatorSpeakingObservers = [];
 
     function getName(tile) {
         var span = tile.querySelector('span.notranslate');
@@ -199,28 +212,30 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
 
     var localPid = '';
     for (var i = 0; i < tiles.length; i++) {
-        if (tiles[i].querySelector('button[data-idom-class]')) {
-            var sp = tiles[i].querySelector('span.notranslate');
-            if (sp && (sp.textContent || '').trim()) {
-                localPid = tiles[i].getAttribute('data-requested-participant-id') || '';
-                break;
-            }
+        if (tiles[i].querySelector('button[aria-label^="Pin "]')) continue;
+        var sp = tiles[i].querySelector('span.notranslate');
+        if (sp && (sp.textContent || '').trim()) {
+            localPid = tiles[i].getAttribute('data-requested-participant-id') || '';
+            break;
         }
     }
 
-    var speakingState = {};
-    var observed = 0;
+    var added = 0;
+    var addedNames = [];
 
     tiles.forEach(function(tile) {
         var id = tile.getAttribute('data-requested-participant-id');
-        if (id === localPid) return;
-        speakingState[id] = hasSpeakingClass(tile);
-        observed += 1;
+        if (!id || id === localPid) return;
+        if (window.__operatorSpeakingObservers[id]) return;
+
+        window.__operatorSpeakingState[id] = hasSpeakingClass(tile);
+        added += 1;
+        addedNames.push(getName(tile));
 
         var obs = new MutationObserver(function() {
             var now = hasSpeakingClass(tile);
-            if (now !== speakingState[id]) {
-                speakingState[id] = now;
+            if (now !== window.__operatorSpeakingState[id]) {
+                window.__operatorSpeakingState[id] = now;
                 window.__operatorSpeakingQueue.push({
                     participant_id: id,
                     name: getName(tile),
@@ -230,10 +245,15 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
             }
         });
         obs.observe(tile, {attributes: true, attributeFilter: ['class'], subtree: true});
-        window.__operatorSpeakingObservers.push(obs);
+        window.__operatorSpeakingObservers[id] = obs;
     });
 
-    return {count: observed, local_pid: localPid};
+    return {
+        total_observed: Object.keys(window.__operatorSpeakingObservers).length,
+        added: added,
+        added_names: addedNames,
+        local_pid: localPid
+    };
 }"""
 
 
