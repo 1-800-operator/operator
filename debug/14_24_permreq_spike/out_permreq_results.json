@@ -1,0 +1,114 @@
+{
+  "overall": "PASS",
+  "headline": "PermissionRequest fires in PTY mode and a blocking hook resolves the dialog without hanging the TUI \u2014 the yolo-off mechanism is viable.",
+  "tests": [
+    {
+      "name": "T1",
+      "permreq_mode": "allow",
+      "pre_allowed": false,
+      "verdict": "PASS",
+      "reason": "PermissionRequest fired in PTY mode, the hook's allow was honored, the tool ran, and the turn completed cleanly",
+      "signals": {
+        "permreq_fired": true,
+        "pretool_fired": true,
+        "stop_fired": true,
+        "canary_exists": true,
+        "elapsed_s": 20.8
+      },
+      "permreq_tool": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "mkdir -p /tmp/permreq_spike && printf 'T1-canary\\n' > /tmp/permreq_spike/T1.txt",
+          "description": "Create temp dir and write canary file"
+        },
+        "permission_mode": "default"
+      },
+      "claude_last_message": "Done."
+    },
+    {
+      "name": "T2",
+      "permreq_mode": "block_allow",
+      "pre_allowed": false,
+      "verdict": "PASS",
+      "reason": "PermissionRequest fired in PTY mode, the hook's allow was honored, the tool ran, and the turn completed cleanly",
+      "signals": {
+        "permreq_fired": true,
+        "pretool_fired": true,
+        "stop_fired": true,
+        "canary_exists": true,
+        "elapsed_s": 11.6
+      },
+      "permreq_tool": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "mkdir -p /tmp/permreq_spike && printf 'T2-canary\\n' > /tmp/permreq_spike/T2.txt",
+          "description": "Create temp dir and write canary file"
+        },
+        "permission_mode": "default"
+      },
+      "claude_last_message": "Done."
+    },
+    {
+      "name": "T3",
+      "permreq_mode": "deny_exit2",
+      "pre_allowed": false,
+      "verdict": "FAIL",
+      "reason": "denied correctly but the turn never completed \u2014 claude may be retry-looping on the denial",
+      "signals": {
+        "permreq_fired": true,
+        "pretool_fired": true,
+        "stop_fired": false,
+        "canary_exists": false,
+        "elapsed_s": 90.4
+      },
+      "permreq_tool": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "mkdir -p /tmp/permreq_spike && printf 'T3-canary\\n' > /tmp/permreq_spike/T3.txt",
+          "description": "Create temp dir and write canary file"
+        },
+        "permission_mode": "default"
+      },
+      "claude_last_message": ""
+    },
+    {
+      "name": "T4",
+      "permreq_mode": "deny_json",
+      "pre_allowed": false,
+      "verdict": "PASS",
+      "reason": "PermissionRequest fired, deny honored (tool did not run), turn still completed",
+      "signals": {
+        "permreq_fired": true,
+        "pretool_fired": true,
+        "stop_fired": true,
+        "canary_exists": false,
+        "elapsed_s": 10.5
+      },
+      "permreq_tool": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "mkdir -p /tmp/permreq_spike && printf 'T4-canary\\n' > /tmp/permreq_spike/T4.txt",
+          "description": "Create permreq_spike dir and T4 canary file"
+        },
+        "permission_mode": "default"
+      },
+      "claude_last_message": "The command was denied by a hook (`spike (deny_json mode)`), so nothing was created. I won't re-attempt it \u2014 let me know how you'd like to proceed."
+    },
+    {
+      "name": "T5",
+      "permreq_mode": "allow",
+      "pre_allowed": true,
+      "verdict": "PASS",
+      "reason": "pre-allowed tool ran natively; PermissionRequest correctly did NOT fire (narrow-firing confirmed)",
+      "signals": {
+        "permreq_fired": false,
+        "pretool_fired": true,
+        "stop_fired": true,
+        "canary_exists": true,
+        "elapsed_s": 11.6
+      },
+      "permreq_tool": null,
+      "claude_last_message": "Done \u2014 created `/tmp/permreq_spike/` and wrote `T5.txt` with `T5-canary`."
+    }
+  ]
+}

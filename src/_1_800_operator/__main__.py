@@ -219,13 +219,14 @@ def _release_slip_lock() -> None:
 
 def _print_usage():
     print("Usage:")
-    print("  operator slip claude <url>      Attach claude to a slip Chrome session")
-    print("  operator status                 Is operator currently in a meeting?")
-    print("  operator hangup                 Gracefully disconnect the running slip session")
-    print("  operator doctor                 Diagnostic check — is the world ready?")
+    print("  operator slip claude <url>          Attach claude to a slip Chrome session (yolo on)")
+    print("  operator slip-guarded claude <url>  Slip with permission asks bridged to meeting chat")
+    print("  operator status                     Is operator currently in a meeting?")
+    print("  operator hangup                     Gracefully disconnect the running slip session")
+    print("  operator doctor                     Diagnostic check — is the world ready?")
     print()
     print("Flags:")
-    print("  --resume-session <id>           Bridge an existing Claude Code session into slip")
+    print("  --resume-session <id>               Bridge an existing Claude Code session into slip")
 
 
 def main():
@@ -273,9 +274,10 @@ def main():
             return 0
         return _run_hangup()
 
-    if first == "slip":
+    if first in ("slip", "slip-guarded"):
+        guarded = (first == "slip-guarded")
         if len(argv) < 2:
-            print("Usage: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>\n")
+            print(f"Usage: operator {first} claude <https://meet.google.com/xxx-xxxx-xxx>\n")
             _print_usage()
             return 0
         name = argv[1]
@@ -289,7 +291,7 @@ def main():
         # Explicit positional always wins; this branch never fires when
         # the user/model supplied a bot. Typos like `slip cluade <url>`
         # fall through to the "Unknown bot" error because `cluade` doesn't
-        # look URL-shaped.
+        # look URL-shaped. Same inference applies to slip-guarded.
         if name not in KNOWN_BOTS and name.startswith(("http://", "https://")):
             inferred = _infer_bot_from_surface()
             if inferred:
@@ -301,7 +303,7 @@ def main():
             _print_usage()
             return 0
         rest = _consume_yolo(argv[2:])
-        return _run_slip(name, rest)
+        return _run_slip(name, rest, guarded=guarded)
 
     if first.startswith("-"):
         print(f"Unknown option: {first}\n")
@@ -522,7 +524,7 @@ def _run_hangup():
     return 0
 
 
-def _run_slip(name, rest):
+def _run_slip(name, rest, *, guarded=False):
     """slip mode — launch a dedicated Chrome window for the meeting and
     CDP-attach claude to it.
 
@@ -533,6 +535,14 @@ def _run_slip(name, rest):
 
     Caller must have already filtered for `name == "claude"` (the main
     dispatcher does this at argv parse time).
+
+    `guarded=True` (entered via `operator slip-guarded`) flips the
+    inner-claude spawn from `--dangerously-skip-permissions` to
+    `--permission-mode default` and constructs a PermissionClassifier
+    sidecar that ChatRunner uses to interpret participants' chat
+    replies to permission questions. Default `guarded=False` is the
+    historical "yolo on" path — no regression for callers that didn't
+    opt in.
     """
     # Resume-session resolution has two tiers (see logic below):
     #   1. --resume-session <id> on the command line.
@@ -685,7 +695,7 @@ def _run_slip(name, rest):
         if resume_session_id:
             resume_source = "env"
 
-    provider = build_provider(resume_session_id=resume_session_id)
+    provider = build_provider(resume_session_id=resume_session_id, guarded=guarded)
     # Fire pre_warm now, before the join sequence (Chrome attach + lobby
     # wait + whisper model load — typically ~30s). pre_warm spawns the
     # interactive claude and runs the briefing round-trip; doing it now
@@ -695,6 +705,21 @@ def _run_slip(name, rest):
     # of meeting entry pays a cold-init tax (observed S221).
     import threading as _threading
     _threading.Thread(target=provider.pre_warm, daemon=True).start()
+
+    # Guarded mode: spin up the PermissionClassifier sidecar in
+    # parallel. Its own ~6s boot+settle hides inside the same join
+    # window as the main provider's pre_warm, so the first chat reply
+    # to a permission question doesn't pay an init tax. Off in default
+    # (yolo-on) mode — the main provider spawns with
+    # --dangerously-skip-permissions, PermissionRequest never fires,
+    # the classifier would be dead weight.
+    classifier = None
+    if guarded:
+        from _1_800_operator.pipeline.classifier import PermissionClassifier
+        classifier = PermissionClassifier()
+        _threading.Thread(target=classifier.pre_warm, daemon=True).start()
+        log.info("slip: guarded mode — classifier sidecar spawning in parallel")
+
     llm = LLMClient(provider)
     llm.set_record(meeting_record)
     if resume_session_id:
@@ -731,14 +756,20 @@ def _run_slip(name, rest):
         connector.join(url)
     except SlipAttachError as e:
         ui.err(str(e))
-        # Reap the pre-warmed claude subprocess — this fail path bypasses
-        # _shutdown(), so without an explicit stop() the parked subprocess
-        # would survive the parent's exit (start_new_session=True children
+        # Reap the pre-warmed subprocesses — this fail path bypasses
+        # _shutdown(), so without explicit stop() calls the parked
+        # claude (and the classifier sidecar in guarded mode) would
+        # survive the parent's exit (start_new_session=True children
         # are not killed on parent death).
         try:
             provider.stop()
         except Exception:
             pass
+        if classifier is not None:
+            try:
+                classifier.stop()
+            except Exception:
+                pass
         return 2
 
     log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")
@@ -746,6 +777,7 @@ def _run_slip(name, rest):
         connector,
         llm,
         meeting_record=meeting_record,
+        permission_classifier=classifier,
     )
 
     _shutdown_called = False

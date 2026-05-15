@@ -115,10 +115,21 @@ class ChatRunner:
         connector,
         llm,
         meeting_record: MeetingRecord | None = None,
+        permission_classifier=None,
     ):
         self._connector = connector
         self._llm = llm
         self._record = meeting_record
+        # PermissionClassifier sidecar for yolo-off mode. Optional —
+        # when None (yolo-on, the default), the permreq round-trip never
+        # fires and this stays unused. When set, _check_permreq_chat_for_answer
+        # hands each chat reply to it for YES/NO interpretation. The
+        # classifier blocks ~2-3s per call; that's fine inside the
+        # provider tick because the main inner-claude is paused waiting
+        # on the permission decision and is not producing anything to
+        # drain in the meantime. Passed in by __main__ so test code
+        # can inject mocks.
+        self._classifier = permission_classifier
         self._stop_event = threading.Event()
         # Track messages we've sent so we can ignore our own echoes
         self._own_messages: set[str] = set()
@@ -182,19 +193,48 @@ class ChatRunner:
         # @mentions after the latch are logged but never re-narrated.
         self._claude_unavailable_announced = False
 
+        # PermissionRequest round-trip state (yolo-off mode). The
+        # provider tails permreq_requests.jsonl during a turn and fires
+        # _on_permission_request for each new line; we post a question
+        # to chat, watch for a yes/no reply from any participant (the
+        # documented H1 tradeoff), then atomically write the answer
+        # file the operator-plugin hook is polling. All of this runs
+        # on the polling thread (via the provider's tick callback),
+        # so no locking is needed across these fields.
+        #
+        # _permreq_active is the request currently waiting on a chat
+        # reply; _permreq_queue holds any additional requests that
+        # arrived while one was already pending (claude can batch
+        # multiple tool calls — we serialise the questions one at a
+        # time). _permreq_seen_at_post snapshots seen message IDs at
+        # post time so we can tell answer candidates from prior chat.
+        # _permreq_safety_timeout_s is slightly past the hook's own
+        # 120s ceiling — defensive cleanup if the hook self-denied
+        # without ChatRunner being notified.
+        self._permreq_queue: list[dict] = []
+        self._permreq_active: dict | None = None
+        self._permreq_seen_at_post: set[str] = set()
+        self._permreq_safety_timeout_s: float = 125.0
+
     def _wire_provider(self):
-        """Cache the ClaudeCLIProvider and wire its tick callback.
+        """Cache the ClaudeCLIProvider and wire its callbacks.
 
-        Operator does not impose its own permission layer — Claude Code's
-        native rules apply. The only provider callback operator wires is:
+        Two callbacks are registered:
 
-          - tick_callback: drains off-thread queued sends on the polling
-            thread during the in-turn reply-tail loop (the polling thread
-            is parked inside `complete_streaming` for the duration of a
-            turn; without this drain, sends queued from another thread
-            would wait until the turn finished and post in a burst).
+          - tick_callback (`_on_provider_tick`): runs on every reply-tail
+            poll iteration during a turn. Drains off-thread queued sends
+            (the polling thread is parked inside `complete_streaming`
+            for the duration of a turn, so without this drain, sends
+            queued from another thread would wait until the turn
+            finished). Also polls meeting chat for a yes/no answer when
+            a PermissionRequest is currently awaiting a reply.
 
-        Tool-call narration is no longer operator's job — inner-claude
+          - permission_request_callback (`_on_permission_request`):
+            fires when the operator-plugin hook writes a new request
+            line mid-turn (yolo-off mode). Inert in yolo-on, where the
+            hook never fires under --dangerously-skip-permissions.
+
+        Tool-call narration is not operator's job — inner-claude
         narrates its own tool calls in its own voice, briefed via the
         provider's first-paste briefing. See ClaudeCLIProvider._BRIEFING.
 
@@ -205,9 +245,26 @@ class ChatRunner:
         provider = getattr(self._llm, "_provider", None)
         if not isinstance(provider, ClaudeCLIProvider):
             return
-        provider.set_tick_callback(self._drain_pending_sends)
+        provider.set_tick_callback(self._on_provider_tick)
+        provider.set_permission_request_callback(self._on_permission_request)
         self._provider = provider
-        log.info("ChatRunner: provider wired (no permission gate; Claude Code defaults apply)")
+        log.info(
+            "ChatRunner: provider wired "
+            "(tick + permission_request callbacks; Claude Code permission rules apply)"
+        )
+
+    def _on_provider_tick(self):
+        """Per-tick callback fired by the provider during a turn.
+
+        Runs on the polling thread (the same one that owns Playwright),
+        so it may call connector methods directly. Two responsibilities:
+        flush any queued off-thread sends, and (in yolo-off mode, when
+        a permission question is currently waiting on a chat reply)
+        poll chat for the answer.
+        """
+        self._drain_pending_sends()
+        if self._permreq_active is not None:
+            self._check_permreq_chat_for_answer()
 
     @staticmethod
     def _wrap_meet_chat(text: str, sender: str) -> str:
@@ -277,7 +334,9 @@ class ChatRunner:
         Calling provider.stop() before the safety net SIGKILLs the
         subprocess closes the race where the provider's mid-turn
         restart path would otherwise spawn a fresh claude subprocess
-        right as operator is shutting down.
+        right as operator is shutting down. Also tears down the
+        classifier sidecar (yolo-off mode), which is otherwise a
+        long-lived child that would survive past the parent.
         """
         self._stop_event.set()
         if self._provider is not None:
@@ -285,6 +344,11 @@ class ChatRunner:
                 self._provider.stop()
             except Exception as e:
                 log.warning(f"ChatRunner: provider.stop raised: {e}")
+        if self._classifier is not None:
+            try:
+                self._classifier.stop()
+            except Exception as e:
+                log.warning(f"ChatRunner: classifier.stop raised: {e}")
 
     def _safe_leave(self):
         """Wrap connector.leave() — if it raises (e.g. Playwright already
@@ -685,10 +749,15 @@ class ChatRunner:
         would otherwise look like a successful post in the log. The polling
         loop and the provider's out-queue tick drain the queue on the main
         thread.
+
+        Returns the connector's msg_id on success (may be empty string for
+        adapters that don't return one), None on send failure or off-thread
+        deferral. Most callers ignore the return; the permreq round-trip
+        uses it to detect a send failure and resolve eagerly with deny.
         """
         if threading.current_thread() is not self._main_thread:
             self._send_queue.put((text, kind))
-            return
+            return None
         text_normalized = text.strip()
         with self._send_lock:
             self._own_messages.add(text_normalized)
@@ -697,7 +766,7 @@ class ChatRunner:
             except Exception as e:
                 log.error(f"ChatRunner: send_chat failed: {e}")
                 self._own_messages.discard(text_normalized)
-                return
+                return None
             # Record only after successful send — otherwise the LLM's next
             # turn replays a phantom assistant message the user never
             # received.
@@ -717,6 +786,7 @@ class ChatRunner:
                 and "t_first_visible" not in self._turn_timing
             ):
                 self._turn_timing["t_first_visible"] = int(time.time() * 1000)
+            return msg_id if msg_id else ""
 
     def _drain_pending_sends(self):
         """Flush any queued off-thread sends on the main thread.
@@ -735,3 +805,234 @@ class ChatRunner:
                 return
             self._send(text, kind=kind)
             drained += 1
+
+    # ---- PermissionRequest round-trip (yolo-off mode) ---------------
+
+    def _on_permission_request(self, req):
+        """Provider callback: a new PermissionRequest just landed.
+
+        Queue it. If nothing is currently awaiting a chat reply, post
+        the question now; otherwise it gets picked up after the active
+        one resolves. (Claude can batch multiple tool calls per turn —
+        we serialise the questions one at a time so the room isn't
+        spammed with parallel asks.)
+        """
+        self._permreq_queue.append(req)
+        if self._permreq_active is None:
+            self._post_next_permreq()
+
+    def _post_next_permreq(self):
+        """Post the head of the queue to chat and mark it active.
+
+        Snapshots `_seen_ids` at post time — anything new after this
+        point is a candidate to hand to the classifier. The exact
+        question text is stashed on the req dict so the classifier
+        gets the same wording the participant saw. If the chat send
+        itself fails, we resolve immediately with deny so the hook
+        isn't left polling a question nobody saw.
+        """
+        if not self._permreq_queue:
+            return
+        req = self._permreq_queue.pop(0)
+        self._permreq_seen_at_post = set(self._seen_ids)
+        req["_active_since_mono"] = time.monotonic()
+        question = self._format_permreq_question(req)
+        req["_question_text"] = question
+        self._permreq_active = req
+        log.info(
+            f"ChatRunner: permreq {req['request_id']} active — "
+            f"tool={req.get('tool_name')!r}"
+        )
+        # `_send` swallows connector exceptions and returns None on
+        # failure (its existing contract — meeting-chat sends can't
+        # raise into the polling loop). For permreq we need that
+        # signal: a None means the user never saw the question, so
+        # leaving the hook to time out at 120s is worse than denying
+        # eagerly. Eager deny lets claude move on right away.
+        msg_id = self._send(question, kind="chat")
+        if msg_id is None:
+            log.warning(
+                f"ChatRunner: permreq {req['request_id']} chat post failed — eager deny"
+            )
+            self._resolve_permreq(
+                req, allowed=False,
+                deny_message="operator could not post the question to meeting chat",
+            )
+
+    def _check_permreq_chat_for_answer(self):
+        """Read meeting chat for the answer to the active permreq.
+
+        Called from `_on_provider_tick` on the polling thread, only
+        when `_permreq_active` is set. Walks new messages and takes the
+        FIRST non-self post-question reply (any participant — the
+        documented H1 tradeoff) as the answer. Hands the verbatim
+        reply text to the PermissionClassifier sidecar, which returns
+        a YES/NO interpretation via a single tiny claude turn (~2-3s).
+        Operator does no pattern-matching of its own — the model
+        decides whether the participant's words were an approval.
+
+        Also enforces a safety timeout slightly past the hook's own
+        120s ceiling: if the hook self-denied without us being
+        notified (network glitch, hook crash), this clears
+        `_permreq_active` so the queue advances.
+        """
+        active = self._permreq_active
+        if active is None:
+            return
+
+        # Safety timeout — defensive cleanup past the hook's own ceiling.
+        active_since = active.get("_active_since_mono", time.monotonic())
+        if (time.monotonic() - active_since) > self._permreq_safety_timeout_s:
+            log.warning(
+                f"ChatRunner: permreq {active['request_id']} hit "
+                f"{self._permreq_safety_timeout_s:.0f}s safety timeout — "
+                "clearing (the hook will have already self-denied)"
+            )
+            self._permreq_active = None
+            self._permreq_seen_at_post = set()
+            self._post_next_permreq()
+            return
+
+        try:
+            messages = self._connector.read_chat()
+        except Exception as e:
+            log.warning(f"ChatRunner: read_chat failed during permreq poll: {e}")
+            return
+
+        for msg in messages:
+            msg_id = msg.get("id", "")
+            text = (msg.get("text") or "").strip()
+            sender = (msg.get("sender") or "").strip()
+            if not text:
+                continue
+            if msg_id and msg_id in self._permreq_seen_at_post:
+                continue  # was already visible when we posted the question
+            if msg_id and msg_id in self._seen_ids:
+                continue  # already routed elsewhere
+            # Skip our own messages (sender filter + text-match fallback).
+            if sender and sender.lower() == config.AGENT_NAME.lower():
+                continue
+            if not sender and text in self._own_messages:
+                continue
+
+            # First non-self, post-question reply — this is the answer
+            # candidate. Mark seen so _loop's _process_messages won't
+            # re-route it as a new @claude trigger after the turn ends.
+            if msg_id:
+                self._seen_ids.add(msg_id)
+            # Persist to the meeting record so the audit trail reflects
+            # who approved/denied (the participant's words are the
+            # primary record of consent).
+            if self._record is not None:
+                self._record.append(sender=sender, text=text, kind="chat")
+            log.info(
+                f"ChatRunner: permreq {active['request_id']} got chat "
+                f"reply from sender={sender!r}: {text!r}"
+            )
+
+            # Hand to the classifier (blocks ~2-3s typically). Falls
+            # back to deny on classifier failure / no-classifier
+            # configured. The main inner-claude is paused waiting on
+            # this answer, so the brief block doesn't starve anything.
+            allowed = False
+            if self._classifier is not None:
+                try:
+                    allowed = self._classifier.classify(
+                        text, active.get("_question_text", "")
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"ChatRunner: classifier raised {e} → deny"
+                    )
+                    allowed = False
+            else:
+                log.warning(
+                    "ChatRunner: no classifier configured (yolo-off path) → deny"
+                )
+            self._resolve_permreq(active, allowed=allowed, raw_reply=text)
+            return
+
+    def _resolve_permreq(self, req, *, allowed, raw_reply="", deny_message=None):
+        """Build the answer payload and atomically write it to the
+        path the hook is polling. Then clear active state and post the
+        next queued request, if any.
+
+        Atomic-write contract (write-to-tmp + os.replace) matches the
+        hook's polling assumption — it never reads a half-written
+        file. On deny, the message field carries either an
+        operator-supplied reason (deny_message) or the participant's
+        verbatim words (raw_reply) — claude reads the message and can
+        narrate the refusal in chat with the right context.
+        """
+        if allowed:
+            answer = {"behavior": "allow"}
+        else:
+            if deny_message:
+                msg = deny_message
+            elif raw_reply:
+                msg = f"user replied in chat: {raw_reply}"
+            else:
+                msg = "denied"
+            answer = {"behavior": "deny", "message": msg}
+
+        answer_path = req["answer_path"]
+        try:
+            answer_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = answer_path.parent / (answer_path.name + ".tmp")
+            tmp.write_text(json.dumps(answer))
+            os.replace(tmp, answer_path)
+        except OSError as e:
+            log.warning(
+                f"ChatRunner: could not write permreq answer "
+                f"{answer_path}: {e}"
+            )
+
+        self._permreq_active = None
+        self._permreq_seen_at_post = set()
+        self._post_next_permreq()
+
+    def _format_permreq_question(self, req):
+        """Build the chat post for a permission question.
+
+        Plain-language, two-option ask. The participant's free-form
+        reply (sure / nah / 👍 / sí adelante / anything) is interpreted
+        by the PermissionClassifier sidecar — operator does no
+        pattern-matching, so the wording here doesn't have to match
+        any token list.
+        """
+        tool_name = req.get("tool_name") or "?"
+        summary = self._summarize_tool_input(tool_name, req.get("tool_input"))
+        return (
+            f"Claude wants to use `{tool_name}`{summary} — "
+            "reply *yes* or *no*."
+        )
+
+    def _summarize_tool_input(self, tool_name, tool_input):
+        """Render the tool's input as a short, chat-friendly fragment.
+
+        Per-tool special cases for the most informative field (Bash
+        command, Edit/Write/Read file_path); everything else gets a
+        generic compact-JSON dump. Capped at 200 chars with head…tail
+        truncation.
+        """
+        if not isinstance(tool_input, dict) or not tool_input:
+            return ""
+        if tool_name == "Bash":
+            cmd = tool_input.get("command")
+            if isinstance(cmd, str) and cmd:
+                return f" to run: `{self._truncate(cmd, 200)}`"
+        if tool_name in ("Edit", "Write", "Read", "MultiEdit"):
+            path = tool_input.get("file_path")
+            if isinstance(path, str) and path:
+                return f" on `{self._truncate(path, 200)}`"
+        try:
+            s = json.dumps(tool_input, separators=(", ", ": "))
+        except (TypeError, ValueError):
+            s = str(tool_input)
+        return f" with: `{self._truncate(s, 200)}`"
+
+    @staticmethod
+    def _truncate(s, n):
+        if len(s) <= n:
+            return s
+        return s[: n - 3] + "..."

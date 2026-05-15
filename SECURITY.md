@@ -7,7 +7,8 @@ Thanks for taking the time to report a security issue in Operator.
 Email **shapirojojo@gmail.com** with:
 
 - A description of the issue and its impact.
-- Steps to reproduce (ideally a minimal agent config or chat transcript).
+- Steps to reproduce — ideally a chat transcript, the `@claude` message
+  involved, or a minimal sequence of `operator` commands.
 - The commit hash or release you tested against.
 
 Please **do not** open a public GitHub issue for security-sensitive reports.
@@ -30,56 +31,96 @@ Reporters who follow coordinated disclosure are credited by name (or handle,
 your preference) in the release notes and GitHub Security Advisory that ships
 the fix. No bug bounty — this is a solo open-source project.
 
-## Scope
-
-In scope:
-
-- Code in this repository (`operator` CLI, connectors, pipeline, agents).
-- Default agent configs shipped under `agents/`.
-
-Out of scope:
-
-- Issues in upstream dependencies — report those to the dependency owner.
-  Operator's own pinned versions are tracked via `pip-audit`; see
-  `docs/security.md`.
-- Google Meet itself, or Meet's chat/participant controls.
-- Third-party MCP servers invoked via user-supplied configs.
-
 ## Threat model and hardening
 
-`docs/security.md` documents the threat model, known residual risks, and the
-mitigations already in place. Read it before filing a report — the issue you
-are seeing may be a known, documented residual risk with a recommended
-operational workaround (e.g. Meet's "host manages chat" setting).
+`docs/security.md` is the canonical threat model — trust boundaries, the
+permission posture, the mitigations in place, and the documented residual
+risks (R1–R5). **Read it before filing a report.** The issue you are seeing
+may be a known, documented tradeoff rather than a defect — see the next
+section.
 
-### Recent hardening — local credential hygiene (session 173)
+## Known design tradeoffs — please read before filing
 
-Triggered by the Vercel/Context AI incident (malware on a developer machine
-exfiltrated OAuth bearer tokens). Operator does not run a real OAuth flow —
-it persists Google session via a Playwright Chrome profile plus a
-`storage_state()` JSON export — so the analogous mitigation is "harden local
-artifacts." Shipped:
+Operator makes a small number of deliberate, documented security tradeoffs.
+The behaviors below are **intended design**, fully described in
+`docs/security.md`, and are **not** treated as vulnerabilities. We list them
+here explicitly so a report isn't spent rediscovering a tradeoff we already
+ship knowingly.
 
-- `os.umask(0o077)` set at process start so any new file under
-  `~/.operator/` is born `0o600` by default. Closes the mkdir → chmod race
-  for callers that didn't pass `mode=` explicitly.
-- Explicit `chmod 0o600` on `auth_state.json` and `google_account.json` after
-  the wizard writes them — the two files that contain Google session
-  material.
-- `mode=0o700` passed to every `os.makedirs` under `~/.operator/`. Applies
-  to `agents/`, `history/`, `debug/`, `browser_profile/`, and the home dir
-  itself.
-- `0o600` on each `save_debug` screenshot/HTML dump and `0o700` on
-  `DEBUG_DIR` — meeting screenshots can leak chat content, so they get the
-  same tier as session material.
+- **The meeting brain runs with all permissions bypassed.** Operator spawns
+  its inner-`claude` subprocess with `--dangerously-skip-permissions`,
+  unconditionally. It can read/write/delete files, run shell commands, and
+  call any registered MCP tool with no approval prompt — and no `permissions`
+  config (`allow` / `deny` / `ask`) constrains it. See docs/security.md →
+  "Operator runs Claude with all permissions bypassed."
+- **Untrusted meeting input reaches that subprocess.** Any participant's
+  `@claude` chat message, meeting captions, MCP tool results, and
+  foreign-hook feedback are forwarded to — or reachable by — the
+  fully-permissioned inner-claude. A prompt-injection payload in any of those
+  channels acting on the agent, *including data exfiltration or destructive
+  commands*, is documented residual risk R1. Operator deliberately does not
+  add an operator-side injection filter or tool-approval gate; the
+  mitigations are operational (least-privilege OS account, curated MCP set,
+  Meet host controls). A working injection demo against this surface is a
+  *demonstration of R1*, not a new finding — but see the caveat below.
+- **Any meeting participant can trigger the bot.** There is no per-sender
+  allowlist on the `@claude` trigger (residual risk R3).
+- **Foreign Stop hooks can redirect the bot mid-meeting** (residual risk R2).
+- **The installer widens your Claude Code allow list and registers a
+  user-scope MCP server** — four additive `permissions.allow` entries and the
+  bundled transcript MCP. Intended, additive, idempotent; documented in
+  docs/security.md → "What Operator changes in your `~/.claude` config."
 
-Residual risks not covered (tracked for v2):
+**The caveat:** this list is *not* a blanket disclaimer. If you find a way to
+make Operator violate a protection it actually *claims* — see "In scope"
+below — that is a real vulnerability and we want to hear about it, even if it
+routes through one of the surfaces above.
 
-- `~/.operator/history/` — chat JSONL is currently written without an
-  explicit mode override; pre-existing files retain their old perms. Walk
-  every `MeetingRecord` write site + add a one-shot retroactive chmod in
-  `_migrate_legacy_user_artifacts` before launch.
-- macOS Keychain / Linux Secret Service for `auth_state.json` is the right
-  v2 move — protects against malware running as the current user, which the
-  chmod fix doesn't cover. Cross-platform UX has real wrinkles
-  (kwallet/keyring integration, unlock prompts) so it's deferred.
+## Scope
+
+### In scope
+
+- Code in this repository — the `operator` CLI, connectors, pipeline, and the
+  bundled transcript MCP server.
+- The companion `operator-plugin` repo — the `/operator:*` slash commands and
+  the hook scripts.
+- `install.sh`, including its `~/.claude/settings.json` allow-list merge and
+  user-scope MCP registration.
+
+Concretely, we want to hear about:
+
+- A way to make Operator leak something it claims to protect — e.g.
+  `ANTHROPIC_API_KEY` reaching the inner-claude environment despite the
+  documented unconditional strip, or chat/caption content leaving the local
+  machine.
+- The installer's `settings.json` merge behaving destructively,
+  non-idempotently, or writing entries beyond the four documented ones.
+- A meeting participant making **Operator itself** (as distinct from
+  inner-claude) act on attacker-controlled input — e.g. bypassing the
+  `@claude` trigger gate, or breaking out of the chat/caption delimiters into
+  operator's own control flow.
+- File-permission regressions on `~/.operator/` artifacts — the `umask` /
+  `chmod` hardening failing to make new files `0o600` / `0o700`.
+- The slip singleton lock being bypassable in a way that stacks multiple
+  operators on one meeting.
+- Anything in `docs/security.md` that is simply *wrong* — a protection the
+  doc claims that does not actually hold.
+
+### Out of scope
+
+- The documented design tradeoffs in the section above.
+- Issues in upstream dependencies — report those to the dependency owner.
+  Operator's own pinned versions are tracked via `pip-audit`.
+- Google Meet itself, or Meet's chat / participant / host controls.
+- Third-party MCP servers the user has wired into their own `~/.claude`.
+- Anything the user's own `~/.claude` configuration causes — Operator
+  inherits the user's MCP servers, skills, and hooks and does not police
+  them.
+
+## Hardening in place
+
+The current local-artifact hardening is documented in full in
+`docs/security.md` → "What's been hardened" (the `umask 0o077` file-mode
+discipline, `relativize_home()` path hygiene, and the `ANTHROPIC_API_KEY`
+spawn-env strip). That document is the single source of truth; this file
+does not duplicate it.

@@ -190,6 +190,13 @@ Before you run a tool — reading a file, searching, running a command — say w
 
 Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
+# Appended to _BRIEFING when guarded mode is on. Operator's
+# PermissionRequest hook will bridge each ask into meeting chat;
+# claude should know to expect that and keep its tool calls clean.
+_BRIEFING_GUARDED_SUFFIX = """
+
+One more thing for this meeting: every tool call you make that the user hasn't pre-approved will pop up in chat as a yes/no question to the room, and the meeting waits while a participant answers. Keep your tool calls focused and easy to evaluate at a glance — that makes the question easy for someone to answer fast. If you get denied, that's the user's call; just narrate the denial and move on."""
+
 
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` CLI is missing from PATH."""
@@ -237,7 +244,7 @@ class ClaudeCLIProvider(LLMProvider):
     it, replies.jsonl never appears and turns time out.
     """
 
-    def __init__(self, *, cwd=None, resume_session_id=None, session_dir=None):
+    def __init__(self, *, cwd=None, resume_session_id=None, session_dir=None, guarded=False):
         """
         Args:
           cwd: working dir for the inner-claude spawn. Defaults to the
@@ -254,6 +261,14 @@ class ClaudeCLIProvider(LLMProvider):
         """
         self._cwd = cwd or os.getcwd()
         self._resume_session_id = resume_session_id
+        # When True, spawn with `--permission-mode default` instead of
+        # `--dangerously-skip-permissions` and append a guarded-mode
+        # line to the briefing so claude knows the room will be asked
+        # to approve uncategorised tool calls. The operator-plugin's
+        # PermissionRequest hook fires under this mode (it's inert
+        # under bypass) and ChatRunner's PermissionClassifier sidecar
+        # interprets each chat reply.
+        self._guarded = bool(guarded)
 
         if session_dir is None:
             session_dir = Path.home() / ".operator" / "sessions" / uuid.uuid4().hex
@@ -312,6 +327,19 @@ class ClaudeCLIProvider(LLMProvider):
         # no longer tails tools.jsonl / errors.jsonl.
         self._tick_callback = None
 
+        # PermissionRequest callback (yolo-off mode). Fires when the
+        # operator-plugin permission_request.sh hook writes a new line
+        # to permreq_requests.jsonl mid-turn — ChatRunner posts the
+        # question to meeting chat, watches for a yes/no reply, and
+        # atomically writes the answer file the hook is polling. None
+        # in yolo-on (the hook is inert under --dangerously-skip-permissions
+        # because PermissionRequest never fires under bypass mode).
+        # Offset/buf are reset per-spawn in _spawn_inner so a respawn
+        # does not re-fire stale requests from before the crash.
+        self._permreq_callback = None
+        self._permreq_offset = 0
+        self._permreq_buf = b""
+
         # Captured `session_id` for archival. The Stop hook payload
         # includes `transcript_path` and `session_id`; we record the
         # first one we see so `metadata.json` carries it.
@@ -331,6 +359,27 @@ class ClaudeCLIProvider(LLMProvider):
         polling thread is parked here. Signature: () -> None.
         """
         self._tick_callback = callback
+
+    def set_permission_request_callback(self, callback):
+        """Called when a new PermissionRequest from the operator-plugin
+        hook lands in permreq_requests.jsonl mid-turn. Fired on the
+        same thread as the tick callback (the polling thread, which is
+        operator's main Playwright-owning thread), so the callback may
+        call `connector.send_chat` directly.
+
+        Signature:
+            cb({
+                "request_id": str,
+                "ts": float,
+                "tool_name": str | None,
+                "tool_input": dict | None,
+                "answer_path": Path,
+            }) -> None
+
+        Set to None to disable (yolo-on never invokes this; the hook
+        does not fire under --dangerously-skip-permissions anyway).
+        """
+        self._permreq_callback = callback
 
     def snapshot_failure_context(self) -> dict:
         """Provider-side pieces of the post-failure snapshot.
@@ -406,12 +455,20 @@ class ClaudeCLIProvider(LLMProvider):
                 "https://docs.anthropic.com/en/docs/claude-code and ensure it is "
                 "logged in (`claude auth status`)."
             )
-        # --dangerously-skip-permissions is unconditional now. Operator
-        # has no permission layer of its own and the meeting flow needs
-        # tools to run without per-call prompts. The user-facing `--yolo`
-        # flag becomes a no-op (kept in argv parsing for back-compat
-        # with the plugin slash command; nothing reads it here anymore).
-        cmd = [claude, "--dangerously-skip-permissions"]
+        # Spawn permission mode is the only operator-controlled
+        # difference between yolo-on (default — every tool runs without
+        # asking) and yolo-off (`/operator:slip-guarded`, runs with
+        # Claude Code's normal permission rules and the operator-plugin
+        # PermissionRequest hook bridges each ask to meeting chat).
+        #
+        # `--permission-mode default` is explicit so a user-side
+        # `permissions.defaultMode: "bypassPermissions"` in their
+        # ~/.claude/settings.json can't silently flip guarded mode back
+        # into yolo without us noticing.
+        if self._guarded:
+            cmd = [claude, "--permission-mode", "default"]
+        else:
+            cmd = [claude, "--dangerously-skip-permissions"]
         if self._resume_session_id:
             cmd += ["--resume", self._resume_session_id]
         return cmd
@@ -433,6 +490,19 @@ class ClaudeCLIProvider(LLMProvider):
             pass
         except OSError as exc:
             log.warning(f"ClaudeCLI: could not clear stale ready.flag: {exc}")
+
+        # Reset the permreq tail to start of the (current) end of file —
+        # on a respawn after a crash, any unanswered requests in
+        # permreq_requests.jsonl are stale (the prior hook either got an
+        # answer or self-denied at its own 120s timeout). Skipping past
+        # them prevents stale-request callbacks fire-storming ChatRunner.
+        try:
+            self._permreq_offset = (
+                self._session_dir / "permreq_requests.jsonl"
+            ).stat().st_size
+        except (FileNotFoundError, OSError):
+            self._permreq_offset = 0
+        self._permreq_buf = b""
 
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         # Load-bearing: hook scripts read this to know where to write.
@@ -766,7 +836,8 @@ class ClaudeCLIProvider(LLMProvider):
         of never-post-unprompted.
         """
         prev = self._count_replies()
-        self._send_message(_BRIEFING)
+        briefing = _BRIEFING + (_BRIEFING_GUARDED_SUFFIX if self._guarded else "")
+        self._send_message(briefing)
         # Block until turn 0's reply row lands — no soft "proceed
         # anyway". If a real turn starts while turn 0 is still in
         # flight, turn 0's reply row and trailing transcript blocks get
@@ -939,6 +1010,68 @@ class ClaudeCLIProvider(LLMProvider):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
         return offset, buf, events
+
+    # --- permreq tail (yolo-off mode) -------------------------------
+
+    def _poll_permreqs(self):
+        """Read new request lines from permreq_requests.jsonl and fire
+        the PermissionRequest callback for each.
+
+        Same seek-and-buffer discipline the transcript tail uses; offset
+        is reset per-spawn in _spawn_inner so a respawn doesnt re-fire
+        stale requests. Best-effort: missing file, parse error, or a
+        callback exception is silently skipped — the operator-plugin
+        hook self-denies on its 120s timeout if we never write the
+        answer file, so a missed request degrades to "tool denied,
+        meeting moves on" rather than a hang.
+
+        No-op when no callback is registered (yolo-on path).
+        """
+        cb = self._permreq_callback
+        if cb is None:
+            return
+        path = self._session_dir / "permreq_requests.jsonl"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size <= self._permreq_offset:
+            return
+        try:
+            with path.open("rb") as f:
+                f.seek(self._permreq_offset)
+                chunk = f.read()
+        except OSError:
+            return
+        self._permreq_offset += len(chunk)
+        self._permreq_buf += chunk
+        parts = self._permreq_buf.split(b"\n")
+        self._permreq_buf = parts.pop()
+        for line in parts:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(req, dict) or "request_id" not in req:
+                continue
+            # Augment with the answer path so ChatRunner doesn't need
+            # to know our session-dir layout.
+            try:
+                cb({
+                    "request_id": req["request_id"],
+                    "ts": req.get("ts"),
+                    "tool_name": req.get("tool_name"),
+                    "tool_input": req.get("tool_input"),
+                    "answer_path": (
+                        self._session_dir / "permreq_answers"
+                        / (req["request_id"] + ".json")
+                    ),
+                })
+            except Exception as e:
+                log.warning(f"ClaudeCLI: permission_request callback raised: {e}")
 
     @staticmethod
     def _assistant_texts(events):
@@ -1192,13 +1325,22 @@ class ClaudeCLIProvider(LLMProvider):
             if not foreign_hook[0] and self._has_foreign_hook_feedback(events):
                 foreign_hook[0] = True
 
+        # Compose the per-iteration poll: transcript tail (real-time
+        # narration) plus permreq tail (yolo-off mode — fires
+        # PermissionRequest callback for each new request the hook
+        # writes). _poll_permreqs is a no-op when no callback is
+        # registered (yolo-on path).
+        def _poll():
+            _poll_transcript()
+            self._poll_permreqs()
+
         self._send_message(user_text)
 
         # Generous per-turn timeout — claude tool loops can run minutes
         # legitimately. The user cancels via /operator:hangup if a tool
         # chain wedges; no operator-imposed deadline.
         reply = self._wait_for_next_reply(
-            prev_count, timeout=600.0, on_poll=_poll_transcript
+            prev_count, timeout=600.0, on_poll=_poll
         )
         t_reply = time.monotonic()
         elapsed = t_reply - t_start

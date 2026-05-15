@@ -1,260 +1,243 @@
 # Operator
 
-> Operator is an open-source CLI tool that drops AI participants into your Google Meet. Install in one command, configure via YAML, run from your terminal.
+> Operator brings Claude into your Google Meet. One command to install, one to join.
 
-Joins, reads chat, replies via an LLM with tool access (Linear, GitHub, and
-other MCP servers you wire up), and leaves when everyone else does.
+Operator is an open-source tool that drops Claude into a Google Meet as a
+chat participant. It watches the meeting chat panel, and when someone types
+`@claude …`, it hands that message to a Claude Code subprocess running on
+your machine — which can read files, run commands, file tickets, open PRs,
+and anything else your Claude Code setup can do — then relays the reply back
+into the meeting chat in real time.
 
-```bash
-operator dial pm                                       # open a fresh Meet
-operator dial pm https://meet.google.com/xxx-yyyy-zzz  # join a specific Meet
-operator try pm                                        # terminal test-drive, no Meet
-operator                                               # show available agents
-```
+Everything runs locally. There is no Operator-side server, no account, and
+no API key of its own — Operator drives the `claude` CLI you already have.
 
-`pm` is a sample bot under `agents/`. Drop in `operator build` to create your own.
+## Requirements
+
+- **macOS** (slip mode is macOS-only for now).
+- **Google Chrome** installed (Operator drives a real Chrome window for Meet).
+- **Claude Code CLI** installed and logged in (`claude login`). Operator uses
+  it as the meeting's brain, on your existing Claude subscription.
+- Python 3.10+ (the installer provisions one via `uv` if your system Python
+  is older).
 
 ## Install
 
-macOS or Linux. Python 3.10+. Pick the path that matches how much you want to read first.
-
-### Option A — one command (default)
-
 ```bash
-curl -fsSL https://1-800-operator.com/install | bash
+curl -fsSL https://1-800-operator.com/install | sh
 ```
 
-Bootstraps [`uv`](https://github.com/astral-sh/uv) if missing, installs the CLI, downloads Playwright's Chromium runtime (~170 MB), seeds `~/.operator/.env` with API-key placeholders, and on macOS nudges you to install Chrome if it isn't already. Idempotent — safe to re-run.
+That one command bootstraps [`uv`](https://github.com/astral-sh/uv) if
+missing, installs the `operator` CLI, registers Operator's bundled
+transcript MCP server, installs the `operator` Claude Code plugin (the
+`/operator:*` slash commands), and seeds `~/.operator/.env`. It does not
+modify your shell rc files and is safe to re-run.
 
-### Option B — read the script first
-
-```bash
-curl -fsSL https://1-800-operator.com/install -o install.sh
-less install.sh           # actually look at it
-bash install.sh
-```
-
-Same outcome as Option A — you just read the script before running it. Recommended if you've never installed anything from us before.
-
-### Option C — package manager only (no shell script from us)
-
-Trust only `uv` and the GitHub repo, no shell pipeline:
+Prefer to read the script first? Download it, `less` it, then run it — same
+outcome. Or skip the shell pipeline entirely and install via `uv` directly:
 
 ```bash
-# 1. Install uv (Astral's package manager) — once, via its own installer.
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install the operator CLI from this repo.
+curl -LsSf https://astral.sh/uv/install.sh | sh          # uv, via its own installer
 uv tool install git+https://github.com/1-800-operator/operator.git
-
-# 3. Run setup. The wizard detects missing dependencies (Playwright Chromium,
-#    ~/.operator/.env, Chrome.app on macOS) and offers to provision them.
-operator setup
 ```
 
-`operator setup` also runs the agent build wizard. After it finishes:
+If you take the `uv`-only path, re-run the full `install.sh` afterward (or
+register the transcript MCP and plugin by hand) so the slash commands and
+caption tools are wired up.
+
+When it's done, verify everything is ready:
 
 ```bash
-operator dial claude          # join a meeting (or `pm`, `codex`, or your own)
+operator doctor
 ```
 
-### After install
+## Use it
 
-Add API keys to `~/.operator/.env` (the file is mode 600 by default):
+**From Claude Code (recommended).** In any Claude Code session, run:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GITHUB_TOKEN=ghp_...
+/operator:slip <meet-url>            # default: every tool runs unprompted
+/operator:slip-guarded <meet-url>    # ask the meeting before each uncategorised tool
 ```
 
-Then `operator setup` to configure your first agent, and `operator dial <bot>` to join a meeting.
+Either bridges your *current* Claude Code session into the meeting — the
+meeting brain inherits the context you've already built up in that session.
+The two differ in how the bot's tool calls are gated; see "Permissions &
+safety" below for the tradeoff. Other slash commands:
+`/operator:status`, `/operator:hangup`, `/operator:doctor`.
+
+**From a terminal.** You can also attach directly, without bridging a
+session:
+
+```bash
+operator slip claude <meet-url>           # join a meeting (yolo on)
+operator slip-guarded claude <meet-url>   # join with permission asks bridged to chat
+operator status                           # is Operator in a meeting?
+operator hangup                           # leave the meeting
+operator doctor                           # diagnostic check
+```
+
+A fresh Claude Code session is born on the first `@claude` mention. Pass
+`--resume-session <id>` to bridge a specific session instead.
+
+The first time you run slip mode, a dedicated Chrome window opens — sign into
+Google in it once, and the session persists for future meetings. This window
+is Operator-owned and separate from your everyday Chrome.
+
+## How it works
+
+1. Operator opens a dedicated "slip" Chrome window, joins the meeting URL,
+   and opens the chat panel.
+2. It watches chat for messages containing `@claude`. Operator is
+   "speak when spoken to" — it only acts on the trigger phrase.
+3. Each `@claude` message is forwarded to a long-lived interactive `claude`
+   subprocess (one per meeting) that owns its own tool loop.
+4. Claude's reply streams back into the meeting chat, prefixed with
+   `[🤖 Claude]` so the room can tell the bot's messages from yours.
+5. When everyone else has left, Operator leaves automatically.
+
+## Permissions & safety — read this before you run it
+
+Operator ships **two modes**. Pick the one that matches the level of
+control you want over the meeting brain's tool use.
+
+### Default: `/operator:slip` (yolo on)
+
+The Claude subprocess is spawned with `--dangerously-skip-permissions`.
+The meeting flow needs tools to run without per-call approval prompts
+(there is no TUI for anyone to approve them in), and Operator has no
+permission layer of its own.
+
+What that means concretely:
+
+- The Claude subprocess can read/write/delete files, run shell
+  commands, and call any MCP tool **with no confirmation**.
+- Your `permissions.allow` / `permissions.deny` / `permissions.ask`
+  rules in `~/.claude/settings.json` **have no effect** on it. The
+  flag is all-or-nothing in this mode.
+- Untrusted meeting input (any participant's `@claude` message,
+  captions, MCP tool results) reaches a Claude that can act on it
+  without a prompt.
+
+If that trade isn't acceptable for your environment, your levers are
+operational: run Operator under a dedicated, least-privilege OS
+account; curate which MCP servers are registered for that account;
+use Google Meet's "host manages chat" control; and only `@claude` it
+toward things you'd run yourself. Or use the alternative mode below.
+
+### Alternative: `/operator:slip-guarded` (yolo off)
+
+Same product, but the Claude subprocess is spawned with normal Claude
+Code permission rules instead. Tools the user has pre-allowed in
+`~/.claude/settings.json` still run silently; pre-denied tools are
+blocked; **everything else triggers a yes/no question into meeting
+chat**. The bot waits for a participant to reply, a separate
+classifier subprocess interprets their words ("sure" / "nah" / "👍" /
+etc.) as YES or NO, and the tool runs (or doesn't) accordingly.
+
+Tradeoffs honest:
+
+- ~2-3 seconds of friction per uncategorised tool call (the time to
+  post the question, get a reply, and run the classification).
+- Anyone in the meeting can answer the question. In meetings with
+  untrusted participants, turn on Google Meet's **"host manages
+  chat"**.
+- No "always allow this" path within yolo-off — every uncategorised
+  tool asks every time. If a category of tools should always run
+  unprompted, add it to your `~/.claude/settings.json`
+  `permissions.allow` (or use yolo-on for the whole meeting).
+- Costs nothing per use (subscription pool — no `claude -p` calls).
+
+Pick yolo-off when you want the bot to pause and ask before doing
+anything you haven't already approved. Pick yolo-on when friction is
+the enemy and the operational mitigations cover your threat model.
+
+### The full picture
+
+Trust boundaries, residual risks, and the operational guidance behind
+both modes live in [`docs/security.md`](./docs/security.md). Read it
+before running either mode.
 
 ## Privacy & logs
 
-Operator writes a detailed diagnostic log to **`/tmp/operator.log`** on every
-run. For now, this file contains:
+Operator writes a diagnostic log to **`/tmp/operator.log`** on every run,
+containing the Meet URL, chat messages (with sender names), captions, and
+tool-call metadata. It never leaves your machine, but it's plain text in a
+shared directory — macOS typically clears `/tmp` on reboot. Delete it
+manually if a meeting was sensitive.
 
-- The Meet URL the bot joined (a capability token — anyone with it can join).
-- Chat messages the bot sees, including sender names.
-- LLM prompt/response metadata and tool call arguments + results.
-- Captions, when `transcript.captions_enabled: true` in the agent config.
+Chat and caption history also lands in `~/.operator/history/<slug>.jsonl` —
+the durable record the bot replays from. Same sensitivity profile. Files
+created under `~/.operator/` are mode `600` / `700` by default.
 
-**The file never leaves your machine**, but it is plain text in a shared
-directory — treat it like any other local artifact. macOS typically clears
-`/tmp` on reboot; Linux may not. Delete it manually if it matters.
+### Shared session store
 
-Chat history also lands in `~/.operator/history/<slug>.jsonl` — that's the
-durable record the bot replays from between turns. Same sensitivity profile.
-
-### Resume your meeting in Claude Code
-
-For the `claude` agent specifically, the bot's brain is a `claude -p`
-subprocess running under your Claude Max subscription, which means meetings
-land in **claude's own session store** — the same place your regular Claude
-Code work is persisted:
+The meeting brain is a normal Claude Code session, so it's persisted in
+**the same place as your regular Claude Code work**:
 
 ```
 ~/.claude/projects/<encoded-working-dir>/<session-id>.jsonl
 ```
 
-The folder name is whatever working directory you launched `operator dial
-claude` from (URL-encoded). Each meeting writes one session file with the
-full message history including tool calls and tool results. Operator uses
-this to recover gracefully if the brain subprocess dies mid-meeting (it
-respawns with `claude -p --resume <session-id>` and inherits everything).
+Two things to know:
 
-**Bonus workflow:** because these are normal Claude Code sessions, you can
-pick the meeting back up in your terminal afterwards. From the same
-directory you ran operator from:
+1. Meeting sessions and your coding sessions live side by side. The
+   `claude --resume` picker lists them mixed together — don't pick the wrong
+   one.
+2. The folder grows over time, with the same retention semantics as your
+   regular Claude Code work. Prune it however you already do.
 
-```bash
-claude --resume                 # picker — meeting sessions appear next to
-                                # your coding sessions
-claude --resume <session-id>    # jump straight in
-```
+**Bonus:** because these are normal sessions, you can pick a meeting back up
+in your terminal afterward — `claude --resume` from the same directory you
+launched Operator from, and you're talking to the same brain that just left
+the call, with full context.
 
-Now you're chatting with the same brain that just left the meeting — full
-context, every tool call, every Linear ticket it filed. Great for follow-up
-work the bot started and you want to finish.
+### Billing protection
 
-**What this means for your filesystem:** meeting transcripts and your
-regular Claude Code coding sessions share `~/.claude/projects/<dir>/`.
-Everything stays local; nothing ships off your machine. But two things are
-worth knowing:
-
-1. The `claude --resume` picker (no args) lists everything in the current
-   directory, mixed together. Meeting sessions appear alongside coding
-   sessions — that's the feature, but also: don't accidentally pick the
-   wrong one.
-2. The folder grows over time. Same retention semantics as your regular
-   Claude Code work — manage it however you already manage that. To
-   inspect or prune by hand: `ls -lt ~/.claude/projects/<dir>/`.
-
-The other bundled agents (`pm`, `codex`, custom bots) don't use this path —
-they talk to the LLM via API and don't write to `~/.claude/projects/`.
+If `ANTHROPIC_API_KEY` is set in your environment, Claude Code will bill your
+metered API account instead of your subscription — silently. Operator strips
+`ANTHROPIC_API_KEY` from every Claude subprocess it spawns, unconditionally,
+so a globally-set key can't leak in and redirect billing. You don't need to
+do anything to enable this.
 
 ### Never commit these
 
-API keys live in a single `.env` at `~/.operator/.env`, shared across all
-bots. The following files hold secrets or logged-in Google session state and
-must stay local:
+Operator keeps all of its state under `~/.operator/`, outside any repo, so
+nothing sensitive is born inside a checkout. The files that hold secrets or
+logged-in Google session state and must stay local:
 
-- `~/.operator/.env` — API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, …)
-- `credentials.json` — Google OAuth client secrets
-- `token.json` — Google OAuth access/refresh tokens
-- `~/.operator/auth_state.json` — Playwright storage state (Google session cookies)
-- `~/.operator/browser_profile/` — persistent Chrome profile (Google session cookies)
+- `~/.operator/.env` — any API keys / tokens you put there.
+- `~/.operator/slip_profile/` — the dedicated Chrome profile (Google session
+  cookies). **Use a dedicated Google account for the bot, not your personal
+  one.**
 
-All of the above are ignored by `.gitignore`. If you see one show up in
-`git status` untracked, something has gone wrong — don't `git add .` blindly.
-See `docs/security.md` for the full threat model.
-
-## Voice mode
-
-Each bot has a `voice` setting under `agent:`. It controls how much
-detail operator puts into the *system's* messages (the sterile
-approval challenge for destructive tools, the optional progress
-narrator). The bot's actual conversational voice — friendly,
-technical, in Spanish, or even pirate — lives in the `system_prompt`
-block of the bot's config.yaml. Operator doesn't template persona;
-the bot speaks for itself.
-
-- **`plain`** — meeting-friendly. The system's approval challenge is
-  a one-line summary that hides bulk content (Write body, MultiEdit
-  edits) but keeps imperative fields (Bash command, file paths, URLs)
-  verbatim. Operator's narrator stays silent — the bot self-narrates
-  in chat in its own voice via a `system_prompt` directive. **Default.**
-- **`technical`** — developer-flavored. The approval challenge is a
-  full parameter dump with head…tail truncation. Operator's narrator
-  emits deterministic "Working: …" lines for auto-approved tools.
-
-Switch in `agents/<bot>/config.yaml`:
-
-```yaml
-agent:
-  name: "MyBot"
-  voice: plain        # or technical
-```
-
-The conversational shape — "Let me check Sentry first, ok?" or "Aye
-matey, time to peek at yer files" — comes from the bot's prompt, not
-from operator. So if you set the bot's `system_prompt` to talk like a
-pirate, every chat message it sends in plain mode reads like a pirate.
-The system's approval challenge stays neutral underneath as a
-machine-readable safety gate.
-
-Imperative fields (URLs, file paths, Bash commands) are shown verbatim
-in **both** modes — these describe what's about to happen and you need
-to see them to make a sensible yes/no decision.
-
-The pre-session-169 `permission_verbosity: terse | verbose` field still
-loads with a deprecation log (`terse` → `plain`, `verbose` → `technical`).
-Move the value to `agent.voice` to silence the warning.
-
-## MCP permissions
-
-For the `claude` agent (track A), built-in tools (Read, Bash, Write, …) are
-gated by the `permissions` block in `agents/<bot>/config.yaml`. The `operator
-build` wizard walks you through the built-in tools as a checklist; tools listed
-under `auto_approve` run silently, anything under `always_ask` (and anything
-not on either list) pauses the bot for a chat confirmation.
-
-**MCP tools** (Sentry, Linear, GitHub, etc.) ask by default — every Sentry
-issue lookup, every Linear ticket fetch, every GitHub PR read. To skip the
-prompt for routine reads, edit the YAML and add fnmatch patterns:
-
-```yaml
-permissions:
-  auto_approve:
-    - Read
-    - Grep
-    - Glob
-    - LS
-    - WebSearch
-    - ToolSearch
-    # Per-server read auto-approval. Patterns are fnmatch globs.
-    - "mcp__sentry__get_*"
-    - "mcp__sentry__list_*"
-    - "mcp__sentry__search_*"
-    - "mcp__claude_ai_Linear__get_*"
-    - "mcp__claude_ai_Linear__list_*"
-  always_ask:
-    - Bash
-    - Write
-    - Edit
-    - MultiEdit
-    - NotebookEdit
-    - WebFetch
-    - Task
-    # Specific deny on top of a broad allow — always_ask wins on overlap:
-    - "mcp__sentry__analyze_issue_with_seer"
-```
-
-`always_ask` is matched first, so an explicit deny pattern beats a broader
-allow pattern on the same tool.
-
-**Audit your patterns after upgrading an MCP server.** MCP tool names are
-server-controlled. If a server renames `get_resource` → `fetch_resource`, your
-`get_*` glob silently stops covering the renamed tool — which fails safe (the
-bot starts asking again) but is worth a glance after `claude mcp` upgrades.
+The repo's `.gitignore` defensively lists these and a few legacy names. If
+one ever shows up untracked in `git status`, something has gone wrong — don't
+`git add .` blindly. See [`docs/security.md`](./docs/security.md) for the
+full picture.
 
 ## Uninstall
 
 ```bash
-uv tool uninstall operator   # removes the CLI + PATH shim
-rm -rf ~/.operator           # removes agents, history, and .env
+claude plugin uninstall operator             # remove the slash commands
+claude mcp remove transcript --scope user    # remove the caption tools
+uv tool uninstall 1-800-operator             # remove the CLI
+rm -rf ~/.operator                           # remove history, profile, .env
 ```
 
 ## More
 
-- `CLAUDE.md` — architecture, commands, configuration layout.
-- `docs/roadmap.md` — phase plan.
-- `docs/agent-context.md` — current development state.
+- [`CLAUDE.md`](./CLAUDE.md) — architecture, commands, configuration layout.
+- [`docs/security.md`](./docs/security.md) — threat model and residual risks.
+- [`SECURITY.md`](./SECURITY.md) — reporting a vulnerability.
 
 ## Help & community
 
-- **Bug?** [File an issue](https://github.com/1-800-operator/operator/issues/new/choose) using the bug-report template.
-- **Question, idea, or built something cool?** [GitHub Discussions](https://github.com/1-800-operator/operator/discussions) — Q&A, Ideas, Show & tell.
-- **Security vulnerability?** Don't open a public issue — see [`SECURITY.md`](./SECURITY.md).
+- **Bug?** [File an issue](https://github.com/1-800-operator/operator/issues/new/choose)
+  using the bug-report template.
+- **Question, idea, or built something cool?**
+  [GitHub Discussions](https://github.com/1-800-operator/operator/discussions).
+- **Security vulnerability?** Don't open a public issue — see
+  [`SECURITY.md`](./SECURITY.md).
 - See [`SUPPORT.md`](./SUPPORT.md) for the full routing guide.
+</content>

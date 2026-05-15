@@ -1,0 +1,176 @@
+{
+  "boot_settle_s": 6.04,
+  "scenarios": [
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.97,
+      "category": "approval",
+      "reply": "yes",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 5.01,
+      "category": "approval",
+      "reply": "sure",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.83,
+      "category": "approval",
+      "reply": "okay",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.37,
+      "category": "approval",
+      "reply": "do it",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.67,
+      "category": "approval",
+      "reply": "go ahead",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.25,
+      "category": "approval",
+      "reply": "yeah",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.26,
+      "category": "approval",
+      "reply": "sounds good",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.36,
+      "category": "approval",
+      "reply": "\ud83d\udc4d",
+      "expected": "YES",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.2,
+      "category": "refusal",
+      "reply": "no",
+      "expected": "NO",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.21,
+      "category": "refusal",
+      "reply": "nah",
+      "expected": "NO",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.35,
+      "category": "refusal",
+      "reply": "not now",
+      "expected": "NO",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.22,
+      "category": "refusal",
+      "reply": "skip it",
+      "expected": "NO",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.67,
+      "category": "refusal",
+      "reply": "don't",
+      "expected": "NO",
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.36,
+      "category": "ambiguous",
+      "reply": "hmm sure but maybe later",
+      "expected": null,
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.12,
+      "category": "ambiguous",
+      "reply": "what would that do?",
+      "expected": null,
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.36,
+      "category": "ambiguous",
+      "reply": "?",
+      "expected": null,
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 2.2,
+      "category": "modified",
+      "reply": "yes but use --dry-run",
+      "expected": null,
+      "match": "MATCH"
+    },
+    {
+      "verdict": "YES",
+      "raw": "YES",
+      "latency_s": 2.67,
+      "category": "non_english",
+      "reply": "s\u00ed, adelante",
+      "expected": null,
+      "match": "MATCH"
+    },
+    {
+      "verdict": "NO",
+      "raw": "NO",
+      "latency_s": 3.29,
+      "category": "edge",
+      "reply": "",
+      "expected": null,
+      "match": "MATCH"
+    }
+  ]
+}

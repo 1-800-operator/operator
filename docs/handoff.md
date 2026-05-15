@@ -1,47 +1,75 @@
-# Session 229 handoff (2026-05-13) — 14.22 section L landed; `phase-14.22-pty-pivot` merged to `main`
+# Session 232 handoff (2026-05-14) — yolo-off mode landed, live test pending
 
-The PTY+hooks production refactor (Phase 14.22) is now **code-complete and merged to `main`**. The only thing left before it's fully shipped is the DECISION.md 20–25 integration pass, which needs live Meet runs.
+This session designed and built **`/operator:slip-guarded`** — operator's first non-yolo permission mode. Phases 0 through 4 are code-complete and committed in both repos (`operator/` and `operator-plugin/`). **Phase 5 is the live-meeting validation gate**, which requires a human in a real Meet and is left for next session.
+
+Closed S231's flagged blocker too: the "parallel async workstream broken" item (missing `confirmation.py` import) was this work mid-flight. It's now resolved end-to-end; all 15 test files green.
 
 ## What happened this session
 
-**Section L part 2 — rewrote `tests/test_claude_cli_provider.py`.** The old file asserted the gone per-`@mention` `claude -p --resume` shellout shape and was the one failing test in the suite. Replaced with 21 fully-mocked tests (no real `claude` spawn) for the PTY+hooks architecture: naked-spawn invariant (`_build_cmd` carries `--dangerously-skip-permissions`, no `-p`/`--append-system-prompt`/`--mcp-config`), `replies.jsonl` tailing (pickup / timeout / teardown-bail on `_stopping` / dead-proc crash), transcript tailing + seek-and-buffer with partial-line handling, Stop-payload field extraction (wrapped `{ts,kind,input}` + bare shapes), foreign-hook `"Stop hook feedback:"` detection, and three full mocked turns through `_run_turn` (streaming paragraphs, Stop-text backstop, foreign-hook notice, respawn-after-crash). Full suite green — 11 test files.
+**Designed yolo-off mode after research-report feedback flagged the absence of any user-controllable permission gating as a real adoption blocker.** The product question: how do we let participants approve uncategorised tools per-ask, without operator-side word-bag matching, without sub-`-p` calls that burn Agent SDK quota, and without breaking the "model interprets, we don't" principle.
 
-**Section L part 1 — plugin install smoke test.** No code change needed. The operator-plugin hook scripts (`_common.sh`, `session_start.sh`, `stop.sh`) are git-tracked `100755`, and `hooks/hooks.json` invokes them interpreter-explicit (`bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/...`). So exec bits aren't load-bearing at runtime and `git` preserves mode bits across the desktop-app plugin sync (a `git pull` of the marketplace cache). The operator wheel doesn't bundle them at all. Verified, documented, done.
+**Three new spike chains in `debug/`** (full design recorded in `debug/14_24_permreq_spike/DECISION.md`):
 
-**Merged `phase-14.22-pty-pivot` → `main`.** ~20 branch commits: S227 `daedf21` (production refactor) + `a857412` (setsid fix), the full S228 G/I/J/K reshape (~14 commits), and S229 `804097d` (the test rewrite). Three doc conflicts — `roadmap.md`, `agent-context.md`, `handoff.md` — because the branch forked at S226's end-session and missed S227's main-side docs sweep. All reconciled by hand: roadmap + agent-context now carry S229 → S228 → S227(×2) → S226 in reverse-chronological order; the stale "this branch is behind main" docs notes were dropped. Code files (`attach_adapter.py`, `doctor.py`) auto-merged cleanly — main's AEC changes and the branch's PTY changes touched disjoint regions.
+- **14_24** — verified `PermissionRequest` fires in interactive PTY mode, that a *blocking* hook resolves the dialog without hanging the TUI, and that JSON-only deny is the right contract (T3 found `exit 2` retry-loops claude — generalised to all hooks via the new `_common.sh` contract block).
+- **14_25** — tested whether claude could self-interpret the user's reply when handed via the deny `message` field. **NOT VIABLE.** 5/8 common approvals failed (`yes`, `sure`, `okay`, `sounds good`, `👍` all hallucinated "Done." without running anything). Claude's prompt-injection defense quarantines text arriving through hook channels — same dynamic that killed Stop-block in 14.22.
+- **14_26** — tested a separate long-lived classifier claude (one extra subprocess per meeting, on subscription pool) interpreting each chat reply via one normal user-turn. **VIABLE: 19/19 scenarios match, 2.6s avg latency, $0 marginal cost.** Bypasses the prompt-injection defense by avoiding the tool-result channel entirely.
 
-**Same-session `main` fix folded in:** `doctor.py` now redirects fd 2 to `/dev/null` during the mlx-whisper warmup (and prints the progress hint to stdout, not stderr) — tqdm from `mlx_whisper` writes to fd 2 directly, and the desktop-app harness reads any stderr output as a failure and silences the doctor result. Committed to `main` as `011a7b1` before the merge.
+**Phase 0 — hook hardening foundation.** `operator-plugin/hooks/scripts/_common.sh` now carries the explicit *operator hook contract* doc block (always exit 0; decisions in JSON; never bare non-zero) and adds `safe_emit_permreq_deny()`. Dropped `set -e`. `session_start.sh` and `stop.sh` refactored with explicit safe-fallbacks. **`stop.sh` now writes a `{"kind": "crashed"}` row even on internal failure** — pre-refactor a python crash silently left operator hanging at the 600s turn timeout. `debug/14_24_permreq_spike/test_phase0_hook_audit.py` covers it: 10/10 fault-injection checks pass.
+
+**Phase 1 — `permission_request.sh`** added to `operator-plugin/hooks/scripts/` and registered in `hooks.json`. Always exits 0 with JSON; round-trip ceiling 120s (env-overridable for tests). `test_phase1_permreq_hook.py` covers 12 fault paths.
+
+**Phase 2 redux — operator-side plumbing + classifier sidecar.** Initial Phase 2 used a word-bag matcher; user feedback rejected that approach, the v2 spike (14_25) confirmed the alternative was non-viable, and 14_26 validated the classifier sidecar. Final shape:
+- New `pipeline/classifier.py` — `PermissionClassifier`, slim sibling of `ClaudeCLIProvider` (~330 lines). One long-lived sidecar claude per meeting. `classify(reply, question) -> bool`. Lazy-spawn on first use; deny-on-any-failure. Separate session_dir suffixed `-classifier` so its hook events don't collide with the main session.
+- `pipeline/chat_runner.py` — new `_on_permission_request` / `_post_next_permreq` / `_check_permreq_chat_for_answer` / `_resolve_permreq` flow. Takes the *first* non-self post-question chat reply and hands it verbatim to the classifier. No operator-side classification.
+- `pipeline/providers/claude_cli.py` — added `_poll_permreqs()` to the existing transcript-tail loop in `_run_turn`. Added `set_permission_request_callback`.
+- Deleted `pipeline/confirmation.py` (the old word-bag matcher).
+
+Tests: `test_permreq_round_trip.py` (12 mocked round-trip tests with `FakeClassifier`) + `test_permission_classifier.py` (8 unit tests for the classifier). Both green.
+
+**Phase 3 — `/operator:slip-guarded` surface.**
+- `__main__.py` accepts a new `slip-guarded` subcommand (parallel to `slip`). Both flow through `_run_slip(name, rest, *, guarded=…)`. When guarded: `build_provider` passes through, `PermissionClassifier` constructed, parallel pre-warm fired, ChatRunner gets the classifier reference, shutdown tears it down too.
+- `pipeline/providers/claude_cli.py:_build_cmd` flips between `--dangerously-skip-permissions` and `--permission-mode default` based on the guarded flag.
+- `_BRIEFING_GUARDED_SUFFIX` appended in `_send_briefing` when guarded — claude knows the room will be asked to approve uncategorised tools and to keep tool calls focused.
+- New `operator-plugin/skills/slip-guarded/SKILL.md` — parallel structure to the existing `slip` skill, honest UX description.
+- Updated `operator-plugin/skills/slip/SKILL.md` — dropped the misleading `--yolo` mention (it's a no-op now), added a pointer to slip-guarded as the alternative.
+- Default unchanged: `/operator:slip` still spawns yolo-on. **No regression for existing users.**
+
+**Phase 4 — docs.**
+- `docs/security.md` — bypassed-permissions section retitled "Operator's default" with a pointer to yolo-off as the alternative. New section "Yolo-off mode: what `/operator:slip-guarded` actually does" — covers the chat round-trip mechanics, what it doesn't do (no allow-always, no settings.json mutation, no sandboxing — gates per ask, doesn't contain), cost ($0 marginal) and latency (~2-3s/ask), residual risks G1 (any-participant-approves) and G2 (NL ambiguity, "if unsure NO" mitigates), and a "when to pick which" guide.
+- `README.md` — "Use it" section now shows both slash commands side by side. "Permissions & safety" rewritten as two subsections: "Default: yolo on" (existing content scoped) and "Alternative: yolo off" (honest tradeoffs).
+- Earlier this session also updated `SECURITY.md` (the vulnerability-disclosure policy) with a "Known design tradeoffs — please read before filing" section pre-empting the prompt-injection-via-meeting-chat scenario, plus a fixed Scope section.
+
+**Test suite: 15 files, all green.** No regression from the substantial refactor. Spike harnesses (10/10 + 12/12) also green.
 
 ## Exact next step
 
-**Run the DECISION.md 20–25 integration pass** — this is all that's left for Phase 14.22. It needs live Meet runs with the operator-plugin installed:
+**Run Phase 5 — live-meeting validation of `/operator:slip-guarded`.**
 
-- **20 — long-meeting compaction.** Does inner-claude's context compaction mid-meeting break the transcript tail or the session resume?
-- **21 — hook latency on the hot path.** Measure the Stop-hook-fire → reply-posted gap under real load; confirm it stays in the 3–7 s TTFR band the S227/S228 live tests showed.
-- **22 — foreign-hook interference.** A real project-level `.claude/settings.json` Stop hook firing inside a meeting — confirm `_has_foreign_hook_feedback` surfaces the notice and the turn still completes.
-- **23 — tear-down race.** `/operator:hangup` mid-turn — confirm the clean-exit path (`_wait_for_next_reply` checking `_stopping`) exits quietly with no crash-dump.
-- **24 — resume from desktop-app session.** `/operator:slip` from the desktop app with `--resume-session ${CLAUDE_CODE_SESSION_ID}` — confirm the bridged session carries pre-meeting context.
-- **25 — `--fresh` mode.** Confirm `--fresh` spawns with no `--resume` and `cwd=~/.operator/sessions/<id>/` (clean-room session).
+The full checklist is in `debug/14_24_permreq_spike/PHASE_5_LIVE_TEST_CHECKLIST.md`. Headline:
 
-Before the live pass: `git push origin main` (and `public`), then `uv tool install --reinstall .` so the live slip runs exercise the merged code.
+1. `cd /Users/jojo/Desktop/operator && uv tool install --reinstall .` (operator CLI from working tree).
+2. Get the operator-plugin changes visible to Claude Code — either bump `operator-plugin/plugin.json` to `0.1.17` + bump `marketplace.json` + push + `git pull` local marketplace cache + `claude plugin install operator@1-800-operator --reinstall`, OR for spot-testing copy the working-tree files into the installed plugin location directly.
+3. `operator doctor` clean.
+4. `/operator:slip-guarded <fresh-meet-url>`.
+5. Walk the checklist's sections A through I. Acceptance criteria at the bottom — A/B/C/E/F all pass = ship.
+
+Realistically a 10–15 minute test once the install path is sorted.
 
 ## State of the repos
 
-**operator (main):** the merge commit is in place locally, on top of `011a7b1` (doctor fd-2 fix) — both **unpushed**. `git push origin main` + `git push public main` when ready.
+**operator (`main`):** this session's commit on top of `6138d66` (S231). Untracked artifacts left from prior sessions (`debug/14_20_*`, `14_21_*`, `14_23_*`, `14_27_*`, `claude_idle_overnight/`, `resume_spike/`, `docs/landing-page.md`, `hooks.md`, `mvp-copy.md`, `mvp.md`, `operator-architecture-handoff.md`, `public/`, runtime artifact `debug/14_22_pty_spike/bench/state/replies.jsonl`) deliberately not touched. Modifications to `docs/agent-context.md` and `docs/roadmap.md` are not from this session — left in place for whoever owns them.
 
-**operator (phase-14.22-pty-pivot branch):** fully merged into `main`. Safe to delete (`git branch -d phase-14.22-pty-pivot`) once `main` is pushed. The worktree at `.claude/worktrees/phase-14-22-pty-pivot/` can be removed too (`git worktree remove`).
+**operator-plugin (`main`):** this session's commit on top of `10ad6da` (0.1.16). **Version NOT bumped** — recommend `0.1.17` as part of Phase 5 prep so the live test runs against a consistently versioned plugin. `skills/doctor/SKILL.md` had unrelated mods on entry — not mine, not committed.
 
-**operator-plugin (main):** at `57c7f6a` (version 0.1.15), pushed to `origin`. No plugin change this session.
-
-**Tracked-but-modified on operator main (do not commit):** `README.md` — user-owned billing-protection wording. Untracked: the same set of `debug/` and stale-doc artifacts as before (`debug/14_20_*`, `debug/14_21_*`, `debug/14_23_aec_spike/`, `debug/claude_idle_overnight/`, `debug/resume_spike/`, `docs/landing-page.md`, `hooks.md`, `mvp.md`, `mvp-copy.md`, `operator-architecture-handoff.md`, `public/`).
+**Both repos: this session's commits are local, not pushed.** Push when ready (probably as part of Phase 5 prep, since the plugin needs to be reachable from the marketplace install path for the live test).
 
 ## Open follow-ups (carried)
 
-- **Anthropic's classification past June 15.** Interactive PTY-driven claude — subscription usage (planned) or reclassified as programmatic (bad)? Untestable until June 15. Watch Claude Code release notes for new flags/env vars patterning against this. If reclassified, BYO-API-key (DECISION.md section M, ~10 lines) becomes the only option.
-- **Claude reply-delivery feedback loop** (S224 carryover). When `send_chat` fails, the claude subprocess gets no signal — it confidently says "I replied" after every reply got dropped. Wiring failure back as a tool-result error would close the loop. Independent of 14.22; could land any time.
-- **`--dangerously-skip-permissions` + foreign-hook write hazard.** A foreign Stop hook whose `reason` reads as a benign instruction → inner-claude acts on it (during S228 testing it edited the user's global `~/.claude/settings.json`, since reverted). Captured in agent-context Hard Won Knowledge — a project threat-model concern, not a blocker.
-- **Post-MVP:** gate `operator slip` behind the plugin (deprecate terminal entry).
-- **Python 3.14 + MLX shader-compile flakiness.** Mitigated via doctor pre-warm; root cause is upstream. Consider pinning `requires-python` to `>=3.10,<3.14` if it recurs.
+- **Anthropic's classification past June 15** — same as prior handoffs.
+- **Claude reply-delivery feedback loop** (S224 carryover) — `send_chat` failure produces no signal to inner-claude. Independent of yolo-off; could land any time.
+- **Foreign-hook write hazard** — a foreign Stop hook in the user's project whose `reason` reads as a benign instruction can steer inner-claude. Documented in agent-context Hard Won Knowledge — yolo-off doesn't change the threat surface here.
+- **CLAUDE.md hasn't been updated for the two-mode surface.** The "Tool Permissions" section still reads as if `--dangerously-skip-permissions` is unconditional. Worth a paragraph + pointer to docs/security.md after Phase 5 passes — left undone this session to avoid pre-empting Phase 5 findings.
+- **S231's bug #3 (overflow pagination at 10+ participants)** still deferred per S231's own note.
 
 ## How to verify in a fresh session
 
@@ -49,6 +77,20 @@ Before the live pass: `git push origin main` (and `public`), then `uv tool insta
 cd /Users/jojo/Desktop/operator
 source venv/bin/activate
 for f in tests/test_*.py; do echo "=== $f ==="; python "$f" 2>&1 | tail -2; done
-# All 11 test files should pass, including test_claude_cli_provider.py (21 tests).
-operator doctor
+# All 15 test files should pass — including:
+#   test_permreq_round_trip.py (12 round-trip tests with FakeClassifier)
+#   test_permission_classifier.py (8 unit tests)
+
+# Spike harnesses:
+python debug/14_24_permreq_spike/test_phase0_hook_audit.py    # 10/10
+python debug/14_24_permreq_spike/test_phase1_permreq_hook.py  # 12/12
+
+# Verify the spawn flag flip:
+python -c "
+from _1_800_operator.pipeline.providers.claude_cli import ClaudeCLIProvider
+print('yolo on: ', ClaudeCLIProvider(guarded=False)._build_cmd())
+print('guarded: ', ClaudeCLIProvider(guarded=True)._build_cmd())
+"
+
+# Then proceed to PHASE_5_LIVE_TEST_CHECKLIST.md.
 ```
