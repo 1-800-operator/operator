@@ -10,23 +10,26 @@ Operator is a chat-based AI meeting participant. It CDP-attaches to a dedicated 
 
 ### Run
 
-Two meeting modes (slip vs. slip-guarded — see Tool Permissions):
+Four meeting modes (see Tool Permissions for slip/strict/yolo split):
 
 ```bash
-operator slip claude <meet-url>           # CDP-attach; inner-claude runs unattended
-operator slip-guarded claude <meet-url>   # same, but bridge permission asks to chat
+operator slip claude <meet-url>           # guarded by default; permreqs bridged to meeting chat
+operator slip-strict claude <meet-url>    # guarded + every prompt requires @claude (no window)
+operator slip-yolo claude <meet-url>      # no permreqs; every chat message forwarded to claude
+operator wiretap <meet-url>               # passive recording — no bot in the meeting
 ```
 
 Utility commands:
 
 ```bash
+operator status                           # is operator currently in a meeting?
 operator hangup                           # gracefully disconnect the running slip session
 operator doctor                           # diagnostic: claude CLI + auth, Chrome, git, TCC perms
 ```
 
 Bare `operator` prints usage. v1 ships claude only; codex / gemini bridges would be sibling modules under `bridges/` if added — there is no per-bot YAML, no `~/.operator/agents/`, and no setup wizard (all of that machinery was deleted in Phase 14.19.7).
 
-`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The inner-claude spawn always carries `--dangerously-skip-permissions`; in plain `slip` mode that means tools run silently, in `slip-guarded` mode operator intercepts the would-be permission asks via a hook and bridges them to chat (see Tool Permissions below). The `--yolo` flag is still parsed for plugin-slash-command back-compat but is now a no-op. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention.
+`operator slip claude` exits 2 with a clear stderr message if `claude` isn't on PATH or `claude auth status --json` reports not logged in. The inner-claude spawn always carries `--dangerously-skip-permissions`; in `slip` and `slip-strict` modes operator intercepts the would-be permission asks via a `PreToolUse` hook and bridges them to chat (see Tool Permissions below); in `slip-yolo` tools run silently. The `--yolo` flag is still parsed for plugin-slash-command back-compat but is now a no-op. The `--resume-session <id>` flag bridges an existing Claude Code session into the meeting (the plugin's slash command passes this automatically); without it a fresh session is born on first @mention. `operator wiretap` doesn't spawn claude at all — passive capture only.
 
 ### Logs & Diagnostics
 
@@ -143,12 +146,14 @@ Inner-claude inherits its MCPs and skills from the user's own `~/.claude/` hiera
 
 ### Tool Permissions
 
-Inner-claude always spawns with `--dangerously-skip-permissions` (since the 14.22 PTY pivot). Operator has two modes that diverge on what happens when a tool would otherwise prompt:
+Inner-claude always spawns with `--dangerously-skip-permissions` (since the 14.22 PTY pivot). The four meeting modes diverge on what happens when a tool would otherwise prompt AND on which messages from chat get forwarded to claude:
 
-- **`operator slip`** — pure unattended. The flag suppresses the prompt, the tool runs, and the room sees Claude's plain-language narration of what it did.
-- **`operator slip-guarded`** (S232) — operator registers a `PreToolUse` hook that intercepts would-be permission asks, posts the question to meeting chat ending with "— OK?", and resolves the hook based on the room's reply. Free-form replies ("sure", "nah", "👍", "sí adelante") are classified allow/deny/unrelated by a `PermissionClassifier` sidecar (a tiny claude subprocess spun up in parallel at slip start). Pre-tool narration (e.g. "marking it done now") is held during the permreq window so a denied verdict doesn't get contradicted by leaked narration; the hold is dropped on deny, drained in order on allow (S234).
+- **`operator slip`** (default, S238) — guarded. Operator registers a `PreToolUse` hook that intercepts permission asks and posts them to meeting chat ending with "— OK?". Free-form replies (`sure`, `nah`, `👍`, `sí adelante`, `actually try blue instead`) are classified allow/deny by a `PermissionClassifier` sidecar (a tiny claude subprocess; gets the last 5 chat turns as context so it can recognize redirects). Pre-tool narration is held during permreq; purged on deny, drained on allow. Trigger-gating: first `@claude` opens a sticky conversation window for `CONTINUATION_WINDOW_SECONDS` (90s), OR indefinitely if claude's last chat post contained a `?`. Window is **not** sender-scoped; any participant can follow up.
+- **`operator slip-strict`** (S238) — same guarded permission flow as `slip`. **Every** non-permreq prompt requires the `@claude` trigger. No continuation window. Permreq answers detected via the post-question seen-set machinery, so they bypass the trigger check.
+- **`operator slip-yolo`** (S238) — no permission asks; the inner-claude `--dangerously-skip-permissions` runs every tool unattended. **Every** chat message in the meeting is forwarded to claude (no trigger gating, no window). High-noise mode the user opts into.
+- **`operator wiretap`** (S238) — no inner-claude. Chat + captions + participant roster are recorded to the meeting JSONL; nothing is dispatched anywhere; nothing is posted to chat. Used to make a meeting reference-able post-meeting via the `operator-meeting-record` MCP.
 
-Per-tool narration in chat is **Claude's own**, prompted by the first-paste briefing — not an operator-side observation layer and not an `--append-system-prompt` directive (the spawn stays naked). Participants see what the bot is doing because Claude tells them, in its own voice.
+Per-tool narration in chat (slip/strict/yolo) is **Claude's own**, prompted by the first-paste briefing — not an operator-side observation layer and not an `--append-system-prompt` directive (the spawn stays naked). The guarded-mode briefing additionally tells claude that uncategorized tool calls will pop a question in chat; slip-yolo skips that block.
 
 ### Participant-based Auto-leave
 

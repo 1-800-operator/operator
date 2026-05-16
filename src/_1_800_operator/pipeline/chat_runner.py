@@ -129,11 +129,26 @@ class ChatRunner:
         permission_classifier=None,
         mode: str = "slip",
     ):
-        # `mode` controls the trigger-routing branch in `_dispatch_user_message`
-        # and the provider/llm wiring in `run()`. "slip" / "slip-required" /
-        # "slip-yolo" all spawn an inner-claude; "wiretap" does not — `llm`
-        # and `permission_classifier` must both be None and chat messages
-        # are persisted to the meeting record but never dispatched anywhere.
+        # `mode` controls the trigger-routing branch in `_dispatch_user_message`,
+        # the continuation-window semantics, and the provider/llm wiring in
+        # `run()`. Four modes:
+        #   - "slip"   default. Guarded (PermreqClassifier active). First
+        #              `@claude` opens a sticky conversation window; sender
+        #              not scoped — anyone in the meeting can follow up.
+        #              `?` in claude's last chat post keeps the window open
+        #              indefinitely until someone replies; otherwise the
+        #              window closes after CONTINUATION_WINDOW_SECONDS.
+        #   - "strict" guarded. No continuation window. Every non-permreq
+        #              message requires the trigger phrase.
+        #   - "yolo"   not guarded (no permreq hook, no classifier sidecar).
+        #              No trigger check. Every chat message in the meeting
+        #              is forwarded to claude. High noise — user opts in.
+        #   - "wiretap" no inner-claude. Chat is recorded but never
+        #              dispatched. `llm` and `permission_classifier` must
+        #              both be None.
+        valid_modes = {"slip", "strict", "yolo", "wiretap"}
+        if mode not in valid_modes:
+            raise ValueError(f"ChatRunner mode must be one of {valid_modes}, got {mode!r}")
         self._mode = mode
         self._connector = connector
         self._llm = llm
@@ -234,15 +249,26 @@ class ChatRunner:
         self._permreq_seen_at_post: set[str] = set()
         self._permreq_safety_timeout_s: float = 125.0
 
-        # Sticky conversation window state. See CONTINUATION_WINDOW_SECONDS
-        # / CONTINUATION_DEBOUNCE_SECONDS at the module top for the spec.
-        # _continuation_pending holds the last buffered non-trigger
-        # follow-up (overwritten on each new one — only the latest goes
-        # through, debounced); _flush_continuation_if_ready drains it
-        # from the polling loop once the debounce window elapses.
+        # Sticky conversation window state (slip mode only). See
+        # CONTINUATION_WINDOW_SECONDS / CONTINUATION_DEBOUNCE_SECONDS at
+        # the module top for the spec. _continuation_pending holds the
+        # last buffered non-trigger follow-up (overwritten on each new
+        # one — only the latest goes through, debounced);
+        # _flush_continuation_if_ready drains it from the polling loop
+        # once the debounce window elapses. _continuation_sender is kept
+        # for logging only — the window is no longer sender-scoped.
         self._continuation_sender: str | None = None
         self._continuation_open_until: float = 0.0
         self._continuation_pending: dict | None = None
+        # `?`-driven indefinite window: True iff claude's last chat post
+        # contained a `?`. Set in `_send` when kind=="chat"; cleared in
+        # `_process_messages` on any non-self incoming message. While
+        # True, the slip-mode continuation window stays open regardless
+        # of the time-based ceiling — "claude asked a question, wait
+        # for the room to answer." Permreq questions count too; the
+        # first reply (resolving the permreq OR just side chat) clears
+        # the flag and the window closes naturally.
+        self._last_reply_had_question: bool = False
 
         # Cumulative attended-participants set. We add anyone we ever
         # saw in the participant panel; we never remove. Used by the
@@ -581,6 +607,14 @@ class ChatRunner:
                 own_matched.add(text)
                 continue
 
+            # Any non-self incoming message clears the `?`-driven indefinite
+            # window. The flag's contract is "claude is waiting for a
+            # response to its question" — that wait ends on the first reply
+            # from the room, regardless of whether the reply actually
+            # answers the question. If the reply doesn't answer and is
+            # just side chat, the user can re-`@claude` to resume.
+            self._last_reply_had_question = False
+
             log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r}")
 
             # Per-message receive-lag breadcrumb. t_dom is stamped by the JS
@@ -608,43 +642,57 @@ class ChatRunner:
         self._own_messages -= own_matched
 
     def _dispatch_user_message(self, text: str, sender: str = "", *, t_dom: int = 0, t_drained: int = 0):
-        """Trigger-check a chat message and route it to the LLM if addressed.
+        """Route a chat message to the LLM based on the runner's `mode`.
 
-        Three routing outcomes:
-          1. Message contains the trigger phrase → strip the prefix,
-             dispatch immediately, open a sticky conversation window
-             with the sender.
-          2. No trigger but `sender` is inside the active sticky window
-             → buffer as a pending continuation. The polling loop fires
-             `_flush_continuation_if_ready` to dispatch the buffered
-             message after CONTINUATION_DEBOUNCE_SECONDS of quiet —
-             collapsing rapid corrections into the last typed message.
-          3. Otherwise → stored as context (the LLM still sees it on the
-             next turn via MeetingRecord), no dispatch.
+        Per-mode behavior:
+          - "wiretap": no-op (no LLM in the loop).
+          - "yolo":   every message goes through, no trigger check, no
+                      window. Echo filtering happens upstream.
+          - "strict": message dispatched only if it contains the trigger
+                      phrase. No continuation window — every prompt
+                      requires `@claude`.
+          - "slip":   trigger phrase → dispatch + open sticky window.
+                      No trigger but window is open → buffer as
+                      continuation (debounced to coalesce rapid
+                      corrections). The window is NOT sender-scoped
+                      (anyone in the room can reply or follow up). A
+                      `?` in claude's last chat post keeps the window
+                      open until the first reply lands; otherwise the
+                      window closes after CONTINUATION_WINDOW_SECONDS.
 
         Pure routing — message persistence and seen-id tracking happen
         upstream, before this is invoked.
         """
         if self._mode == "wiretap":
-            # Wiretap is passive — message already persisted upstream,
-            # nothing to forward to (no LLM in the loop).
             return
+
+        if self._mode == "yolo":
+            # Forward every message verbatim. The wrap envelope still
+            # carries the sender so claude knows who said what.
+            self._handle_message(text, sender=sender, t_dom=t_dom, t_drained=t_drained)
+            return
+
         trigger = config.TRIGGER_PHRASE.lower()
-        if trigger in text.lower():
+        triggered = trigger in text.lower()
+
+        if triggered:
             prompt = re.sub(
                 re.escape(config.TRIGGER_PHRASE) + r'[,:]?\s*',
                 '', text, count=1, flags=re.IGNORECASE,
             ).strip()
             if prompt:
                 self._handle_message(prompt, sender=sender, t_dom=t_dom, t_drained=t_drained)
-                self._open_continuation_window(sender)
+                if self._mode == "slip":
+                    self._open_continuation_window(sender)
             return
 
-        if self._continuation_active(sender):
-            # Overwrite any prior pending — debounce keeps only the
-            # latest. If the user types two messages in quick
-            # succession the bot should respond to the most recent
-            # one (the typical correction/clarification pattern).
+        if self._mode == "strict":
+            # No window in strict mode — non-trigger messages are dropped.
+            log.debug("ChatRunner: stored as context (strict mode, no trigger)")
+            return
+
+        # slip mode: maybe in the continuation window.
+        if self._continuation_active():
             self._continuation_pending = {
                 "sender": sender,
                 "text": text,
@@ -657,27 +705,35 @@ class ChatRunner:
             )
             return
 
-        log.debug("ChatRunner: stored as context (no trigger phrase)")
+        log.debug("ChatRunner: stored as context (no trigger phrase, window closed)")
 
     def _open_continuation_window(self, sender: str):
-        """Mark the start (or extension) of a sticky conversation window
-        with `sender`. Subsequent non-trigger messages from this sender
-        within CONTINUATION_WINDOW_SECONDS are treated as follow-ups.
-        Anonymous senders (empty string) can't be tracked across
-        messages so we skip — that participant must @claude every turn.
+        """Mark the start (or extension) of a sticky conversation window.
+
+        Any participant's subsequent non-trigger messages — not just the
+        opener's — are treated as follow-ups for the next
+        CONTINUATION_WINDOW_SECONDS (or indefinitely while claude's last
+        chat post contained a `?`). `sender` is recorded for logging
+        only; the window is not scoped to them.
         """
-        if not sender:
-            return
-        self._continuation_sender = sender
+        self._continuation_sender = sender or None
         self._continuation_open_until = time.time() + CONTINUATION_WINDOW_SECONDS
 
-    def _continuation_active(self, sender: str) -> bool:
-        """True iff `sender` is the currently-stuck participant and
-        within the window."""
-        if not sender or not self._continuation_sender:
-            return False
-        if sender.lower() != self._continuation_sender.lower():
-            return False
+    def _continuation_active(self) -> bool:
+        """True iff the sticky window is currently open. Slip mode only.
+
+        Two paths to True:
+          - claude's last chat post contained a `?` (set by `_send`,
+            cleared by `_process_messages` on any incoming reply) →
+            indefinite-open until someone speaks.
+          - the time-based window from `_open_continuation_window` is
+            still in its CONTINUATION_WINDOW_SECONDS budget.
+
+        Not sender-scoped — any participant can follow up while the
+        window is open.
+        """
+        if self._last_reply_had_question:
+            return True
         return time.time() < self._continuation_open_until
 
     def _refresh_roster_file(self):
@@ -975,6 +1031,13 @@ class ChatRunner:
                 and "t_first_visible" not in self._turn_timing
             ):
                 self._turn_timing["t_first_visible"] = int(time.time() * 1000)
+            # `?`-driven indefinite window tracking (slip mode). Permreq
+            # questions count too — they end with "— OK?" and that's a
+            # legitimate signal to wait for a reply. The first non-self
+            # incoming message in _process_messages clears the flag, so
+            # we never get stuck open across an unanswered permreq.
+            if kind == "chat":
+                self._last_reply_had_question = "?" in text
             return msg_id if msg_id else ""
 
     def _drain_pending_sends(self):

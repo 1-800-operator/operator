@@ -1,13 +1,14 @@
 """
-Tests for the sticky conversation window in ChatRunner.
+Tests for the sticky conversation window in ChatRunner (slip mode).
 
-What this exercises:
-  - @claude trigger opens the window for the sender
-  - Same-sender follow-up without @claude is buffered (not dispatched)
-  - Buffer dispatches after the debounce window elapses
-  - Rapid-fire follow-ups collapse to the latest message
-  - Different sender does NOT count as a continuation
-  - Window expires after CONTINUATION_WINDOW_SECONDS
+Stage 3 redesign (S238):
+  - @claude opens the window; any participant can follow up while it's
+    open (not sender-scoped — anyone can reply or follow up).
+  - The window stays open for CONTINUATION_WINDOW_SECONDS, OR indefinitely
+    while claude's last chat post contained a `?`.
+  - Any incoming non-self message clears the `?`-driven indefinite flag.
+  - Strict mode has NO window — every prompt requires @claude.
+  - Yolo mode has NO trigger gating — every message dispatches.
 
 LLM dispatch is mocked: `_handle_message` is monkey-patched to record
 its calls instead of actually invoking the provider.
@@ -51,8 +52,8 @@ class StubLLM:
         pass
 
 
-def make_runner():
-    runner = ChatRunner(StubConnector(), StubLLM(), meeting_record=None)
+def make_runner(mode="slip"):
+    runner = ChatRunner(StubConnector(), StubLLM(), meeting_record=None, mode=mode)
     runner._dispatched = []
 
     def fake_handle(text, sender="", *, t_dom=0, t_drained=0):
@@ -61,112 +62,197 @@ def make_runner():
     return runner
 
 
-def test_trigger_dispatches_and_opens_window():
+# ---- slip mode -------------------------------------------------------------
+
+def test_slip_trigger_dispatches_and_opens_window():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi there", sender="Alice")
     assert runner._dispatched == [{"text": "hi there", "sender": "Alice"}]
-    assert runner._continuation_sender == "Alice"
     assert runner._continuation_open_until > time.time()
-    print("  trigger dispatches and opens window: OK")
+    print("  slip: trigger dispatches + opens window: OK")
 
 
-def test_followup_same_sender_buffered_not_dispatched():
+def test_slip_followup_same_sender_buffered():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
     runner._dispatch_user_message("thanks", sender="Alice")
-    # Not dispatched yet — debounce in flight.
     assert runner._dispatched == []
     assert runner._continuation_pending is not None
     assert runner._continuation_pending["text"] == "thanks"
-    print("  same-sender follow-up buffered, not dispatched immediately: OK")
+    print("  slip: same-sender follow-up buffered, not dispatched immediately: OK")
 
 
-def test_followup_dispatches_after_debounce():
+def test_slip_followup_dispatches_after_debounce():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
     runner._dispatch_user_message("thanks", sender="Alice")
-    # Walk pending.ts back so the debounce check passes without sleeping.
     runner._continuation_pending["ts"] = time.time() - cr_mod.CONTINUATION_DEBOUNCE_SECONDS - 0.5
     runner._flush_continuation_if_ready()
     assert runner._dispatched == [{"text": "thanks", "sender": "Alice"}]
     assert runner._continuation_pending is None
-    print("  follow-up dispatches after debounce window: OK")
+    print("  slip: follow-up dispatches after debounce: OK")
 
 
-def test_rapid_followups_collapse_to_latest():
+def test_slip_rapid_followups_collapse_to_latest():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} go", sender="Alice")
     runner._dispatched.clear()
     runner._dispatch_user_message("wait", sender="Alice")
     runner._dispatch_user_message("actually no, do Y instead", sender="Alice")
-    # Walk back the pending so debounce trips.
     runner._continuation_pending["ts"] = time.time() - cr_mod.CONTINUATION_DEBOUNCE_SECONDS - 0.5
     runner._flush_continuation_if_ready()
     assert len(runner._dispatched) == 1
     assert runner._dispatched[0]["text"] == "actually no, do Y instead", runner._dispatched
-    print("  rapid follow-ups collapse to the latest message: OK")
+    print("  slip: rapid follow-ups collapse to the latest: OK")
 
 
-def test_different_sender_does_not_count_as_continuation():
+def test_slip_window_is_not_sender_scoped():
+    """S238: window is no longer sender-scoped. Bob CAN follow up in
+    Alice's window without @claude."""
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
-    runner._dispatch_user_message("relevant aside", sender="Bob")
-    assert runner._dispatched == []
-    assert runner._continuation_pending is None  # Bob is not in Alice's window
-    print("  different sender does not enter Alice's window: OK")
+    runner._dispatch_user_message("relevant aside from Bob", sender="Bob")
+    # Buffered as continuation (not dispatched immediately — debounce).
+    assert runner._continuation_pending is not None
+    assert runner._continuation_pending["sender"] == "Bob"
+    runner._continuation_pending["ts"] = time.time() - cr_mod.CONTINUATION_DEBOUNCE_SECONDS - 0.5
+    runner._flush_continuation_if_ready()
+    assert runner._dispatched == [{"text": "relevant aside from Bob", "sender": "Bob"}]
+    print("  slip: window not sender-scoped — anyone can follow up: OK")
 
 
-def test_window_expires_after_window_seconds():
+def test_slip_window_expires_after_window_seconds():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
-    # Force the window closed.
     runner._continuation_open_until = time.time() - 1.0
     runner._dispatch_user_message("late follow-up", sender="Alice")
     assert runner._dispatched == []
     assert runner._continuation_pending is None
-    print("  window expires after CONTINUATION_WINDOW_SECONDS: OK")
+    print("  slip: time-based window expires after CONTINUATION_WINDOW_SECONDS: OK")
 
 
-def test_anonymous_sender_not_tracked():
+def test_slip_question_keeps_window_open_indefinitely():
+    """If claude's last chat post had `?`, the window stays open past
+    the time-based ceiling."""
     runner = make_runner()
-    # Empty sender — adapter couldn't extract a name. Trigger still fires
-    # the message but the window can't be opened (no sender key to scope
-    # against), so a follow-up without @claude won't be a continuation.
-    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="")
-    assert runner._dispatched == [{"text": "hi", "sender": ""}]
-    assert runner._continuation_sender is None
+    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
-    runner._dispatch_user_message("follow-up", sender="")
-    assert runner._dispatched == []
-    print("  anonymous sender doesn't open continuation window: OK")
+    # Simulate claude having posted a ?-question that overwrites the flag.
+    runner._last_reply_had_question = True
+    # Force the time-based window closed.
+    runner._continuation_open_until = time.time() - 100.0
+    # Follow-up arrives — window is open via the ? flag.
+    runner._dispatch_user_message("blue", sender="Alice")
+    assert runner._continuation_pending is not None, "? flag should keep window open"
+    print("  slip: `?` in claude's reply keeps window open past time ceiling: OK")
 
 
-def test_followup_extends_window():
+def test_slip_incoming_reply_clears_question_flag():
+    """First non-self incoming message clears the `?`-driven indefinite
+    window. The flag is cleared in _process_messages — exercise that path."""
     runner = make_runner()
-    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} go", sender="Alice")
+    runner._last_reply_had_question = True
+    # _process_messages is what clears the flag; simulate one message
+    # arriving through that path.
+    runner._process_messages([{"id": "m1", "sender": "Alice", "text": "hi"}])
+    assert runner._last_reply_had_question is False
+    print("  slip: incoming non-self message clears the ?-driven flag: OK")
+
+
+# ---- strict mode -----------------------------------------------------------
+
+def test_strict_trigger_dispatches():
+    runner = make_runner(mode="strict")
+    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi there", sender="Alice")
+    assert runner._dispatched == [{"text": "hi there", "sender": "Alice"}]
+    print("  strict: @claude prompt dispatches: OK")
+
+
+def test_strict_followup_without_trigger_dropped():
+    runner = make_runner(mode="strict")
+    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
-    first_until = runner._continuation_open_until
-    # Run a follow-up through the buffer + flush path; it should reopen
-    # the window (push the deadline forward).
     runner._dispatch_user_message("thanks", sender="Alice")
-    runner._continuation_pending["ts"] = time.time() - cr_mod.CONTINUATION_DEBOUNCE_SECONDS - 0.5
-    runner._flush_continuation_if_ready()
-    assert runner._continuation_open_until >= first_until
-    print("  forwarded continuation extends the window: OK")
+    assert runner._dispatched == []
+    assert runner._continuation_pending is None
+    print("  strict: same-sender follow-up without @claude is dropped: OK")
+
+
+def test_strict_no_continuation_state_mutated():
+    runner = make_runner(mode="strict")
+    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
+    # Strict mode doesn't open the continuation window at all.
+    assert runner._continuation_open_until == 0.0, runner._continuation_open_until
+    print("  strict: trigger does NOT open continuation window: OK")
+
+
+# ---- yolo mode -------------------------------------------------------------
+
+def test_yolo_every_message_dispatches():
+    runner = make_runner(mode="yolo")
+    runner._dispatch_user_message("no trigger here", sender="Alice")
+    runner._dispatch_user_message("nor here", sender="Bob")
+    runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} this one has it", sender="Carol")
+    assert len(runner._dispatched) == 3
+    assert [d["sender"] for d in runner._dispatched] == ["Alice", "Bob", "Carol"]
+    # Yolo doesn't strip the trigger — it passes the raw text.
+    assert config.TRIGGER_PHRASE in runner._dispatched[2]["text"]
+    print("  yolo: every message dispatches, no trigger stripping: OK")
+
+
+def test_yolo_no_window_state_mutated():
+    runner = make_runner(mode="yolo")
+    runner._dispatch_user_message("anything", sender="Alice")
+    assert runner._continuation_open_until == 0.0
+    assert runner._continuation_pending is None
+    print("  yolo: no continuation window state mutated: OK")
+
+
+# ---- mode validation -------------------------------------------------------
+
+def test_invalid_mode_raises():
+    try:
+        ChatRunner(StubConnector(), StubLLM(), meeting_record=None, mode="nonsense")
+    except ValueError as e:
+        assert "nonsense" in str(e)
+        print("  invalid mode raises ValueError: OK")
+        return
+    raise AssertionError("invalid mode should have raised")
 
 
 if __name__ == "__main__":
-    print("Sticky conversation-window tests:")
-    test_trigger_dispatches_and_opens_window()
-    test_followup_same_sender_buffered_not_dispatched()
-    test_followup_dispatches_after_debounce()
-    test_rapid_followups_collapse_to_latest()
-    test_different_sender_does_not_count_as_continuation()
-    test_window_expires_after_window_seconds()
-    test_anonymous_sender_not_tracked()
-    test_followup_extends_window()
-    print("\nAll 8 continuation-window tests passed.")
+    print("Sticky conversation-window + mode tests:")
+    tests = [
+        test_slip_trigger_dispatches_and_opens_window,
+        test_slip_followup_same_sender_buffered,
+        test_slip_followup_dispatches_after_debounce,
+        test_slip_rapid_followups_collapse_to_latest,
+        test_slip_window_is_not_sender_scoped,
+        test_slip_window_expires_after_window_seconds,
+        test_slip_question_keeps_window_open_indefinitely,
+        test_slip_incoming_reply_clears_question_flag,
+        test_strict_trigger_dispatches,
+        test_strict_followup_without_trigger_dropped,
+        test_strict_no_continuation_state_mutated,
+        test_yolo_every_message_dispatches,
+        test_yolo_no_window_state_mutated,
+        test_invalid_mode_raises,
+    ]
+    failures = 0
+    for fn in tests:
+        try:
+            fn()
+        except AssertionError as e:
+            failures += 1
+            print(f"  {fn.__name__}: FAIL — {e}")
+        except Exception as e:
+            failures += 1
+            print(f"  {fn.__name__}: ERROR — {type(e).__name__}: {e}")
+    if failures:
+        print(f"\n{failures} test(s) failed")
+        sys.exit(1)
+    print(f"\nAll {len(tests)} continuation-window + mode tests passed.")

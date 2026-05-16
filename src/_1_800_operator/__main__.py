@@ -301,8 +301,9 @@ def _release_slip_lock() -> None:
 
 def _print_usage():
     print("Usage:")
-    print("  operator slip claude <url>          Attach claude to a slip Chrome session (yolo on)")
-    print("  operator slip-guarded claude <url>  Slip with permission asks bridged to meeting chat")
+    print("  operator slip claude <url>          Slip — guarded by default; permission asks bridged to meeting chat")
+    print("  operator slip-strict claude <url>   Slip — guarded, every prompt requires @claude (no sticky window)")
+    print("  operator slip-yolo claude <url>     Slip — no permission asks, every chat message goes to claude")
     print("  operator wiretap <url>              Passive recording — no bot, just capture chat + captions")
     print("  operator status                     Is operator currently in a meeting?")
     print("  operator hangup                     Gracefully disconnect the running slip session")
@@ -369,8 +370,12 @@ def main():
             return 0
         return _run_wiretap(url)
 
-    if first in ("slip", "slip-guarded"):
-        guarded = (first == "slip-guarded")
+    if first in ("slip", "slip-strict", "slip-yolo"):
+        # Default slip is now guarded (formerly /operator:slip-guarded
+        # behavior); slip-strict is guarded + requires @claude every
+        # turn; slip-yolo is unattended with no permission asks. The
+        # pre-S238 `slip-guarded` name is gone — pre-launch hard cutover.
+        mode = {"slip": "slip", "slip-strict": "strict", "slip-yolo": "yolo"}[first]
         if len(argv) < 2:
             print(f"Usage: operator {first} claude <https://meet.google.com/xxx-xxxx-xxx>\n")
             _print_usage()
@@ -398,7 +403,7 @@ def main():
             _print_usage()
             return 0
         rest = _consume_yolo(argv[2:])
-        return _run_slip(name, rest, guarded=guarded)
+        return _run_slip(name, rest, mode=mode)
 
     if first.startswith("-"):
         print(f"Unknown option: {first}\n")
@@ -619,7 +624,7 @@ def _run_hangup():
     return 0
 
 
-def _run_slip(name, rest, *, guarded=False):
+def _run_slip(name, rest, *, mode="slip"):
     """slip mode — launch a dedicated Chrome window for the meeting and
     CDP-attach claude to it.
 
@@ -631,14 +636,19 @@ def _run_slip(name, rest, *, guarded=False):
     Caller must have already filtered for `name == "claude"` (the main
     dispatcher does this at argv parse time).
 
-    `guarded=True` (entered via `operator slip-guarded`) flips the
-    inner-claude spawn from `--dangerously-skip-permissions` to
-    `--permission-mode default` and constructs a PermissionClassifier
-    sidecar that ChatRunner uses to interpret participants' chat
-    replies to permission questions. Default `guarded=False` is the
-    historical "yolo on" path — no regression for callers that didn't
-    opt in.
+    `mode` is one of:
+      - "slip"   default. Guarded — operator intercepts permission asks
+                  via the PreToolUse hook and bridges them to meeting
+                  chat ending in "— OK?". PermissionClassifier sidecar
+                  active. ChatRunner runs with a sticky conversation
+                  window (`?` keeps it open indefinitely).
+      - "strict" guarded + every prompt requires @claude. No
+                  continuation window.
+      - "yolo"   no permission asks — inner-claude runs unattended. No
+                  classifier sidecar. ChatRunner forwards every chat
+                  message to claude (no trigger gating).
     """
+    guarded = mode in ("slip", "strict")
     # Resume-session resolution has two tiers (see logic below):
     #   1. --resume-session <id> on the command line.
     #   2. CLAUDE_CODE_SESSION_ID env var (set by both terminal Claude Code
@@ -788,7 +798,7 @@ def _run_slip(name, rest, *, guarded=False):
     # gymnastics needed. The transcript MCP server (spawned by claude via
     # --mcp-config) reads from this path.
     slug = slug_from_url(url)
-    meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "slip"})
+    meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": mode})
 
     # Two-tier resume-session resolution (see comment block at top of _run_slip).
     resume_source = None
@@ -882,6 +892,7 @@ def _run_slip(name, rest, *, guarded=False):
         llm,
         meeting_record=meeting_record,
         permission_classifier=classifier,
+        mode=mode,
     )
 
     _shutdown_called = False
