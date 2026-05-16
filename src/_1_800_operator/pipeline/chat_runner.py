@@ -796,7 +796,17 @@ class ChatRunner:
         sends) and the provider's out-queue tick (covers during-turn
         sends, when the polling thread is blocked inside the LLM call).
         Bounded per call so a flood doesn't starve the caller.
+
+        While a permreq is active, the drain is a no-op: pre-tool
+        narration claude emitted before the tool call is held in the
+        queue until the verdict lands. On allow the next drain flushes
+        normally; on deny `_resolve_permreq` purges the held items so
+        claude's "marking it done now" doesn't ship after the room
+        already said no. Pre-allowed tools never trigger a permreq, so
+        they keep the historical immediate-drain behavior.
         """
+        if self._permreq_active is not None:
+            return
         drained = 0
         while drained < 16:
             try:
@@ -805,6 +815,28 @@ class ChatRunner:
                 return
             self._send(text, kind=kind)
             drained += 1
+
+    def _purge_held_sends(self, reason: str):
+        """Discard everything in `_send_queue` — used on permreq deny.
+
+        Logs each discarded item so the operator log retains an audit
+        trail of what was suppressed. Only called from permreq paths;
+        the regular `_drain_pending_sends` flush path is unaffected.
+        """
+        discarded = 0
+        while True:
+            try:
+                text, _kind = self._send_queue.get_nowait()
+            except queue.Empty:
+                break
+            log.info(
+                f"ChatRunner: dropping held pre-tool send on {reason}: {text!r}"
+            )
+            discarded += 1
+        if discarded:
+            log.info(
+                f"ChatRunner: dropped {discarded} held pre-tool send(s) on {reason}"
+            )
 
     # ---- PermissionRequest round-trip (yolo-off mode) ---------------
 
@@ -888,6 +920,9 @@ class ChatRunner:
                 f"{self._permreq_safety_timeout_s:.0f}s safety timeout — "
                 "clearing (the hook will have already self-denied)"
             )
+            # Hook self-denied; treat the held narration the same way
+            # we treat any other deny — discard it.
+            self._purge_held_sends(reason="safety timeout (hook self-denied)")
             self._permreq_active = None
             self._permreq_seen_at_post = set()
             self._post_next_permreq()
@@ -974,6 +1009,13 @@ class ChatRunner:
             else:
                 msg = "denied"
             answer = {"behavior": "deny", "message": msg}
+            # Drop any pre-tool narration claude queued before this
+            # call landed. The room rejected the action — shipping
+            # "marking it done now" right after the user said no would
+            # contradict the verdict. Items queued AFTER this purge
+            # (claude's response to the deny tool_result) flush normally
+            # on the next tick once `_permreq_active` is cleared.
+            self._purge_held_sends(reason="deny")
 
         answer_path = req["answer_path"]
         try:
