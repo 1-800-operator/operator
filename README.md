@@ -164,6 +164,22 @@ Trust boundaries, residual risks, and the operational guidance behind
 both modes live in [`docs/security.md`](./docs/security.md). Read it
 before running either mode.
 
+### macOS permissions you'll see
+
+The first time you run `/operator:slip` on a fresh machine, expect three
+macOS prompts. All are one-time, per-bundle, click-Allow-and-done:
+
+- **Screen Recording + Microphone** for `operator-audio-capture.app` —
+  the signed helper that captures meeting audio (your mic + the other
+  participants' system audio). `install.sh` warms these up at install
+  time so you grant them once, upfront.
+- **"<app> would like to access data from other apps"** for whichever
+  app you ran `/operator:slip` *from* (Claude Code Desktop, Cursor,
+  Terminal, etc.) — this is macOS's App Management permission, asked
+  because operator launches the dedicated slip Chrome window via
+  `open -na "Google Chrome"`. Per-parent: you'll see it once for each
+  app you ever run `/operator:slip` from.
+
 ## Privacy & logs
 
 Operator writes a diagnostic log to **`/tmp/operator.log`** on every run,
