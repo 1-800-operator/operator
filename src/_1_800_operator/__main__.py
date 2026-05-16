@@ -113,6 +113,88 @@ def _kill_orphaned_children():
 
 
 _SLIP_LOCK_PATH = Path.home() / ".operator" / "slip.pid"
+_AUDIO_HELPER_APP = Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
+_AUDIO_HELPER_BIN = _AUDIO_HELPER_APP / "Contents" / "MacOS" / "operator-audio-capture"
+
+
+def _probe_helper_tcc() -> str:
+    """Return the helper's `--probe` JSON, or '' if unrunnable.
+
+    Helper is short-lived (<200ms); probe is safe to call from anywhere.
+    Falls back to '' so callers can treat parse failures as "unknown."
+    """
+    if not _AUDIO_HELPER_BIN.exists():
+        return ""
+    try:
+        r = subprocess.run(
+            [str(_AUDIO_HELPER_BIN), "--probe"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _preflight_audio_helper_tcc() -> None:
+    """First-run TCC warmup for the signed audio helper.
+
+    install.sh runs the equivalent warmup at install time, but TCC state
+    can desync afterwards (OS upgrade, manual `tccutil reset`, the bundle
+    being re-copied, etc.). This preflight catches that case so users
+    don't hit a silent broken-audio slip when they're a minute away from
+    a real meeting.
+
+    Flow:
+      1. Probe helper's current TCC state.
+      2. If both perms granted → no-op (fast path, the common case).
+      3. If either missing → invoke `open -W -a` on the helper bundle.
+         macOS attributes the prompts to the bundle (not the parent
+         IDE/terminal) so the user sees dialogs for "operator-audio-capture."
+         The `-W` blocks until the helper exits (~10s via its watchdog).
+      4. Re-probe. Warn but don't fail if the user denied — slip can
+         still run chat-only; better to let them proceed than block the
+         meeting they're trying to join.
+
+    Helper isn't installed → no-op (dev fallback path or skipped install).
+    Non-macOS → no-op (slip is mac-only anyway, but defensive).
+    """
+    if sys.platform != "darwin":
+        return
+    if not _AUDIO_HELPER_BIN.exists():
+        return
+
+    before = _probe_helper_tcc()
+    if '"screen_recording":"ok"' in before and '"microphone":"ok"' in before:
+        return  # fast path — both granted
+
+    print(
+        "macOS audio permissions needed — surfacing dialogs for the audio helper.\n"
+        "  Click Allow on each as it appears (Screen Recording + Microphone).\n"
+        "  This takes ~10 seconds. The helper exits on its own when done."
+    )
+    try:
+        subprocess.run(
+            ["open", "-W", "-n", "-a", str(_AUDIO_HELPER_APP)],
+            capture_output=True, timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    after = _probe_helper_tcc()
+    if '"screen_recording":"ok"' in after and '"microphone":"ok"' in after:
+        print("✓ Audio permissions granted — proceeding.")
+        return
+
+    # Still missing. Most likely cause is user-deny (click Don't Allow)
+    # or Apple's prompt cooldown after recent rapid-fire grants/denies.
+    # Don't block the slip — degraded slip (silent captions) beats
+    # refusing to join the meeting the user is about to attend.
+    print(
+        "Audio permissions not granted yet — slip will launch but captions will be silent.\n"
+        f"  To fix: System Settings → Privacy & Security → Screen Recording (and Microphone)\n"
+        f"          → '+' → {_AUDIO_HELPER_APP} → enable\n"
+        f"          Then re-run /operator:slip."
+    )
 
 
 def _pid_is_operator(pid: int) -> bool:
@@ -641,6 +723,15 @@ def _run_slip(name, rest, *, guarded=False):
             f"Fix that and re-run. (`operator doctor` runs the full check.)"
         )
         return 0
+
+    # First-run TCC warmup for the signed audio helper. No-op when both
+    # perms are already granted (common case after install.sh's warmup);
+    # surfaces dialogs synchronously when not, so the user clicks Allow
+    # BEFORE we daemonize + join the meeting (otherwise the audio helper
+    # dies silently on first use). Best-effort: prints a warn and
+    # continues if user denies — degraded slip (silent captions) beats
+    # refusing to join the meeting they're about to attend.
+    _preflight_audio_helper_tcc()
 
     # All synchronous validation has passed. Hand the caller (Bash tool,
     # shell, etc.) a one-line success acknowledgement, then detach so
