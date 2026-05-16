@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from _1_800_operator.pipeline.classifier import PermissionClassifier
+from _1_800_operator.pipeline.classifier import PermissionClassifier, _PROMPT_TEMPLATE
 
 
 def test_parse_yesno_yes():
@@ -88,6 +88,63 @@ def test_stop_is_idempotent():
     print("  stop(): idempotent on un-spawned classifier: OK")
 
 
+def test_format_chat_context_empty_inputs():
+    # None / empty list / list of empty entries all render as empty
+    # string — the template substitution leaves the prompt clean.
+    assert PermissionClassifier._format_chat_context(None) == ""
+    assert PermissionClassifier._format_chat_context([]) == ""
+    assert PermissionClassifier._format_chat_context([{}, {"text": ""}]) == ""
+    print("  context: empty inputs → empty string: OK")
+
+
+def test_format_chat_context_renders_entries():
+    entries = [
+        {"sender": "Alice", "text": "change the color please"},
+        {"sender": "Bot", "text": "to what?"},
+        {"sender": "Alice", "text": "make it blue"},
+    ]
+    out = PermissionClassifier._format_chat_context(entries)
+    # Header + each entry on its own line in `[sender] text` shape.
+    assert "Recent meeting chat" in out
+    assert "[Alice] change the color please" in out
+    assert "[Bot] to what?" in out
+    assert "[Alice] make it blue" in out
+    print("  context: entries render as [sender] text block: OK")
+
+
+def test_format_chat_context_skips_blank_text_and_missing_sender():
+    entries = [
+        {"sender": "Alice", "text": "  "},     # blank text → skipped
+        {"sender": "", "text": "anonymous line"},  # missing sender → "?"
+        {"text": "no sender key at all"},
+    ]
+    out = PermissionClassifier._format_chat_context(entries)
+    assert "Alice" not in out  # blank-text Alice entry was skipped
+    assert "[?] anonymous line" in out
+    assert "[?] no sender key at all" in out
+    print("  context: blank text skipped, missing sender → '?': OK")
+
+
+def test_prompt_template_substitutes_context_question_and_reply():
+    # Verify the template has the three placeholders we expect and they
+    # render cleanly. Regression guard against an accidental refactor
+    # that drops {chat_context}.
+    formatted = _PROMPT_TEMPLATE.format(
+        chat_context=PermissionClassifier._format_chat_context(
+            [{"sender": "Alice", "text": "make it blue"}]
+        ),
+        question="Claude wants to use Edit on /color.md — OK?",
+        reply="actually pink",
+    )
+    assert "Recent meeting chat" in formatted
+    assert "[Alice] make it blue" in formatted
+    assert "Claude wants to use Edit on /color.md — OK?" in formatted
+    assert "'actually pink'" in formatted  # !r repr on reply
+    # New instruction text — redirect-as-NO must be in the prompt.
+    assert "Redirects count as NO" in formatted
+    print("  prompt: template substitutes context/question/reply with redirect-as-NO instruction: OK")
+
+
 def test_session_dir_default_is_classifier_suffixed():
     """Default session_dir must NOT collide with the main provider's
     dir — the hooks gated on $OPERATOR_SESSION_DIR write into it, and
@@ -113,6 +170,10 @@ if __name__ == "__main__":
         test_classify_with_no_subprocess_and_failed_spawn_denies,
         test_classify_while_stopping_denies_immediately,
         test_stop_is_idempotent,
+        test_format_chat_context_empty_inputs,
+        test_format_chat_context_renders_entries,
+        test_format_chat_context_skips_blank_text_and_missing_sender,
+        test_prompt_template_substitutes_context_question_and_reply,
         test_session_dir_default_is_classifier_suffixed,
     ]
     failures = 0

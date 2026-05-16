@@ -95,16 +95,23 @@ _POLL_SECONDS = 0.15
 
 # Single classifier prompt template. Plain English, asks for one of two
 # tokens, gives a fail-safe default ("if unsure, NO"). Same structure
-# the 14_26 spike validated 19/19 against.
+# the 14_26 spike validated 19/19 against, extended in S238 with chat
+# context + an explicit redirect-as-NO instruction (so "actually pink"
+# after a prior "blue" instruction classifies as NO and the bot pivots
+# via the deny payload instead of allow-draining stale narration).
 _PROMPT_TEMPLATE = """You are helping me interpret a participant's reply in a Google Meet chat. The bot just asked them a permission question. I need to know whether they approved.
-
+{chat_context}
 The bot asked:
 > {question}
 
 The participant replied:
 > {reply!r}
 
-Did they approve the request? Reply with exactly one word: YES if they approved, NO if they declined or were unclear. If you're unsure, reply NO (deny is the safe default)."""
+Did they approve the request? Reply with exactly one word:
+- YES if they clearly approved ("ok", "sure", "go ahead", "👍").
+- NO if they declined, said something unrelated, were unclear, OR redirected to a different request ("actually do X instead", "nevermind try Y").
+
+Redirects count as NO: the bot will read your verdict together with the participant's verbatim reply and pivot to whatever they actually want, so denying a redirect is what produces the correct downstream behavior. If you're unsure, reply NO (deny is the safe default)."""
 
 
 _YESNO_RE = re.compile(r"\b(YES|NO)\b")
@@ -382,6 +389,26 @@ class PermissionClassifier:
         return text if isinstance(text, str) else ""
 
     @staticmethod
+    def _format_chat_context(entries: list[dict] | None) -> str:
+        """Render recent chat entries as a `[sender] text` block, prefixed
+        by a header. Empty / None → empty string (template substitution
+        renders nothing between the intro and the question)."""
+        if not entries:
+            return ""
+        lines = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            sender = (e.get("sender") or "").strip() or "?"
+            text = (e.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"[{sender}] {text}")
+        if not lines:
+            return ""
+        return "\nRecent meeting chat for context (oldest first):\n" + "\n".join(lines) + "\n"
+
+    @staticmethod
     def _parse_yesno(text: str) -> bool | None:
         """Return True for YES, False for NO, None if neither token is
         present as a standalone word. Matches the 14_26 spike's
@@ -395,9 +422,21 @@ class PermissionClassifier:
 
     # ---- public API -------------------------------------------------
 
-    def classify(self, reply_text: str, question_text: str) -> bool:
+    def classify(
+        self,
+        reply_text: str,
+        question_text: str,
+        chat_context: list[dict] | None = None,
+    ) -> bool:
         """Classify a meeting-chat reply as approval (True) or refusal
         (False). Blocks for up to ~3s typical / 30s ceiling.
+
+        `chat_context`, if supplied, is a list of recent chat entries
+        (each {sender, text, ...}) rendered into the prompt so the
+        classifier can disambiguate context-dependent replies. For
+        example, "actually pink" looks like approval in isolation but
+        like a redirect (→ NO) when prior chat shows the bot was about
+        to edit to blue.
 
         Defaults to False (deny) on any failure: subprocess not
         spawned, classifier crashed mid-meeting, turn timed out, parse
@@ -427,6 +466,7 @@ class PermissionClassifier:
                     )
                     return False
             prompt = _PROMPT_TEMPLATE.format(
+                chat_context=self._format_chat_context(chat_context),
                 question=question_text or "(no question text captured)",
                 reply=reply_text or "",
             )

@@ -63,8 +63,8 @@ class FakeClassifier:
         self.verdict = verdict
         self.calls = []
 
-    def classify(self, reply, question):
-        self.calls.append((reply, question))
+    def classify(self, reply, question, chat_context=None):
+        self.calls.append((reply, question, chat_context))
         return self.verdict
 
 

@@ -1138,11 +1138,23 @@ class ChatRunner:
             # back to deny on classifier failure / no-classifier
             # configured. The main inner-claude is paused waiting on
             # this answer, so the brief block doesn't starve anything.
+            #
+            # `chat_context` gives the classifier the 5 chat turns BEFORE
+            # this permreq exchange — so it can recognize "actually pink"
+            # as a redirect (→ NO) when prior chat shows the user just
+            # asked for blue. tail_chat is in-memory + ordered oldest-
+            # first; the last two entries (permreq question + this reply)
+            # are already passed explicitly as `question`/`reply`, so
+            # drop them from the context to avoid duplication.
+            recent = self._record.tail_chat(7) if self._record is not None else []
+            chat_context = recent[:-2] if len(recent) >= 2 else []
             allowed = False
             if self._classifier is not None:
                 try:
                     allowed = self._classifier.classify(
-                        text, active.get("_question_text", "")
+                        text,
+                        active.get("_question_text", ""),
+                        chat_context=chat_context,
                     )
                 except Exception as e:
                     log.warning(
@@ -1174,7 +1186,22 @@ class ChatRunner:
             if deny_message:
                 msg = deny_message
             elif raw_reply:
-                msg = f"user replied in chat: {raw_reply}"
+                # Directive phrasing: the verbatim reply IS the next
+                # instruction. Without this, claude reads the bare
+                # "user replied in chat: actually silver" as just a
+                # refusal and retries the original plan, ignoring the
+                # redirect inside the user's words (observed 2026-05-16
+                # in the grey→silver live test). Explicit pivot guidance
+                # cues claude to treat redirect-shaped replies as the
+                # new goal.
+                msg = (
+                    f"The user did not approve this action. They wrote "
+                    f"in meeting chat: {raw_reply!r}. Treat their reply "
+                    f"as your next instruction: if it's a flat refusal, "
+                    f"stop; if it suggests a different action or "
+                    f"redirects to another goal, pivot to that instead "
+                    f"of retrying the action you just attempted."
+                )
             else:
                 msg = "denied"
             answer = {"behavior": "deny", "message": msg}

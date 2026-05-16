@@ -12,7 +12,7 @@ What this exercises:
   - allow path: classifier returns True → answer file holds
     {"behavior": "allow"}
   - deny path: classifier returns False → answer file holds
-    {"behavior": "deny", "message": "user replied in chat: <text>"}
+    {"behavior": "deny", "message": "<directive guidance + verbatim reply>"}
   - classifier crash / no classifier configured → fail-safe deny
   - serial queueing when multiple PermissionRequests arrive
   - safety timeout cleanup if the hook self-denied without us being
@@ -83,8 +83,8 @@ class FakeClassifier:
         self.raises = raises
         self.calls = []
 
-    def classify(self, reply, question):
-        self.calls.append((reply, question))
+    def classify(self, reply, question, chat_context=None):
+        self.calls.append((reply, question, chat_context))
         if self.raises is not None:
             raise self.raises
         return self.verdict
@@ -143,7 +143,7 @@ def test_classifier_yes_writes_allow_answer_atomically():
     ]
     runner._check_permreq_chat_for_answer()
     assert classifier.calls == [
-        ("yeah sounds good", req["_question_text"]),
+        ("yeah sounds good", req["_question_text"], []),
     ], classifier.calls
     assert req["answer_path"].exists()
     ans = json.loads(req["answer_path"].read_text())
@@ -219,7 +219,7 @@ def test_chatter_classified_first_then_resolved():
     ]
     runner._check_permreq_chat_for_answer()
     assert classifier.calls == [
-        ("what would that even do?", req["_question_text"]),
+        ("what would that even do?", req["_question_text"], []),
     ]
     assert req["answer_path"].exists()
     ans = json.loads(req["answer_path"].read_text())
