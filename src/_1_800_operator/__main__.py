@@ -789,7 +789,17 @@ def _run_slip(name, rest, *, guarded=False):
         _shutdown_called = True
         if signum:
             log.info(f"Received signal {signum} — shutting down")
-        runner.stop()
+        # Order matters here. `runner.stop()` blocks 5-12s waiting for
+        # the inner-claude PTY to drain + the classifier sidecar to
+        # exit. We don't want /operator:status to lie or /operator:slip
+        # to refuse with "already running" during that window. The
+        # marker and the slip lockfile are pure lookup signals (nothing
+        # in the teardown path reads them), so release them FIRST —
+        # subsequent slip/status calls then see truth immediately. The
+        # roster file is different: chat_runner writes it every
+        # PARTICIPANT_CHECK_INTERVAL, so unlinking it before stop()
+        # races with a re-write. Unlink it AFTER runner.stop() to be
+        # safe.
         try:
             marker = Path.home() / ".operator" / ".current_meeting"
             if marker.exists():
@@ -797,6 +807,13 @@ def _run_slip(name, rest, *, guarded=False):
         except OSError:
             pass
         _release_slip_lock()
+        runner.stop()
+        try:
+            roster = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
+            if roster.exists():
+                roster.unlink()
+        except OSError:
+            pass
         connector.leave()
         _kill_orphaned_children()
 
