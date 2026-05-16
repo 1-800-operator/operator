@@ -994,18 +994,16 @@ class ChatRunner:
     def _format_permreq_question(self, req):
         """Build the chat post for a permission question.
 
-        Plain-language, two-option ask. The participant's free-form
+        Plain-language, open-ended ask. The participant's free-form
         reply (sure / nah / 👍 / sí adelante / anything) is interpreted
         by the PermissionClassifier sidecar — operator does no
-        pattern-matching, so the wording here doesn't have to match
-        any token list.
+        pattern-matching. The wording is deliberately not "reply yes or
+        no" because that misrepresents what the classifier accepts (a
+        bare "ok" works fine), and gives the room a free-form prompt.
         """
         tool_name = req.get("tool_name") or "?"
         summary = self._summarize_tool_input(tool_name, req.get("tool_input"))
-        return (
-            f"Claude wants to use `{tool_name}`{summary} — "
-            "reply *yes* or *no*."
-        )
+        return f"Claude wants to use `{tool_name}`{summary} — OK?"
 
     def _summarize_tool_input(self, tool_name, tool_input):
         """Render the tool's input as a short, chat-friendly fragment.

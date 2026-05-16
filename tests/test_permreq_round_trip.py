@@ -123,12 +123,13 @@ def test_request_posts_question_and_sets_active():
     msg = runner._connector.sent[0]
     assert "Bash" in msg
     assert "npm install" in msg
-    assert "yes" in msg.lower()
-    assert "no" in msg.lower()
+    # Open-ended ask: "— OK?" suffix, no prescriptive "yes/no" token list
+    # (the classifier accepts any phrasing — "ok", "sure", "👍", "nah", etc.).
+    assert "OK?" in msg, msg
     # No 'always' wording — that path is gone.
     assert "always" not in msg.lower(), msg
     assert runner._permreq_active is req
-    print("  request: posts question (no 'always' wording), sets active: OK")
+    print("  request: posts question (open-ended ask, no 'always' wording), sets active: OK")
 
 
 def test_classifier_yes_writes_allow_answer_atomically():

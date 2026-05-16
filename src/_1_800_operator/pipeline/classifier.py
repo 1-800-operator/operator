@@ -5,7 +5,7 @@ participant's chat reply to a permission question as YES or NO.
 WHY THIS EXISTS
 ---------------
 Operator's "yolo off" mode posts a permission question into meeting
-chat ("Claude wants to use Bash to run X. Reply yes or no.") and waits
+chat ("Claude wants to use Bash to run X — OK?") and waits
 for a participant to answer. Mapping a free-form reply ("sure", "go
 ahead", "nah, skip it", "👍", "sí adelante") to allow/deny shouldn't
 be done by hardcoded word-matching — it's exactly the kind of natural-
