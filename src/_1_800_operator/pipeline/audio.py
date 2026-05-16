@@ -147,13 +147,25 @@ class AudioProcessor:
             self._audio_buffer = b""
         return data
 
-    def capture_next_utterance(self) -> str:
-        """Block until a complete utterance is detected. Returns text or ''.
+    def capture_next_utterance(self) -> tuple[str, float | None]:
+        """Block until a complete utterance is detected.
+
+        Returns (text, speech_start_time) where speech_start_time is the
+        wall-clock time.time() captured at the first non-silent frame of
+        the utterance. text is '' (and speech_start_time None) when the
+        loop exits without detecting speech, or when transcription drops
+        the result as a hallucination.
+
+        speech_start_time is the load-bearing piece for downstream
+        speaker attribution: the DOM speaking indicator clears the moment
+        speech ends, but Whisper doesn't finalize until ~0.5-1s after,
+        by which point the *next* speaker has typically grabbed the
+        indicator. Attribution must look up "who was speaking at
+        speech_start_time", not "who is speaking now."
 
         Loops at UTTERANCE_CHECK_INTERVAL, accumulating PCM until either
         SILENCE_THRESHOLD consecutive silent ticks (utterance done) or
-        MAX_DURATION elapsed (forced cut). Returns '' if self.capturing
-        flipped False before any speech was detected.
+        MAX_DURATION elapsed (forced cut).
         """
         speech_detected = False
         silence_count = 0
@@ -195,7 +207,7 @@ class AudioProcessor:
                     break
 
         if not utterance_audio:
-            return ""
+            return "", None
 
         self._write_debug_wav(utterance_audio)
 
@@ -203,14 +215,14 @@ class AudioProcessor:
         text = self.transcribe(audio)
         log.info(f'AudioProcessor: whisper_done "{text}"')
         if not text:
-            return ""
+            return "", None
         if text.lower() in WHISPER_HALLUCINATIONS:
             log.info("AudioProcessor: dropped (silence hallucination)")
-            return ""
+            return "", None
         if self._is_repetition_hallucination(text):
             log.info("AudioProcessor: dropped (repetition hallucination)")
-            return ""
-        return text
+            return "", None
+        return text, speech_start_time
 
     def _write_debug_wav(self, pcm_bytes: bytes) -> str | None:
         """Write raw PCM to a WAV file under debug_dir. Returns path or None."""

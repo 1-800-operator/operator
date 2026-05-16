@@ -420,6 +420,14 @@ class AttachAdapter(MeetingConnector):
         self._speaking_lock = threading.Lock()
         self._speaking_participants: dict[str, str] = {}  # pid → name
         self._last_s_speaker: str = ""
+        # Timeline of speaking events for interval-based attribution.
+        # Each entry is (t, name, kind) where kind ∈ {"start", "stop"}.
+        # _audio_utterance_loop attributes a Whisper segment by looking
+        # up who was speaking at the segment's speech_start_time, not
+        # who is speaking now — see _attribute_s_leg() and S234 spike
+        # in debug/14_29_speaker_attribution_spike/. 512 entries ≈ 8min
+        # of dense conversation, well past any plausible Whisper lag.
+        self._speaking_history: deque[tuple[float, str, str]] = deque(maxlen=512)
         # Local runner's tile id, resolved at observer install time. The
         # JS observer skips this tile, but we also filter at drain time
         # in case a stale event slips through (e.g. tile DOM re-renders).
@@ -980,13 +988,75 @@ class AttachAdapter(MeetingConnector):
                 # tile DOM re-rendered between install and observation.
                 if pid and pid == self._local_participant_id:
                     continue
+                # Use the event's own DOM timestamp (ms) when present —
+                # it pre-dates the Python drain by 200ms+ and is the
+                # correct anchor for chunk-start lookups.
+                ev_t_ms = ev.get("t")
+                ev_t = (ev_t_ms / 1000.0) if isinstance(ev_t_ms, (int, float)) else time.time()
                 if speaking:
                     self._speaking_participants[pid] = name
                     self._last_s_speaker = name
+                    self._speaking_history.append((ev_t, name, "start"))
                     log.debug(f"AttachAdapter: speaking start — {name!r}")
                 else:
                     self._speaking_participants.pop(pid, None)
+                    self._speaking_history.append((ev_t, name, "stop"))
                     log.debug(f"AttachAdapter: speaking stop  — {name!r}")
+
+    def _attribute_s_leg(self, chunk_start: float, chunk_end: float, default: str) -> str:
+        """Look up which named participant spoke during [chunk_start, chunk_end].
+
+        Used by the S-leg utterance loop after Whisper finalizes a
+        segment. Walks _speaking_history to reconstruct each speaker's
+        [start, stop] intervals and returns the name with the largest
+        overlap with the chunk window. Falls back to the most-recent
+        speaker who stopped at or before chunk_start, then to default.
+
+        Why this and not "who is speaking now": Whisper waits for
+        silence before committing a segment, typically 300-1000ms after
+        the speaker actually stopped. In back-to-back turns the *next*
+        speaker has usually already grabbed the DOM speaking indicator
+        by the time we attribute, so a snapshot-at-finalize read
+        stamps the previous speaker's words with the new speaker's
+        name. See debug/14_29_speaker_attribution_spike/.
+        """
+        with self._speaking_lock:
+            events = list(self._speaking_history)
+        # Reconstruct intervals from start/stop pairs. Still-open speakers
+        # at the end of history get a sentinel +inf end (they're presumed
+        # to still be speaking — which is fine for overlap math).
+        open_starts: dict[str, float] = {}
+        intervals: list[tuple[float, float, str]] = []
+        for t, name, kind in events:
+            if kind == "start":
+                # If a previous start for this name never saw a stop, close
+                # it at this new start (defensive — shouldn't happen, but
+                # observer dedupe isn't perfect across rescans).
+                if name in open_starts:
+                    intervals.append((open_starts[name], t, name))
+                open_starts[name] = t
+            else:
+                t0 = open_starts.pop(name, None)
+                if t0 is not None:
+                    intervals.append((t0, t, name))
+        for name, t0 in open_starts.items():
+            intervals.append((t0, float("inf"), name))
+
+        best_name = ""
+        best_overlap = 0.0
+        for t0, t1, name in intervals:
+            overlap = max(0.0, min(t1, chunk_end) - max(t0, chunk_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_name = name
+        if best_name:
+            return best_name
+        # Fallback: most-recent stop at or before chunk_start.
+        candidates = [(t1, name) for (t0, t1, name) in intervals if t1 <= chunk_start]
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
+        return default
 
     def leave(self):
         """Disconnect from CDP, then close the slip Chrome process.
@@ -1555,7 +1625,7 @@ class AttachAdapter(MeetingConnector):
             return
         while proc.capturing and not self._audio_stop.is_set():
             try:
-                text = proc.capture_next_utterance()
+                text, speech_start_time = proc.capture_next_utterance()
             except Exception as e:
                 log.warning(f"AttachAdapter: utterance loop ({speaker_label}) raised: {e}")
                 continue
@@ -1565,20 +1635,16 @@ class AttachAdapter(MeetingConnector):
             if cb is None:
                 log.debug(f"AttachAdapter: utterance dropped (no callback) [{speaker_label}] {text!r}")
                 continue
-            # For the system-audio leg, use the DOM speaking-indicator to
-            # attribute the utterance to a named participant. Prefer the
-            # currently-speaking participant if exactly one is active; fall
-            # back to the last known speaker (DOM clears before Whisper
-            # finalizes, so _last_s_speaker survives the gap).
+            # For the system-audio leg, attribute via the speaking-event
+            # timeline using the chunk's actual speech window — NOT a
+            # snapshot at finalize time. See _attribute_s_leg().
             effective_label = speaker_label
-            if tag == _FRAME_TAG_SYSTEM:
-                with self._speaking_lock:
-                    active = list(self._speaking_participants.values())
-                    last = self._last_s_speaker
-                if len(active) == 1:
-                    effective_label = active[0]
-                elif last:
-                    effective_label = last
+            if tag == _FRAME_TAG_SYSTEM and speech_start_time is not None:
+                effective_label = self._attribute_s_leg(
+                    chunk_start=speech_start_time,
+                    chunk_end=time.time(),
+                    default=speaker_label,
+                )
             # Bleed dedupe: if this is the M leg and the same text just
             # came through the S leg, drop it as residual speaker bleed.
             if tag == _FRAME_TAG_MIC and self._is_recent_s_caption(text):

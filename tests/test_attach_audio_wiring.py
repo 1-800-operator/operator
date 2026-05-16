@@ -98,10 +98,10 @@ def test_utterance_loop_fires_callback_with_speaker_label():
     def fake_capture(**_):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return "hello world"
+            return "hello world", time.time()
         # Second call: signal stop, return empty
         fake_proc.capturing = False
-        return ""
+        return "", None
 
     fake_proc.capture_next_utterance.side_effect = fake_capture
     adapter._audio_processors[_FRAME_TAG_MIC] = fake_proc
@@ -148,9 +148,9 @@ def test_other_speaker_label():
     def fake_capture(**_):
         if not seen:
             seen.append(1)
-            return "remote talker"
+            return "remote talker", time.time()
         fake_proc.capturing = False
-        return ""
+        return "", None
 
     fake_proc.capture_next_utterance.side_effect = fake_capture
     adapter._audio_processors[_FRAME_TAG_SYSTEM] = fake_proc
@@ -191,6 +191,69 @@ def test_bleed_dedupe_drops_matching_mic_caption():
     print("OK bleed_dedupe_drops_matching_mic_caption")
 
 
+def test_attribute_s_leg_kyle_michael_flip():
+    """Exact reproduction of the dko-pgom-bfe.jsonl flip pattern.
+
+    Michael speaks 0..3, Kyle 3.2..7, Michael 7.2..10. Whisper would
+    finalize each segment ~500ms after speech_stop — by which point
+    the next speaker has already started. The old logic attributed
+    by "who is speaking now"; the new one attributes by chunk window.
+    """
+    adapter = AttachAdapter()
+    history = [
+        (0.0,  "Michael", "start"),
+        (3.0,  "Michael", "stop"),
+        (3.2,  "Kyle",    "start"),
+        (7.0,  "Kyle",    "stop"),
+        (7.2,  "Michael", "start"),
+        (10.0, "Michael", "stop"),
+    ]
+    for ev in history:
+        adapter._speaking_history.append(ev)
+
+    # Three finalizations, each timed AFTER the next speaker started.
+    assert adapter._attribute_s_leg(0.0, 3.0, "other") == "Michael"
+    assert adapter._attribute_s_leg(3.2, 7.0, "other") == "Kyle"
+    assert adapter._attribute_s_leg(7.2, 10.0, "other") == "Michael"
+    print("OK attribute_s_leg_kyle_michael_flip")
+
+
+def test_attribute_s_leg_overlap_picks_dominant():
+    """When two speakers overlap, the one with larger overlap wins."""
+    adapter = AttachAdapter()
+    for ev in [
+        (0.0, "A", "start"),
+        (2.5, "B", "start"),   # B cuts in
+        (3.0, "A", "stop"),
+        (3.5, "B", "stop"),
+    ]:
+        adapter._speaking_history.append(ev)
+    # Chunk covers A's full 3s window; B only overlaps 0.5s of it.
+    assert adapter._attribute_s_leg(0.0, 3.0, "other") == "A"
+    print("OK attribute_s_leg_overlap_picks_dominant")
+
+
+def test_attribute_s_leg_falls_back_to_default():
+    """Empty history → returns the caller-provided default."""
+    adapter = AttachAdapter()
+    assert adapter._attribute_s_leg(0.0, 1.0, "other") == "other"
+    print("OK attribute_s_leg_falls_back_to_default")
+
+
+def test_attribute_s_leg_falls_back_to_last_stop():
+    """Chunk lands in silence after a known speaker stopped → that speaker."""
+    adapter = AttachAdapter()
+    for ev in [
+        (0.0, "A", "start"),
+        (1.0, "A", "stop"),
+    ]:
+        adapter._speaking_history.append(ev)
+    # Chunk window 2.0-2.5 has no overlap with any interval; nearest
+    # prior stop is A at t=1.0.
+    assert adapter._attribute_s_leg(2.0, 2.5, "other") == "A"
+    print("OK attribute_s_leg_falls_back_to_last_stop")
+
+
 def test_bleed_dedupe_window_expires():
     """S-leg captions older than the configured window stop matching."""
     import time as _time
@@ -216,4 +279,8 @@ if __name__ == "__main__":
     test_stop_audio_pipeline_idempotent()
     test_bleed_dedupe_drops_matching_mic_caption()
     test_bleed_dedupe_window_expires()
+    test_attribute_s_leg_kyle_michael_flip()
+    test_attribute_s_leg_overlap_picks_dominant()
+    test_attribute_s_leg_falls_back_to_default()
+    test_attribute_s_leg_falls_back_to_last_stop()
     print("\nAll AttachAdapter audio-wiring tests passed.")
