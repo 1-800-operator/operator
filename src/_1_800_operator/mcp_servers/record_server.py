@@ -1,4 +1,5 @@
-"""Transcript MCP server — exposes the live meeting JSONL as tools.
+"""Meeting-record MCP server — exposes the live + historical meeting
+JSONL as tools.
 
 Live-meeting tools (operate on the currently-attached meeting via the
 .current_meeting marker / OPERATOR_MEETING_RECORD_PATH env):
@@ -67,7 +68,7 @@ If neither is set, or the file doesn't exist yet, tools return a friendly
 empty-state string.
 
 Run via:
-    python -m _1_800_operator.mcp_servers.transcript_server
+    python -m _1_800_operator.mcp_servers.record_server
 """
 import json
 import os
@@ -93,7 +94,7 @@ RESULT_BYTE_CEILING = 80000
 DEFAULT_LIST_LIMIT = 100
 DEFAULT_SEARCH_LIMIT = 20
 
-mcp = FastMCP("operator-transcript")
+mcp = FastMCP("operator-meeting-record")
 
 
 def _now() -> float:
@@ -637,6 +638,27 @@ def _format_event(entry: dict, marker: str = "") -> str:
     return f"{marker}[{clock} {kind}/{speaker}] {text}"
 
 
+def _meeting_attendees(events: list[dict]) -> list[str]:
+    """Return the attendee list for a meeting, preferring `participants_final`
+    when present (durable, written at meeting end). Falls back to deriving
+    from chat senders + caption speakers when absent (e.g. operator crashed
+    before close()). The fallback is best-effort — it misses silent
+    attendees who never spoke or chatted, which is exactly what the
+    durable `participants_final` line exists to capture."""
+    pf = next((e for e in events if e.get("kind") == "participants_final"), None)
+    if isinstance(pf, dict):
+        attended = pf.get("attended") or []
+        if isinstance(attended, list):
+            return [str(n) for n in attended if n]
+    derived: set[str] = set()
+    for e in events:
+        if e.get("kind") in ("chat", "caption"):
+            s = e.get("sender")
+            if isinstance(s, str) and s.strip():
+                derived.add(s.strip())
+    return sorted(derived)
+
+
 def _meeting_summary_line(path: Path) -> str:
     """One-line summary of a meeting file: slug, date, duration, counts."""
     events = _read_all_events(path)
@@ -655,10 +677,131 @@ def _meeting_summary_line(path: Path) -> str:
         duration_str = "?"
     chat_count = sum(1 for e in events if e.get("kind") == "chat")
     caption_count = sum(1 for e in events if e.get("kind") == "caption")
+    attendees = _meeting_attendees(events)
+    attendee_str = (
+        f", attended: {', '.join(attendees)}" if attendees else ""
+    )
     return (
         f"  {slug} — {date_str}, {duration_str}, "
         f"{chat_count} chat / {caption_count} caption events ({mode})"
+        f"{attendee_str}"
     )
+
+
+def _parse_date_range(date_range_iso: str) -> tuple[float | None, float | None]:
+    """Parse `YYYY-MM-DD` or `YYYY-MM-DD/YYYY-MM-DD` into (start_ts, end_ts).
+    Returns (None, None) on parse failure. End-of-day is end of the second
+    date (inclusive)."""
+    if not date_range_iso:
+        return (None, None)
+    parts = date_range_iso.split("/")
+    try:
+        start = datetime.strptime(parts[0].strip(), "%Y-%m-%d")
+        if len(parts) == 1:
+            end = start
+        else:
+            end = datetime.strptime(parts[1].strip(), "%Y-%m-%d")
+    except ValueError:
+        return (None, None)
+    # End-of-day for the end date so a single-day query catches everything
+    # that day.
+    end_eod = end.replace(hour=23, minute=59, second=59)
+    return (start.timestamp(), end_eod.timestamp())
+
+
+@mcp.tool()
+def find_meetings(
+    participants: list[str] | None = None,
+    date_range_iso: str | None = None,
+    url_contains: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Find past operator meetings by participant, date, or URL slug.
+
+    Use this when the user asks about a meeting they don't remember the
+    exact slug for ("the meeting Tuesday with Alice and Bob", "what did
+    we discuss with the design team last week?"). Use the returned
+    slug(s) as input to list_meeting_record / search_meeting_record for
+    the actual content.
+
+    Args:
+        participants: List of substrings to match against attendees
+            (case-insensitive). A meeting matches when EVERY participant
+            substring matches some attendee — so `["alice", "bob"]`
+            requires both. Attendee list is sourced from the meeting's
+            `participants_final` event (durable, written at meeting end)
+            or derived from chat/caption senders when absent.
+        date_range_iso: ISO date or range, "YYYY-MM-DD" or
+            "YYYY-MM-DD/YYYY-MM-DD" (inclusive on both ends). Matched
+            against the meeting's earliest event timestamp.
+        url_contains: Substring (case-insensitive) match against the
+            meeting URL stored in the meta header. Meet URLs don't carry
+            titles so this is mainly useful for matching the slug
+            fragment (e.g. "abc-defg-hij").
+        limit: Max meetings to return. Default 20.
+
+    Returns:
+        Plain-text list, one meeting per line, same shape as
+        list_meetings — plus the attendee list when known. Empty filters
+        return everything (equivalent to list_meetings).
+    """
+    files = _list_meeting_files()
+    if not files:
+        return (
+            "No meeting records found — operator hasn't been in a "
+            "meeting yet, or ~/.operator/history/ is empty."
+        )
+
+    date_lo, date_hi = _parse_date_range(date_range_iso or "")
+    needles = [s.strip().lower() for s in (participants or []) if s and s.strip()]
+    url_needle = (url_contains or "").strip().lower()
+
+    matches: list[Path] = []
+    for path in files:
+        events = _read_all_events(path)
+        if not events:
+            continue
+
+        if date_lo is not None and date_hi is not None:
+            timed = [e for e in events if isinstance(e.get("timestamp"), (int, float))]
+            if not timed:
+                continue
+            started = timed[0]["timestamp"]
+            if not (date_lo <= started <= date_hi):
+                continue
+
+        if url_needle:
+            meta = next((e for e in events if e.get("kind") == "meta"), {})
+            url = (meta.get("meet_url") or "").lower()
+            if url_needle not in url:
+                continue
+
+        if needles:
+            attendees_lower = [a.lower() for a in _meeting_attendees(events)]
+            if not all(any(n in a for a in attendees_lower) for n in needles):
+                continue
+
+        matches.append(path)
+        if len(matches) >= max(1, limit):
+            break
+
+    if not matches:
+        filt_bits = []
+        if needles:
+            filt_bits.append(f"participants={participants!r}")
+        if date_range_iso:
+            filt_bits.append(f"date_range_iso={date_range_iso!r}")
+        if url_contains:
+            filt_bits.append(f"url_contains={url_contains!r}")
+        filt_str = ", ".join(filt_bits) or "(no filters)"
+        return f"No meetings matched: {filt_str}."
+
+    header = (
+        f"Found {len(matches)} meeting{'s' if len(matches) != 1 else ''} "
+        f"(newest first):"
+    )
+    body = [_meeting_summary_line(p) for p in matches]
+    return "\n".join([header, *body])
 
 
 @mcp.tool()

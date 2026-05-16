@@ -303,6 +303,7 @@ def _print_usage():
     print("Usage:")
     print("  operator slip claude <url>          Attach claude to a slip Chrome session (yolo on)")
     print("  operator slip-guarded claude <url>  Slip with permission asks bridged to meeting chat")
+    print("  operator wiretap <url>              Passive recording — no bot, just capture chat + captions")
     print("  operator status                     Is operator currently in a meeting?")
     print("  operator hangup                     Gracefully disconnect the running slip session")
     print("  operator doctor                     Diagnostic check — is the world ready?")
@@ -355,6 +356,18 @@ def main():
             _print_usage()
             return 0
         return _run_hangup()
+
+    if first == "wiretap":
+        if len(argv) != 2:
+            print("Usage: operator wiretap <https://meet.google.com/xxx-xxxx-xxx>\n")
+            _print_usage()
+            return 0
+        url = argv[1]
+        if not url.startswith(("http://", "https://")):
+            print(f"wiretap requires a Meet URL: got {url!r}\n")
+            _print_usage()
+            return 0
+        return _run_wiretap(url)
 
     if first in ("slip", "slip-guarded"):
         guarded = (first == "slip-guarded")
@@ -899,6 +912,18 @@ def _run_slip(name, rest, *, guarded=False):
             pass
         _release_slip_lock()
         runner.stop()
+        # Bake the cumulative attendee list + the meeting_end terminator
+        # into the JSONL so post-meeting lookup tools (find_meetings,
+        # list_meetings) can answer "who was on the X meeting?" against
+        # disk-resident state. After runner.stop() the chat thread is
+        # joined so _attended_participants is stable. Best-effort — never
+        # let close() failures block teardown.
+        try:
+            attended = sorted(getattr(runner, "_attended_participants", set()))
+            self_name = getattr(runner, "_last_self_name", "") or ""
+            meeting_record.close(attended=attended, self_name=self_name)
+        except Exception as e:
+            log.warning(f"MeetingRecord.close() failed: {e}")
         try:
             roster = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
             if roster.exists():
@@ -919,6 +944,152 @@ def _run_slip(name, rest, *, guarded=False):
     finally:
         _shutdown()
         ui.ok("Detached — slip Chrome stays open so the meeting can continue. Goodbye.")
+    return 0
+
+
+def _run_wiretap(url):
+    """wiretap mode — passive meeting recording, no inner-claude.
+
+    Attaches to slip Chrome, joins the meeting, captures chat + captions
+    + participant roster into the meeting JSONL, exits when the meeting
+    ends (auto-leave / hangup / Chrome close). The MCP `find_meetings`
+    and `list_meeting_record` tools can then be used from any Claude
+    Code session to recall what was said.
+
+    No bot positional, no permission UI, no chat sends. Shares the
+    singleton lock with the speak-modes (one operator per host).
+    """
+    if sys.platform != "darwin":
+        print("wiretap mode is currently macOS-only.")
+        return 0
+
+    other_pid = _acquire_slip_lock()
+    if other_pid is not None:
+        existing_url = _read_current_meeting_url()
+        if existing_url:
+            print(
+                f"operator is already running — already in {existing_url}. "
+                f"Use /operator:hangup to leave that meeting first, then retry."
+            )
+        else:
+            print(
+                f"operator is already running (pid {other_pid}). "
+                f"Use /operator:hangup to leave that meeting first, then retry."
+            )
+        return 0
+
+    # Wiretap captures captions, so the audio helper TCC perms still
+    # matter. Same warmup path as slip.
+    _preflight_audio_helper_tcc()
+
+    try:
+        Path(config.LAST_FAILURE_PATH).unlink(missing_ok=True)
+    except OSError:
+        pass
+    _daemonize_and_announce(url)
+
+    import logging
+    import signal
+    import time as _time
+
+    logging.basicConfig(
+        filename="/tmp/operator.log",
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    )
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    log = logging.getLogger("operator")
+
+    from _1_800_operator.bridges import claude as claude_bridge
+    from _1_800_operator.connectors.attach_adapter import AttachAdapter, SlipAttachError
+    from _1_800_operator.pipeline import ui
+    from _1_800_operator.pipeline.chat_runner import ChatRunner
+    from _1_800_operator.pipeline.meeting_record import MeetingRecord, slug_from_url
+
+    t_start = _time.monotonic()
+
+    slug = slug_from_url(url)
+    meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": "wiretap"})
+
+    try:
+        marker = Path.home() / ".operator" / ".current_meeting"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(meeting_record.path), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"could not write current-meeting marker: {e}")
+
+    # The reply prefix is unused in wiretap (send_chat never fires) but
+    # AttachAdapter requires the constructor arg.
+    connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
+
+    def _on_utterance(speaker: str, text: str, timestamp: float) -> None:
+        try:
+            meeting_record.append(speaker, text, kind="caption", timestamp=timestamp)
+        except Exception as exc:
+            log.warning(f"wiretap: append caption failed: {exc}")
+
+    connector.set_caption_callback(_on_utterance)
+
+    ui.say("Launching slip Chrome for wiretap…")
+    try:
+        connector.join(url)
+    except SlipAttachError as e:
+        ui.err(str(e))
+        return 2
+
+    log.info(f"TIMING setup={_time.monotonic() - t_start:.1f}s")
+    runner = ChatRunner(
+        connector,
+        llm=None,
+        meeting_record=meeting_record,
+        permission_classifier=None,
+        mode="wiretap",
+    )
+
+    _shutdown_called = False
+
+    def _shutdown(signum=None, frame=None):
+        nonlocal _shutdown_called
+        if _shutdown_called:
+            return
+        _shutdown_called = True
+        if signum:
+            log.info(f"Received signal {signum} — shutting down")
+        try:
+            marker = Path.home() / ".operator" / ".current_meeting"
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
+        _release_slip_lock()
+        runner.stop()
+        try:
+            attended = sorted(getattr(runner, "_attended_participants", set()))
+            self_name = getattr(runner, "_last_self_name", "") or ""
+            meeting_record.close(attended=attended, self_name=self_name)
+        except Exception as e:
+            log.warning(f"MeetingRecord.close() failed: {e}")
+        try:
+            roster = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
+            if roster.exists():
+                roster.unlink()
+        except OSError:
+            pass
+        connector.leave()
+        _kill_orphaned_children()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        log.info(f"Starting Operator wiretap mode — attached to {url}")
+        runner.run(url)
+    except KeyboardInterrupt:
+        log.info("Interrupted — detaching")
+    finally:
+        _shutdown()
+        ui.ok("Detached — meeting record saved. Goodbye.")
     return 0
 
 

@@ -127,7 +127,14 @@ class ChatRunner:
         llm,
         meeting_record: MeetingRecord | None = None,
         permission_classifier=None,
+        mode: str = "slip",
     ):
+        # `mode` controls the trigger-routing branch in `_dispatch_user_message`
+        # and the provider/llm wiring in `run()`. "slip" / "slip-required" /
+        # "slip-yolo" all spawn an inner-claude; "wiretap" does not — `llm`
+        # and `permission_classifier` must both be None and chat messages
+        # are persisted to the meeting record but never dispatched anywhere.
+        self._mode = mode
         self._connector = connector
         self._llm = llm
         self._record = meeting_record
@@ -312,16 +319,18 @@ class ChatRunner:
 
     def run(self, meeting_url):
         """Join the meeting and start the chat polling loop."""
-        log.info(f"ChatRunner: joining {meeting_url}")
-        self._wire_provider()
+        log.info(f"ChatRunner: joining {meeting_url} (mode={self._mode})")
+        if self._llm is not None:
+            self._wire_provider()
         # Open a meeting record for this URL if one wasn't provided.
         if self._record is None:
             slug = slug_from_url(meeting_url)
             self._record = MeetingRecord(
                 slug=slug,
-                meta={"meet_url": meeting_url},
+                meta={"meet_url": meeting_url, "mode": self._mode},
             )
-            self._llm.set_record(self._record)
+            if self._llm is not None:
+                self._llm.set_record(self._record)
         # Skip join if connector was already started (e.g. for parallel MCP init)
         if not self._connector.join_status:
             self._connector.join(meeting_url)
@@ -354,8 +363,15 @@ class ChatRunner:
         # Network-bound (one HTTPS GET, 5s timeout); silent on failure.
         # Daemon thread so the join return isn't delayed.
         threading.Thread(target=self._post_update_hint_if_newer, daemon=True).start()
-        trigger = config.TRIGGER_PHRASE
-        ui.ok(f"Listening for {trigger} — claude only replies when addressed.")
+        if self._mode == "wiretap":
+            slug = self._record.slug if self._record is not None else "?"
+            ui.ok(
+                f"Wiretap mode — recording to ~/.operator/history/{slug}.jsonl. "
+                f"Claude is not in the meeting; only listening."
+            )
+        else:
+            trigger = config.TRIGGER_PHRASE
+            ui.ok(f"Listening for {trigger} — claude only replies when addressed.")
         log.info("ChatRunner: starting chat loop")
         self._loop()
 
@@ -609,6 +625,10 @@ class ChatRunner:
         Pure routing — message persistence and seen-id tracking happen
         upstream, before this is invoked.
         """
+        if self._mode == "wiretap":
+            # Wiretap is passive — message already persisted upstream,
+            # nothing to forward to (no LLM in the loop).
+            return
         trigger = config.TRIGGER_PHRASE.lower()
         if trigger in text.lower():
             prompt = re.sub(

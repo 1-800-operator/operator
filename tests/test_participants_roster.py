@@ -150,7 +150,7 @@ def test_writer_handles_connector_failure_silently():
 
 def test_mcp_list_participants_reads_file_correctly():
     """list_participants formats the roster as plain text."""
-    from _1_800_operator.mcp_servers import transcript_server as ts_mod
+    from _1_800_operator.mcp_servers import record_server as ts_mod
 
     with tempfile.TemporaryDirectory() as tmp:
         roster_path = Path(tmp) / ".current_meeting_participants.json"
@@ -186,7 +186,7 @@ def test_mcp_list_participants_reads_file_correctly():
 
 def test_mcp_list_participants_empty_state():
     """No file → friendly empty-state prose, not an exception."""
-    from _1_800_operator.mcp_servers import transcript_server as ts_mod
+    from _1_800_operator.mcp_servers import record_server as ts_mod
     orig = ts_mod.PARTICIPANTS_FILE
     try:
         ts_mod.PARTICIPANTS_FILE = Path("/nonexistent/.current_meeting_participants.json")
@@ -200,7 +200,7 @@ def test_mcp_list_participants_empty_state():
 def test_mcp_list_participants_no_drift_when_present_equals_attended():
     """When nobody has left, the 'Attended at some point' section is
     suppressed — keeps output tight."""
-    from _1_800_operator.mcp_servers import transcript_server as ts_mod
+    from _1_800_operator.mcp_servers import record_server as ts_mod
     with tempfile.TemporaryDirectory() as tmp:
         roster_path = Path(tmp) / ".current_meeting_participants.json"
         payload = {

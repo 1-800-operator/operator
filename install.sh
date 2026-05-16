@@ -141,16 +141,20 @@ if command -v claude >/dev/null 2>&1; then
     err "Could not find tool venv python at ${MCP_PY_IN_TOOL} — skipping MCP registration."
   else
     # Idempotent: remove first (no-op if not registered), then re-add.
+    # Also remove the pre-S238 `transcript` name in case the user is
+    # upgrading across the rename (pre-launch, but a few dev installs
+    # have the old registration).
     claude mcp remove transcript --scope user >/dev/null 2>&1 || true
-    if claude mcp add transcript --scope user -- "${MCP_PY_IN_TOOL}" -m _1_800_operator.mcp_servers.transcript_server; then
-      info "Registered transcript MCP (user-scope)."
+    claude mcp remove operator-meeting-record --scope user >/dev/null 2>&1 || true
+    if claude mcp add operator-meeting-record --scope user -- "${MCP_PY_IN_TOOL}" -m _1_800_operator.mcp_servers.record_server; then
+      info "Registered operator-meeting-record MCP (user-scope)."
     else
-      err "Failed to register transcript MCP — re-run install.sh after the issue is resolved."
+      err "Failed to register operator-meeting-record MCP — re-run install.sh after the issue is resolved."
     fi
   fi
   echo
 else
-  warn "Claude Code CLI not found on PATH — skipping transcript MCP + plugin registration."
+  warn "Claude Code CLI not found on PATH — skipping operator-meeting-record MCP + plugin registration."
   warn "Install it from https://claude.ai/code, run \`claude login\`, then re-run install.sh."
   echo
 fi

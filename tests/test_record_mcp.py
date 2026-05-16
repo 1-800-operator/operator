@@ -21,12 +21,13 @@ import os
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ.setdefault("OPERATOR_BOT", "claude")
 
-from _1_800_operator.mcp_servers import transcript_server
+from _1_800_operator.mcp_servers import record_server
 
 
 REAL_LONG_FIXTURE = Path.home() / ".operator" / "history" / "avd-axqi-obq.jsonl"
@@ -44,16 +45,16 @@ def _write_fixture(entries):
 
 def _wire(path: str | None):
     """Point the resolver at a path (env var route) and clear marker."""
-    transcript_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker"
+    record_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker"
     if path is None:
-        os.environ.pop(transcript_server.ENV_PATH, None)
+        os.environ.pop(record_server.ENV_PATH, None)
     else:
-        os.environ[transcript_server.ENV_PATH] = path
+        os.environ[record_server.ENV_PATH] = path
 
 
 def _set_now(t: float):
     """Pin the tool's idea of 'now' for deterministic time-window tests."""
-    transcript_server._now = lambda: t
+    record_server._now = lambda: t
 
 
 def _build_multi_speaker_fixture(now: float) -> str:
@@ -111,18 +112,18 @@ def _build_multi_speaker_fixture(now: float) -> str:
 
 def test_no_path():
     _wire(None)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "captions are disabled" in out or "no meeting is active" in out, out
-    out2 = transcript_server.search_captions("anything")
+    out2 = record_server.search_captions("anything")
     assert "captions are disabled" in out2 or "no meeting is active" in out2, out2
-    out3 = transcript_server.list_speakers()
+    out3 = record_server.list_speakers()
     assert "captions are disabled" in out3 or "no meeting is active" in out3, out3
     print("✓ no path wired → empty-state on all three tools")
 
 
 def test_missing_file():
     _wire("/tmp/does-not-exist-xyz.jsonl")
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "no speech has been finalized" in out or "yet" in out, out
     print("✓ missing file → empty-state")
 
@@ -131,9 +132,9 @@ def test_empty_session():
     """File with only a session_start marker."""
     path = _write_fixture([{"kind": "session_start", "timestamp": time.time()}])
     _wire(path)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "empty so far" in out, out
-    out2 = transcript_server.list_speakers()
+    out2 = record_server.list_speakers()
     assert "No speakers" in out2 or "empty" in out2, out2
     os.unlink(path)
     print("✓ session_start only → empty-state")
@@ -152,7 +153,7 @@ def test_list_basic():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "Bob" in out and "hello world" in out, out
     assert "Alice" in out and "good morning" in out, out
     assert "hi" not in out, "chat-kind entries must not appear"
@@ -171,7 +172,7 @@ def test_list_session_boundary():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "NEW" in out, out
     assert "OLD" not in out, out
     os.unlink(path)
@@ -184,7 +185,7 @@ def test_list_time_window_around_x():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(start_minutes_ago=16, end_minutes_ago=14.5)
+    out = record_server.list_captions(start_minutes_ago=16, end_minutes_ago=14.5)
     # Window: between 14.5 and 16 min ago. Should include the 15.0 + 14.7 captions.
     assert "migration timeline" in out, out  # 15.0 min ago — inside
     assert "push it back" in out, out  # 14.7 min ago — inside
@@ -199,7 +200,7 @@ def test_list_invalid_window():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(start_minutes_ago=5, end_minutes_ago=10)
+    out = record_server.list_captions(start_minutes_ago=5, end_minutes_ago=10)
     assert "Invalid time window" in out, out
     assert "older boundary" in out, out
     os.unlink(path)
@@ -211,7 +212,7 @@ def test_list_speaker_filter():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(speaker="alice")  # case-insensitive
+    out = record_server.list_captions(speaker="alice")  # case-insensitive
     assert "migration timeline" in out, out
     assert "I think we need to push" not in out, "Bob's line leaked"
     assert "I can take Sentry triage" not in out, "Carol's line leaked"
@@ -224,7 +225,7 @@ def test_list_speaker_no_match():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(speaker="Mohammed")
+    out = record_server.list_captions(speaker="Mohammed")
     assert "No captions match the requested scope" in out, out
     assert "Mohammed" in out, "scope hint should echo the failed filter"
     os.unlink(path)
@@ -236,7 +237,7 @@ def test_list_last_n():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(last_n=3)
+    out = record_server.list_captions(last_n=3)
     # Last 3 in the fixture: "Bob: On it" (1.4), "Carol: live test" (1.0), "Alice: Ship it" (0.5)
     assert "Ship it" in out, out
     assert "On it" in out, out
@@ -256,10 +257,10 @@ def test_list_byte_ceiling_real_fixture():
     _wire(str(REAL_LONG_FIXTURE))
     # Don't pin _now — fixture is from April 23, captions will all be old; that's fine
     # because we're calling list_captions() with no time window.
-    transcript_server._now = time.time
-    out = transcript_server.list_captions(limit=10000)  # ask for everything
+    record_server._now = time.time
+    out = record_server.list_captions(limit=10000)  # ask for everything
     out_bytes = len(out.encode("utf-8"))
-    assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
+    assert out_bytes <= record_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced: {out_bytes} bytes returned"
     )
     assert "Operator recorded the entire meeting" in out, "truncation notice missing"
@@ -273,7 +274,7 @@ def test_search_basic():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("Sentry")
+    out = record_server.search_captions("Sentry")
     # 3 matches in fixture: "Sentry alerts", "Sentry triage", "did anyone see the new Sonnet"
     # Wait — only "Sentry alerts" and "Sentry triage" contain Sentry. Check.
     assert "Sentry alerts" in out, out
@@ -293,7 +294,7 @@ def test_search_case_insensitive():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("purple")
+    out = record_server.search_captions("purple")
     assert "Purple is the color" in out, out
     assert "PURPLE rain" in out, out
     os.unlink(path)
@@ -305,7 +306,7 @@ def test_search_no_match():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("kubernetes")
+    out = record_server.search_captions("kubernetes")
     assert "No captions match query 'kubernetes'" in out, out
     os.unlink(path)
     print("✓ search_captions empty result → clean empty-state")
@@ -316,9 +317,9 @@ def test_search_empty_query():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("")
+    out = record_server.search_captions("")
     assert "non-empty query" in out, out
-    out2 = transcript_server.search_captions("   ")
+    out2 = record_server.search_captions("   ")
     assert "non-empty query" in out2, out2
     os.unlink(path)
     print("✓ search_captions rejects empty/whitespace query")
@@ -330,7 +331,7 @@ def test_search_with_speaker():
     _wire(path)
     _set_now(now)
     # Bob mentions Sentry once ("Sentry alerts are still firing")
-    out = transcript_server.search_captions("Sentry", speaker="Bob")
+    out = record_server.search_captions("Sentry", speaker="Bob")
     assert "Sentry alerts" in out, out
     assert "Sentry triage" not in out, "Carol's line leaked through speaker filter"
     os.unlink(path)
@@ -343,7 +344,7 @@ def test_search_with_time_window():
     _wire(path)
     _set_now(now)
     # "migration" appears at 15.0 ("migration timeline") and 9.0 ("Back to the migration")
-    out = transcript_server.search_captions("migration", start_minutes_ago=10, end_minutes_ago=0)
+    out = record_server.search_captions("migration", start_minutes_ago=10, end_minutes_ago=0)
     assert "Back to the migration" in out, out
     assert "migration timeline" not in out, "Out-of-window match leaked"
     os.unlink(path)
@@ -357,7 +358,7 @@ def test_search_context_lines():
     _set_now(now)
     # "Mohammed" appears at 8.5 min ago. With context_lines=1 we should see
     # 9.0 ("Back to the migration") and 8.0 ("Postgres or SQLite") around it.
-    out = transcript_server.search_captions("Mohammed", context_lines=1)
+    out = record_server.search_captions("Mohammed", context_lines=1)
     assert "Mohammed pinged me" in out, out
     assert "Back to the migration" in out, "before-context missing"
     assert "Postgres or SQLite" in out, "after-context missing"
@@ -385,7 +386,7 @@ def test_search_limit_and_truncation_hint():
     path = _write_fixture(entries)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("test", limit=5)
+    out = record_server.search_captions("test", limit=5)
     assert "showing 5 of 25 matches" in out, out
     assert "narrow the time window" in out or "raise limit" in out, out
     os.unlink(path)
@@ -409,9 +410,9 @@ def test_search_byte_ceiling():
     path = _write_fixture(entries)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("diagnosis", limit=n)
+    out = record_server.search_captions("diagnosis", limit=n)
     out_bytes = len(out.encode("utf-8"))
-    assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
+    assert out_bytes <= record_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced on search: {out_bytes} bytes"
     )
     assert "Operator recorded the entire meeting" in out, "search byte-ceiling notice missing"
@@ -426,7 +427,7 @@ def test_speakers_multi():
     path = _build_multi_speaker_fixture(now)
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_speakers()
+    out = record_server.list_speakers()
     assert "Speakers in this session (3 total)" in out, out
     assert "Alice" in out and "Bob" in out and "Carol" in out, out
     # Most recent activity: Alice spoke 0.5 min ago → "0 min ago" or "30s ago"
@@ -443,7 +444,7 @@ def test_speakers_single():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_speakers()
+    out = record_server.list_speakers()
     assert "(1 total)" in out, out
     assert "Jojo Shapiro" in out, out
     os.unlink(path)
@@ -462,7 +463,7 @@ def test_missing_timestamp_does_not_crash():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions(start_minutes_ago=5)
+    out = record_server.list_captions(start_minutes_ago=5)
     assert "valid one" in out, out
     # Caption with missing timestamp gets timestamp=0 → filtered out by start>0 cutoff
     assert "no timestamp here" not in out, out
@@ -484,16 +485,16 @@ def test_marker_file_resolution():
     os.close(fd)
     with open(marker_path, "w") as f:
         f.write(marker_target)
-    transcript_server.MARKER_FILE = Path(marker_path)
-    os.environ[transcript_server.ENV_PATH] = env_target
+    record_server.MARKER_FILE = Path(marker_path)
+    os.environ[record_server.ENV_PATH] = env_target
     _set_now(now)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "from marker" in out, out
     assert "from env" not in out, "env var should not have won over marker file"
     os.unlink(marker_target)
     os.unlink(env_target)
     os.unlink(marker_path)
-    transcript_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+    record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
     print("✓ marker file resolves before env var fallback")
 
 
@@ -504,14 +505,135 @@ def test_marker_fallback_to_env():
         {"kind": "session_start", "timestamp": now - 60},
         {"kind": "caption", "sender": "Bob", "text": "fallback worked", "timestamp": now - 30},
     ])
-    transcript_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker_xyz"
-    os.environ[transcript_server.ENV_PATH] = env_target
+    record_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker_xyz"
+    os.environ[record_server.ENV_PATH] = env_target
     _set_now(now)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "fallback worked" in out, out
     os.unlink(env_target)
-    transcript_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+    record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
     print("✓ marker missing → env var fallback works")
+
+
+def _make_history_dir(meetings: dict[str, list[dict]]) -> Path:
+    """Write multiple JSONL files to a temp HISTORY_DIR for find_meetings
+    tests. Each (slug, entries) pair becomes one meeting file."""
+    tmp = Path(tempfile.mkdtemp(prefix="op_history_"))
+    for slug, entries in meetings.items():
+        path = tmp / f"{slug}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+    return tmp
+
+
+def test_find_meetings_by_participant():
+    now = time.time()
+    tmp = _make_history_dir({
+        "aaa-bbbb-ccc": [
+            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "slip"},
+            {"kind": "session_start", "timestamp": now - 3600},
+            {"kind": "chat", "sender": "Alice", "text": "hi", "timestamp": now - 3500},
+            {"kind": "participants_final", "timestamp": now - 100,
+             "attended": ["Alice", "Bob"], "currently_present": [], "self_name": "operator"},
+        ],
+        "ddd-eeee-fff": [
+            {"kind": "meta", "slug": "ddd-eeee-fff", "meet_url": "https://meet.google.com/ddd-eeee-fff", "mode": "wiretap"},
+            {"kind": "session_start", "timestamp": now - 1800},
+            {"kind": "participants_final", "timestamp": now - 50,
+             "attended": ["Charlie", "Dana"], "currently_present": [], "self_name": "operator"},
+        ],
+    })
+    record_server.HISTORY_DIR = tmp
+    out = record_server.find_meetings(participants=["alice"])
+    assert "aaa-bbbb-ccc" in out, out
+    assert "ddd-eeee-fff" not in out, out
+    out2 = record_server.find_meetings(participants=["dana"])
+    assert "ddd-eeee-fff" in out2, out2
+    out3 = record_server.find_meetings(participants=["alice", "bob"])
+    assert "aaa-bbbb-ccc" in out3, out3
+    out4 = record_server.find_meetings(participants=["alice", "charlie"])
+    assert "No meetings matched" in out4, out4
+    print("✓ find_meetings: participant filter matches attended list (all needles required)")
+
+
+def test_find_meetings_fallback_to_chat_senders_when_no_participants_final():
+    """When participants_final is absent (e.g. operator crashed), fall back
+    to deriving attendees from chat senders + caption speakers."""
+    now = time.time()
+    tmp = _make_history_dir({
+        "crashed-meeting": [
+            {"kind": "meta", "slug": "crashed-meeting", "meet_url": "https://meet.google.com/crashed-meeting", "mode": "slip"},
+            {"kind": "session_start", "timestamp": now - 1000},
+            {"kind": "chat", "sender": "Erin", "text": "hello", "timestamp": now - 900},
+            {"kind": "caption", "sender": "Frank", "text": "spoken", "timestamp": now - 800},
+            # No participants_final, no meeting_end — simulated crash.
+        ],
+    })
+    record_server.HISTORY_DIR = tmp
+    out = record_server.find_meetings(participants=["erin"])
+    assert "crashed-meeting" in out, out
+    out2 = record_server.find_meetings(participants=["frank"])
+    assert "crashed-meeting" in out2, out2
+    print("✓ find_meetings: falls back to chat/caption senders when participants_final absent")
+
+
+def test_find_meetings_by_date_range():
+    today = datetime.now()
+    yesterday = today - timedelta(days=1)
+    last_week = today - timedelta(days=7)
+    tmp = _make_history_dir({
+        "today-meeting": [
+            {"kind": "session_start", "timestamp": today.timestamp()},
+            {"kind": "chat", "sender": "A", "text": "x", "timestamp": today.timestamp() + 10},
+        ],
+        "yesterday-meeting": [
+            {"kind": "session_start", "timestamp": yesterday.timestamp()},
+            {"kind": "chat", "sender": "A", "text": "x", "timestamp": yesterday.timestamp() + 10},
+        ],
+        "last-week-meeting": [
+            {"kind": "session_start", "timestamp": last_week.timestamp()},
+            {"kind": "chat", "sender": "A", "text": "x", "timestamp": last_week.timestamp() + 10},
+        ],
+    })
+    record_server.HISTORY_DIR = tmp
+    today_iso = today.strftime("%Y-%m-%d")
+    yest_iso = yesterday.strftime("%Y-%m-%d")
+    out = record_server.find_meetings(date_range_iso=today_iso)
+    assert "today-meeting" in out and "yesterday-meeting" not in out and "last-week-meeting" not in out, out
+    out2 = record_server.find_meetings(date_range_iso=f"{yest_iso}/{today_iso}")
+    assert "today-meeting" in out2 and "yesterday-meeting" in out2 and "last-week-meeting" not in out2, out2
+    print("✓ find_meetings: date_range_iso scopes to single date and ranges (inclusive end-of-day)")
+
+
+def test_find_meetings_url_contains():
+    now = time.time()
+    tmp = _make_history_dir({
+        "aaa-bbbb-ccc": [
+            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "slip"},
+            {"kind": "session_start", "timestamp": now},
+        ],
+        "zzz-yyyy-xxx": [
+            {"kind": "meta", "slug": "zzz-yyyy-xxx", "meet_url": "https://meet.google.com/zzz-yyyy-xxx", "mode": "slip"},
+            {"kind": "session_start", "timestamp": now},
+        ],
+    })
+    record_server.HISTORY_DIR = tmp
+    out = record_server.find_meetings(url_contains="zzz")
+    assert "zzz-yyyy-xxx" in out and "aaa-bbbb-ccc" not in out, out
+    print("✓ find_meetings: url_contains case-insensitive substring filter works")
+
+
+def test_find_meetings_no_filters_returns_everything():
+    now = time.time()
+    tmp = _make_history_dir({
+        "m1": [{"kind": "session_start", "timestamp": now}],
+        "m2": [{"kind": "session_start", "timestamp": now - 100}],
+    })
+    record_server.HISTORY_DIR = tmp
+    out = record_server.find_meetings()
+    assert "m1" in out and "m2" in out, out
+    print("✓ find_meetings: no filters → returns everything (like list_meetings)")
 
 
 def test_format_includes_clock_and_speaker():
@@ -522,7 +644,7 @@ def test_format_includes_clock_and_speaker():
     ])
     _wire(path)
     _set_now(now)
-    out = transcript_server.list_captions()
+    out = record_server.list_captions()
     assert "[" in out and "Jojo Shapiro" in out, out
     assert "my name is Mohammed" in out, out
     os.unlink(path)
@@ -561,4 +683,10 @@ if __name__ == "__main__":
     test_marker_file_resolution()
     test_marker_fallback_to_env()
     test_format_includes_clock_and_speaker()
-    print("\nAll transcript MCP tests passed.")
+    # find_meetings
+    test_find_meetings_by_participant()
+    test_find_meetings_fallback_to_chat_senders_when_no_participants_final()
+    test_find_meetings_by_date_range()
+    test_find_meetings_url_contains()
+    test_find_meetings_no_filters_returns_everything()
+    print("\nAll meeting-record MCP tests passed.")

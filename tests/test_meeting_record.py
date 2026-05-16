@@ -311,6 +311,60 @@ def test_tail_during_concurrent_appends():
 
 
 # ---------------------------------------------------------------------------
+# close() — meeting-end lifecycle events
+# ---------------------------------------------------------------------------
+
+def test_close_writes_participants_final_and_meeting_end():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rec = MeetingRecord(slug="abc", root=root, meta={"meet_url": "https://meet.google.com/abc"})
+        rec.append(sender="alice", text="hello")
+        rec.close(
+            attended=["alice", "bob"],
+            currently_present=["bob"],
+            self_name="operator",
+        )
+        entries = read_lines(rec.path)
+        kinds = [e.get("kind") for e in entries]
+        assert kinds[-2:] == ["participants_final", "meeting_end"], kinds
+        final = entries[-2]
+        assert final["attended"] == ["alice", "bob"], final
+        assert final["currently_present"] == ["bob"], final
+        assert final["self_name"] == "operator", final
+        print("  close: writes participants_final + meeting_end: OK")
+
+
+def test_close_is_idempotent():
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="abc", root=Path(tmp), meta={})
+        rec.close(attended=["alice"])
+        rec.close(attended=["alice"])  # second call should be a no-op
+        rec.close()
+        kinds = [e.get("kind") for e in read_lines(rec.path)]
+        assert kinds.count("meeting_end") == 1, kinds
+        assert kinds.count("participants_final") == 1, kinds
+        print("  close: idempotent across repeat calls: OK")
+
+
+def test_close_without_attended_skips_participants_final():
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="abc", root=Path(tmp), meta={})
+        rec.close()  # no attended kwarg
+        kinds = [e.get("kind") for e in read_lines(rec.path)]
+        assert "participants_final" not in kinds, kinds
+        assert kinds[-1] == "meeting_end", kinds
+        print("  close: no attended → skip participants_final, still write meeting_end: OK")
+
+
+def test_close_in_memory_mode_is_noop():
+    rec = MeetingRecord(slug=None)  # in-memory mode
+    rec.close(attended=["alice"])
+    # No path, no crash, no entries appended.
+    assert rec.path is None
+    print("  close: in-memory mode is a no-op: OK")
+
+
+# ---------------------------------------------------------------------------
 # Run all
 # ---------------------------------------------------------------------------
 
@@ -325,6 +379,10 @@ if __name__ == "__main__":
         test_concurrent_appends_no_torn_lines,
         test_history_dir_and_jsonl_are_owner_only,
         test_tail_during_concurrent_appends,
+        test_close_writes_participants_final_and_meeting_end,
+        test_close_is_idempotent,
+        test_close_without_attended_skips_participants_final,
+        test_close_in_memory_mode_is_noop,
     ]
     failures = []
     for t in tests:

@@ -113,6 +113,46 @@ class MeetingRecord:
             log.warning(f"MeetingRecord: chmod 0o600 on {self.path} failed: {e}")
         log.info(f"MeetingRecord opened {self.path}")
 
+    def close(self, *, attended: list[str] | None = None,
+              currently_present: list[str] | None = None,
+              self_name: str = "") -> None:
+        """Write meeting-end lifecycle events: an optional `participants_final`
+        line (if `attended` is provided) followed by a `meeting_end` line.
+
+        Read by `find_meetings` and `list_meetings` to surface attendee
+        lists for post-meeting lookup without scanning the full event
+        stream. The transient `.current_meeting_participants.json` snapshot
+        covers live queries; `participants_final` is the durable record
+        baked into the JSONL itself at meeting end.
+
+        Idempotent: subsequent calls are no-ops (a second `meeting_end`
+        would imply the meeting "ended twice"). In-memory mode (no path)
+        is a no-op — post-meeting lookup needs disk-resident JSONLs.
+        """
+        if self.path is None:
+            return
+        with self._lock:
+            if getattr(self, "_closed", False):
+                return
+            self._closed = True
+            now = time.time()
+            entries: list[dict] = []
+            if attended is not None:
+                entries.append({
+                    "kind": "participants_final",
+                    "timestamp": now,
+                    "currently_present": list(currently_present or []),
+                    "attended": list(attended),
+                    "self_name": self_name or "",
+                })
+            entries.append({"kind": "meeting_end", "timestamp": now})
+            try:
+                with self.path.open("a", encoding="utf-8") as f:
+                    for entry in entries:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except OSError as e:
+                log.warning(f"MeetingRecord close write failed: {e}")
+
     def append(self, sender: str, text: str, kind: str = "chat",
                timestamp: float | None = None) -> dict:
         entry = {
