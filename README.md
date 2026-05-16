@@ -89,8 +89,14 @@ is Operator-owned and separate from your everyday Chrome.
 1. Operator opens a dedicated "slip" Chrome window, joins the meeting URL,
    and opens the chat panel.
 2. It watches chat for messages containing `@claude`. Operator is
-   "speak when spoken to" — it only acts on the trigger phrase.
-3. Each `@claude` message is forwarded to a long-lived interactive `claude`
+   "speak when spoken to" — it only acts on the trigger phrase. Once you
+   mention `@claude`, you have **90 seconds** of follow-up without
+   re-mentioning — the bot stays in conversation with you and treats
+   your next message as a continuation. The window slides forward on
+   every reply; a different sender has to `@claude` to take the floor.
+   Rapid corrections within ~2 seconds collapse to your latest message,
+   so a typo + fix sends one prompt, not two.
+3. Each forwarded message is handed to a long-lived interactive `claude`
    subprocess (one per meeting) that owns its own tool loop.
 4. Claude's reply streams back into the meeting chat, prefixed with
    `[🤖 Claude]` so the room can tell the bot's messages from yours.

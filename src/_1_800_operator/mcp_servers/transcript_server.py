@@ -19,6 +19,12 @@ Live-meeting tools (operate on the currently-attached meeting via the
         Speakers heard so far this session, with caption counts and
         time-since-last-spoke.
 
+  - list_participants()
+        Currently-present and cumulative-attended roster of the live
+        meeting (DOM-derived, includes silent attendees who haven't
+        spoken or chatted). Reads from ~/.operator/.current_meeting_participants.json
+        which the operator polling loop refreshes every few seconds.
+
 Post-meeting recall tools (operate on any meeting in ~/.operator/history/
 by slug, or default to the most recent — read-anywhere semantics so a
 Claude Code session that wasn't the one running the meeting can still
@@ -73,6 +79,7 @@ from mcp.server.fastmcp import FastMCP
 
 ENV_PATH = "OPERATOR_MEETING_RECORD_PATH"
 MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+PARTICIPANTS_FILE = Path.home() / ".operator" / ".current_meeting_participants.json"
 HISTORY_DIR = Path.home() / ".operator" / "history"
 
 RESULT_BYTE_CEILING = 12000
@@ -458,6 +465,71 @@ def list_speakers() -> str:
             ago_str = f"{int(ago / 3600)}h{int((ago % 3600) / 60)}m ago"
         lines.append(f"  {name} — {counts[name]} captions, last spoke {ago_str}")
 
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_participants() -> str:
+    """Return the live meeting's participant roster — present + attended.
+
+    Operator's polling loop snapshots the Meet participant panel every
+    few seconds. This tool reads the most recent snapshot and reports
+    BOTH the currently-present participants AND the cumulative list of
+    everyone who has been in the meeting at any point (the latter does
+    not shrink when someone leaves — useful for "schedule a follow-up
+    with everyone who attended" even if some attendees have dropped).
+
+    Call this BEFORE answering whenever a meeting-chat message asks
+    about attendance or scheduling: "who's here?", "who was on the
+    call?", "remind me who attended", "schedule a follow-up with
+    everyone". DOM-derived from the participant panel, so it includes
+    silent attendees who haven't spoken or chatted — list_speakers
+    (caption-derived) and the chat sender list only see the talkative
+    subset.
+
+    Returns:
+        Plain-text roster, one section for currently-present, one for
+        the cumulative attended list, plus a freshness note. Empty
+        state prose returned as text rather than raising.
+    """
+    if not PARTICIPANTS_FILE.exists():
+        return (
+            "No participant roster available yet — operator hasn't joined a "
+            "meeting, or the polling loop hasn't completed its first "
+            "participant check."
+        )
+    try:
+        data = json.loads(PARTICIPANTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return f"Could not read participant roster: {e}"
+
+    currently = data.get("currently_present") or []
+    attended = data.get("attended") or []
+    updated_at = data.get("updated_at")
+    self_name = data.get("self_name") or ""
+
+    if not currently and not attended:
+        return "Participant roster is empty — no remote participants seen yet."
+
+    lines: list[str] = []
+    lines.append(f"Currently in the meeting ({len(currently)}):")
+    if currently:
+        for n in currently:
+            lines.append(f"  - {n}")
+    else:
+        lines.append("  (no remote participants right now)")
+    if attended != currently:
+        lines.append("")
+        lines.append(f"Attended at some point ({len(attended)}):")
+        for n in attended:
+            marker = " (still here)" if n in currently else " (left)"
+            lines.append(f"  - {n}{marker}")
+    if self_name:
+        lines.append("")
+        lines.append(f"(Operator joined this meeting as '{self_name}'; that tile is excluded from the lists above.)")
+    if isinstance(updated_at, (int, float)):
+        age = max(0, int(_now() - updated_at))
+        lines.append(f"(roster refreshed {age}s ago)")
     return "\n".join(lines)
 
 

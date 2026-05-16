@@ -55,6 +55,7 @@ BLEED_DEDUPE_SIMILARITY     = 0.75
 ENV_FILE            = str(Path.home() / ".operator" / ".env")                # shared .env for API keys
 DEBUG_DIR           = str(Path.home() / ".operator" / "debug")               # screenshots + HTML dumps from save_debug() and adapter failure paths
 LAST_FAILURE_PATH   = str(Path.home() / ".operator" / "last_failure.json")   # post-failure snapshot doctor reads to explain "claude is unavailable" — cleared on each successful slip start, overwritten by the next failure
+CURRENT_MEETING_PARTICIPANTS_PATH = str(Path.home() / ".operator" / ".current_meeting_participants.json")  # roster file written by chat_runner, read by the transcript MCP's list_participants tool — cleared on meeting leave
 
 
 def relativize_home(p):

@@ -190,6 +190,8 @@ Before you run a tool — reading a file, searching, running a command — say w
 
 Don't use any tool that pops up a UI for the user to click — specifically AskUserQuestion and plan mode (EnterPlanMode / ExitPlanMode). Both will hang the meeting because participants can't click anything here. If you need to ask something, type it as a normal chat message and wait for a reply. If you'd normally use plan mode, just write the plan inline as chat text instead.
 
+If you need to know who's in the meeting — to address someone by name, schedule a follow-up, or anything that depends on attendance — call the `list_participants` tool from the operator-transcript MCP. It returns both who's here right now and who has attended at any point (the latter doesn't shrink when someone leaves, so it's the right source for "who was on the call?").
+
 Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
 # Appended to _BRIEFING when guarded mode is on. Operator's

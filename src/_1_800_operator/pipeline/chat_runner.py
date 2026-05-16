@@ -106,6 +106,17 @@ PARTICIPANT_CHECK_INTERVAL = 3  # seconds between participant count checks
 # each paragraph as a distinct message rather than a burst.
 STREAM_PARAGRAPH_MIN_INTERVAL = 0.25
 
+# Sticky conversation window. Once a sender @claude's, follow-up messages
+# from that same sender within CONTINUATION_WINDOW_SECONDS skip the trigger
+# requirement — the bot is "in conversation" with them. The window slides
+# forward on every forwarded message (trigger or continuation). New
+# messages are debounced by CONTINUATION_DEBOUNCE_SECONDS so a quick
+# correction ("thanks — wait, no, do Y instead") collapses into a single
+# forwarded prompt (the last one). The window is sender-scoped: a
+# different participant must @claude to address the bot.
+CONTINUATION_WINDOW_SECONDS = 90.0
+CONTINUATION_DEBOUNCE_SECONDS = 2.0
+
 
 class ChatRunner:
     """Polls meeting chat and responds to messages."""
@@ -215,6 +226,26 @@ class ChatRunner:
         self._permreq_active: dict | None = None
         self._permreq_seen_at_post: set[str] = set()
         self._permreq_safety_timeout_s: float = 125.0
+
+        # Sticky conversation window state. See CONTINUATION_WINDOW_SECONDS
+        # / CONTINUATION_DEBOUNCE_SECONDS at the module top for the spec.
+        # _continuation_pending holds the last buffered non-trigger
+        # follow-up (overwritten on each new one — only the latest goes
+        # through, debounced); _flush_continuation_if_ready drains it
+        # from the polling loop once the debounce window elapses.
+        self._continuation_sender: str | None = None
+        self._continuation_open_until: float = 0.0
+        self._continuation_pending: dict | None = None
+
+        # Cumulative attended-participants set. We add anyone we ever
+        # saw in the participant panel; we never remove. Used by the
+        # transcript MCP's list_participants tool so claude can answer
+        # "who was in this meeting?" correctly even if someone joined,
+        # spoke, and left before the question — the currently-present
+        # list alone would drop them. Persisted to disk each tick on
+        # the same cadence as the alone-detection participant check.
+        self._attended_participants: set[str] = set()
+        self._last_self_name: str = ""
 
     def _wire_provider(self):
         """Cache the ClaudeCLIProvider and wire its callbacks.
@@ -391,9 +422,14 @@ class ChatRunner:
                 break
 
             # Slip mode is "speak when spoken to" — claude only responds
-            # to messages containing the trigger phrase, regardless of
-            # participant count.
+            # to messages containing the trigger phrase OR to follow-ups
+            # from the same sender inside the sticky conversation window.
             self._process_messages(messages)
+
+            # If a debounced continuation has settled, dispatch it now.
+            # Blocking (an LLM call) — pause the poll loop until it
+            # returns; matches the regular trigger-message dispatch.
+            self._flush_continuation_if_ready()
 
             # Flush any sends queued by off-thread callers since the
             # last iteration. Between-turn coverage; in-turn drain
@@ -437,6 +473,10 @@ class ChatRunner:
             self._participant_count = new_count
         except Exception as e:
             log.warning(f"ChatRunner: get_participant_count failed: {e}")
+
+        # Piggyback the roster write on the same tick. Best-effort: a
+        # connector failure here must not interfere with auto-leave.
+        self._refresh_roster_file()
 
         if self._participant_count > 1:
             self._saw_others = True
@@ -554,19 +594,148 @@ class ChatRunner:
     def _dispatch_user_message(self, text: str, sender: str = "", *, t_dom: int = 0, t_drained: int = 0):
         """Trigger-check a chat message and route it to the LLM if addressed.
 
+        Three routing outcomes:
+          1. Message contains the trigger phrase → strip the prefix,
+             dispatch immediately, open a sticky conversation window
+             with the sender.
+          2. No trigger but `sender` is inside the active sticky window
+             → buffer as a pending continuation. The polling loop fires
+             `_flush_continuation_if_ready` to dispatch the buffered
+             message after CONTINUATION_DEBOUNCE_SECONDS of quiet —
+             collapsing rapid corrections into the last typed message.
+          3. Otherwise → stored as context (the LLM still sees it on the
+             next turn via MeetingRecord), no dispatch.
+
         Pure routing — message persistence and seen-id tracking happen
         upstream, before this is invoked.
         """
         trigger = config.TRIGGER_PHRASE.lower()
-        if trigger not in text.lower():
-            log.debug("ChatRunner: stored as context (no trigger phrase)")
+        if trigger in text.lower():
+            prompt = re.sub(
+                re.escape(config.TRIGGER_PHRASE) + r'[,:]?\s*',
+                '', text, count=1, flags=re.IGNORECASE,
+            ).strip()
+            if prompt:
+                self._handle_message(prompt, sender=sender, t_dom=t_dom, t_drained=t_drained)
+                self._open_continuation_window(sender)
             return
-        prompt = re.sub(
-            re.escape(config.TRIGGER_PHRASE) + r'[,:]?\s*',
-            '', text, count=1, flags=re.IGNORECASE,
-        ).strip()
-        if prompt:
-            self._handle_message(prompt, sender=sender, t_dom=t_dom, t_drained=t_drained)
+
+        if self._continuation_active(sender):
+            # Overwrite any prior pending — debounce keeps only the
+            # latest. If the user types two messages in quick
+            # succession the bot should respond to the most recent
+            # one (the typical correction/clarification pattern).
+            self._continuation_pending = {
+                "sender": sender,
+                "text": text,
+                "ts": time.time(),
+                "t_dom": t_dom,
+                "t_drained": t_drained,
+            }
+            log.debug(
+                f"ChatRunner: buffered continuation from {sender!r}: {text!r}"
+            )
+            return
+
+        log.debug("ChatRunner: stored as context (no trigger phrase)")
+
+    def _open_continuation_window(self, sender: str):
+        """Mark the start (or extension) of a sticky conversation window
+        with `sender`. Subsequent non-trigger messages from this sender
+        within CONTINUATION_WINDOW_SECONDS are treated as follow-ups.
+        Anonymous senders (empty string) can't be tracked across
+        messages so we skip — that participant must @claude every turn.
+        """
+        if not sender:
+            return
+        self._continuation_sender = sender
+        self._continuation_open_until = time.time() + CONTINUATION_WINDOW_SECONDS
+
+    def _continuation_active(self, sender: str) -> bool:
+        """True iff `sender` is the currently-stuck participant and
+        within the window."""
+        if not sender or not self._continuation_sender:
+            return False
+        if sender.lower() != self._continuation_sender.lower():
+            return False
+        return time.time() < self._continuation_open_until
+
+    def _refresh_roster_file(self):
+        """Snapshot the current + cumulative participant roster to disk.
+
+        Read by the transcript MCP's `list_participants` tool so claude
+        can answer "who's in the meeting?" and "who attended?" against
+        live DOM state rather than the indirect spoken/chatter subset.
+
+        The bot's own display name is filtered out of both lists so
+        claude doesn't get confused about whether it should address
+        itself (the local tile shows up alongside remote participants
+        in the same DOM query).
+
+        Best-effort: failure to read names or write the file is logged
+        and discarded — the auto-leave path that shares this tick must
+        not be blocked by roster bookkeeping.
+        """
+        try:
+            names = self._connector.get_participant_names()
+        except Exception as e:
+            log.debug(f"ChatRunner: get_participant_names failed: {e}")
+            names = None
+        try:
+            self_name = self._connector.get_self_name() or ""
+        except Exception as e:
+            log.debug(f"ChatRunner: get_self_name failed: {e}")
+            self_name = ""
+        if self_name:
+            self._last_self_name = self_name
+
+        if not isinstance(names, list):
+            return
+
+        bot = (self._last_self_name or "").strip().lower()
+        currently_present = [
+            n for n in names if n and (not bot or n.strip().lower() != bot)
+        ]
+        for n in currently_present:
+            self._attended_participants.add(n)
+
+        payload = {
+            "currently_present": currently_present,
+            "attended": sorted(self._attended_participants),
+            "self_name": self._last_self_name,
+            "updated_at": time.time(),
+        }
+        path = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning(f"ChatRunner: could not write roster {path}: {e}")
+
+    def _flush_continuation_if_ready(self):
+        """Dispatch the buffered continuation if the debounce window
+        has elapsed. Called from the polling loop between iterations.
+        No-op when nothing is buffered or the user is still typing
+        (debounce window not yet elapsed)."""
+        pending = self._continuation_pending
+        if pending is None:
+            return
+        if (time.time() - pending["ts"]) < CONTINUATION_DEBOUNCE_SECONDS:
+            return
+        self._continuation_pending = None
+        log.info(
+            f"ChatRunner: dispatching debounced continuation from "
+            f"{pending['sender']!r}: {pending['text']!r}"
+        )
+        self._handle_message(
+            pending["text"],
+            sender=pending["sender"],
+            t_dom=pending["t_dom"],
+            t_drained=pending["t_drained"],
+        )
+        self._open_continuation_window(pending["sender"])
 
     def _emit_turn_done(self, *, failed: bool = False):
         """Close out the per-turn stdout heartbeat.
