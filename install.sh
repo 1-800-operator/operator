@@ -300,6 +300,47 @@ if [ "${OS}" = "macos" ]; then
       rm -rf "${INSTALLED_APP}"
       cp -R "${PREBUILT_APP}" "${INSTALLED_APP}"
       info "Installed signed helper: ${INSTALLED_APP}"
+
+      # TCC warmup. The helper bundle carries its own TCC identity
+      # (com.1-800-operator.audio-capture). When the slip flow exec's the
+      # inner binary as a subprocess of operator (which is itself a child
+      # of the user's terminal/IDE), macOS's responsible-process
+      # attribution can land on the wrong app and silently deny without
+      # ever surfacing the dialog. Invoking via `open -W -a` here forces
+      # Launch Services to attribute the prompt to the helper bundle
+      # itself, so the user sees the dialogs once at install time and
+      # grants them cleanly — instead of hitting a broken-by-default slip
+      # on first use. See debug spike 2026-05-15 for the attribution
+      # validation (mic granted cleanly; screen recording hit Apple's
+      # post-deny cooldown only because the test env was over-cycled).
+      HELPER_BIN="${INSTALLED_APP}/Contents/MacOS/operator-audio-capture"
+      PROBE_BEFORE="$("${HELPER_BIN}" --probe 2>/dev/null || echo '{}')"
+      if echo "${PROBE_BEFORE}" | grep -q '"screen_recording":"ok"' \
+        && echo "${PROBE_BEFORE}" | grep -q '"microphone":"ok"'; then
+        info "Audio permissions already granted (Screen Recording + Microphone)"
+      else
+        bold "macOS will now request Screen Recording and Microphone permissions"
+        info "  These are required for slip mode to capture meeting audio."
+        info "  Click Allow on each dialog as it appears. (Take a few seconds — the"
+        info "  helper will exit on its own once the prompts are dismissed.)"
+        # `-W` waits for the launched app to exit. The helper requests
+        # both perms in its init path, then waits on stdin which is
+        # /dev/null here, so it exits via the 10s watchdog. `-n` opens
+        # a fresh instance even if a stale one is around. 2>/dev/null
+        # suppresses a benign Launch Services warning some setups emit.
+        open -W -n -a "${INSTALLED_APP}" 2>/dev/null || true
+        PROBE_AFTER="$("${HELPER_BIN}" --probe 2>/dev/null || echo '{}')"
+        if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' \
+          && echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
+          info "✓ Audio permissions granted (Screen Recording + Microphone)"
+        else
+          warn "Audio permissions not fully granted yet (probe: ${PROBE_AFTER})."
+          warn "Slip mode will run, but captions may be silent until you grant access."
+          warn "  Fix: System Settings → Privacy & Security → Screen Recording (and Microphone)"
+          warn "       → '+' → ${INSTALLED_APP} → enable"
+          warn "       Then re-run install.sh or 'operator doctor' to re-check."
+        fi
+      fi
     elif command -v swiftc >/dev/null 2>&1; then
       # Path (b): dev fallback. Mic-only; system audio will be denied by TCC.
       SWIFT_SRC="${PKG_SWIFT_DIR}/operator-audio-capture.swift"
