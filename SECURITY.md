@@ -31,6 +31,28 @@ Reporters who follow coordinated disclosure are credited by name (or handle,
 your preference) in the release notes and GitHub Security Advisory that ships
 the fix. No bug bounty — this is a solo open-source project.
 
+## Data locality — what we do and don't see
+
+Operator is a local tool. The substance of this matters for security:
+
+- **No Operator-side server.** There is no service we run that your traffic
+  flows through. No account, no API key issued by us, no telemetry, no
+  remote storage.
+- **Your data stays on your machine.** Meeting chat, captions, transcripts,
+  and the dedicated slip Chrome profile all live under `~/.operator/` (file
+  mode `600` / dir mode `700`) and `/tmp/operator.log`. None of it ever
+  leaves your machine via anything operator does.
+- **The LLM calls are yours.** Operator drives your existing `claude` CLI
+  using your existing Claude subscription. Anthropic's data-handling
+  policies for Claude Code apply unchanged; we are not in that loop.
+- **Local code, local supply chain.** The CLI is `uv tool install`'d from
+  source, the plugin is your `~/.claude/plugins/` install, the bundled MCP
+  server runs in-process. No remote-control surface ships in either.
+
+That framing is the right lens for everything below: the permissions
+operator asks for are broad, but the access they unlock stays inside the
+boundary of your machine.
+
 ## Threat model and hardening
 
 `docs/security.md` is the canonical threat model — trust boundaries, the
@@ -41,11 +63,17 @@ section.
 
 ## Known design tradeoffs — please read before filing
 
-Operator makes a small number of deliberate, documented security tradeoffs.
-The behaviors below are **intended design**, fully described in
-`docs/security.md`, and are **not** treated as vulnerabilities. We list them
-here explicitly so a report isn't spent rediscovering a tradeoff we already
-ship knowingly.
+Operator asks for a lot of capability so the bot can be genuinely useful in
+a meeting — read files, run shell commands, call MCP tools. The tradeoffs
+below are the cost of that capability. They are **intended design**, fully
+described in `docs/security.md`, and **not** treated as vulnerabilities.
+Listed here explicitly so a report isn't spent rediscovering a tradeoff
+we already ship knowingly — and so the scope of the ask is plain.
+
+The mitigating frame, as above: everything these permissions touch stays
+on your machine. There is no Operator-side server to exfiltrate to. The
+risk surface is local-machine compromise via prompt-injection on a
+fully-permissioned local agent, not data leaving your control.
 
 - **The meeting brain runs with all permissions bypassed.** Operator spawns
   its inner-`claude` subprocess with `--dangerously-skip-permissions`,
