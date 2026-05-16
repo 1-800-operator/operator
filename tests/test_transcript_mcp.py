@@ -262,7 +262,7 @@ def test_list_byte_ceiling_real_fixture():
     assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced: {out_bytes} bytes returned"
     )
-    assert "omitted to fit response size" in out, "truncation notice missing"
+    assert "Operator recorded the entire meeting" in out, "truncation notice missing"
     print(f"✓ byte ceiling holds at {out_bytes} bytes against 442-line real fixture")
 
 
@@ -393,26 +393,28 @@ def test_search_limit_and_truncation_hint():
 
 
 def test_search_byte_ceiling():
-    """Adversarial: 30 long monologue captions all matching the query."""
+    """Adversarial: many long monologue captions all matching the query.
+    Sized to overshoot RESULT_BYTE_CEILING (~80KB) so the ceiling fires."""
     now = time.time()
     long_text = "diagnosis " * 80  # ~800 chars per caption
-    entries = [{"kind": "session_start", "timestamp": now - 600}]
-    for i in range(30):
+    n = 150  # 150 × ~850 bytes ≈ 127KB raw, well over the 80KB ceiling
+    entries = [{"kind": "session_start", "timestamp": now - (n * 10 + 100)}]
+    for i in range(n):
         entries.append({
             "kind": "caption",
             "sender": "Bob",
             "text": f"{long_text} — segment {i}",
-            "timestamp": now - (590 - i * 15),
+            "timestamp": now - ((n * 10 + 100) - i * 10),
         })
     path = _write_fixture(entries)
     _wire(path)
     _set_now(now)
-    out = transcript_server.search_captions("diagnosis", limit=30)
+    out = transcript_server.search_captions("diagnosis", limit=n)
     out_bytes = len(out.encode("utf-8"))
     assert out_bytes <= transcript_server.RESULT_BYTE_CEILING + 500, (
         f"byte ceiling not enforced on search: {out_bytes} bytes"
     )
-    assert "omitted to fit response size" in out, "search byte-ceiling notice missing"
+    assert "Operator recorded the entire meeting" in out, "search byte-ceiling notice missing"
     os.unlink(path)
     print(f"✓ search_captions byte ceiling holds ({out_bytes} bytes)")
 

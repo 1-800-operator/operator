@@ -82,7 +82,14 @@ MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
 PARTICIPANTS_FILE = Path.home() / ".operator" / ".current_meeting_participants.json"
 HISTORY_DIR = Path.home() / ".operator" / "history"
 
-RESULT_BYTE_CEILING = 12000
+# Per-tool response ceiling. A typical 1-hour meeting with ~500 caption
+# events renders to ~50KB; 80KB fits most meetings in one call, which is
+# the right shape for recap/summary use cases (the user is asking the
+# model to reason over the whole meeting — bring it into context once
+# rather than across many paged calls). The ceiling still bites for
+# unusually long meetings (3-hour town halls, etc.); when it does, the
+# truncation notice from _enforce_byte_ceiling makes paging explicit.
+RESULT_BYTE_CEILING = 80000
 DEFAULT_LIST_LIMIT = 100
 DEFAULT_SEARCH_LIMIT = 20
 
@@ -208,8 +215,13 @@ def _apply_speaker_filter(entries: list[dict], speaker: str | None) -> list[dict
 def _enforce_byte_ceiling(lines: list[str], total_count: int) -> str:
     """Join lines, trimming from the front if over RESULT_BYTE_CEILING.
 
-    When trimmed, prepends a one-line truncation notice telling the
-    model how many were dropped and how to narrow the query.
+    When trimmed, prepends a notice that's deliberately worded to
+    prevent a misreading we hit in QA: claude saw "the most recent N
+    of M events" and told the user "operator only captured the tail
+    end of the meeting." That's wrong — operator records the entire
+    meeting to disk; only the rendered response is paged. The notice
+    below makes the capture-vs-display distinction explicit and gives
+    a concrete paging recipe.
     """
     text = "\n".join(lines)
     if len(text.encode("utf-8")) <= RESULT_BYTE_CEILING:
@@ -218,16 +230,21 @@ def _enforce_byte_ceiling(lines: list[str], total_count: int) -> str:
     running_bytes = 0
     for line in reversed(lines):
         line_bytes = len(line.encode("utf-8")) + 1
-        if running_bytes + line_bytes > RESULT_BYTE_CEILING - 200:
+        if running_bytes + line_bytes > RESULT_BYTE_CEILING - 400:
             break
         kept.append(line)
         running_bytes += line_bytes
     kept.reverse()
     dropped = total_count - len(kept)
     notice = (
-        f"(showing the most recent {len(kept)} of {total_count} events — "
-        f"{dropped} older events omitted to fit response size. "
-        f"Narrow the time window or use a search tool for a specific keyword.)"
+        f"(Operator recorded the entire meeting. This response is paged "
+        f"for display: showing the last {len(kept)} of {total_count} events "
+        f"({dropped} earlier events omitted from THIS response only — the "
+        f"full record is on disk). To see earlier portions, call again "
+        f"with `end_minutes_ago` set to the start of this page, or use "
+        f"`search_meeting_record` / `search_captions` for a specific "
+        f"keyword. Do NOT tell the user 'only the tail was captured' — "
+        f"that's wrong; the bot captured the whole meeting.)"
     )
     return notice + "\n" + "\n".join(kept)
 
