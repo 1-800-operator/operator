@@ -41,12 +41,14 @@ SURFACE_BOTS = {
 # Playwright's Node.js driver and Chrome are child processes in our
 # terminal's foreground process group.  When the user presses Ctrl+C,
 # the terminal sends SIGINT to the whole group — killing Chrome
-# abruptly and leaving it in the meeting for ~60s until Meet's
-# heartbeat times out.
+# abruptly. That would yank the user out of the meeting and lose any
+# other tabs they had open in slip Chrome.
 #
 # Fix: put every child in its own session (setsid) so SIGINT only
-# reaches our Python process.  We then close Chrome cleanly via
-# Playwright, and Meet sees an immediate disconnect.
+# reaches our Python process.  We then detach Playwright cleanly
+# (browser.close() over CDP is a disconnect, not a process-kill, since
+# Playwright didn't launch Chrome), and slip Chrome keeps running so
+# the user can stay in the meeting / keep their other tabs.
 _OriginalPopenInit = subprocess.Popen.__init__
 
 

@@ -27,17 +27,21 @@ The user-perceived UX:
       preflights / friendly notices handle this.
 
 Lifecycle:
-    1. Probe CDP — if a prior slip session left slip Chrome running,
-       skip launch and reuse it
+    1. Probe CDP — if slip Chrome is still running with ≥1 tab, reuse
+       it (preserves the user's other tabs). If Chrome is in the macOS
+       menu-bar-only state (0 tabs), Playwright re-attach would fail
+       on Browser.setDownloadBehavior, so evict + relaunch.
     2. Otherwise launch Chrome with --user-data-dir=SLIP_PROFILE_DIR,
        --remote-debugging-port=9222, and the meeting URL via `open -na`
     3. Wait for CDP endpoint
     4. `playwright.chromium.connect_over_cdp("http://localhost:9222")`
-    5. Find or open the Meet tab (strict room-code match)
+    5. Find or open the Meet tab (strict room-code match) — opens a
+       new tab in the existing slip Chrome window on the reuse path
     6. Wait for the user to click 'Join now' (indefinite poll)
     7. Hand back to ChatRunner
     8. On leave(): disconnect CDP only — slip Chrome stays running so
-       the user can keep the meeting going after claude detaches.
+       the user can stay in the meeting after claude detaches and
+       keep working in any other tabs they opened.
 """
 
 from __future__ import annotations
@@ -242,10 +246,11 @@ def _evict_other_chrome_on_cdp_port() -> bool:
 def _cdp_endpoint_alive(timeout: float = 1.0) -> bool:
     """Check if CDP debug endpoint is already accepting connections.
 
-    Used to decide whether to evict-then-launch (port held) vs.
-    just-launch (port free). Either path ends with a fresh Chrome —
-    reuse never works post-Chrome-121 (see _browser_session for the
-    Browser.setDownloadBehavior story).
+    Used by _browser_session to decide between reuse (existing slip
+    Chrome with ≥1 tab — open a new meeting tab in it), evict + launch
+    (existing Chrome in zero-context state — re-attach would fail with
+    Browser.setDownloadBehavior, see _cdp_page_count), or plain launch
+    (port free).
 
     A successful TCP accept on localhost:9222 means *some* Chrome process
     is exposing CDP; we still verify connect_over_cdp works downstream
@@ -257,6 +262,34 @@ def _cdp_endpoint_alive(timeout: float = 1.0) -> bool:
             return True
     except (ConnectionRefusedError, socket.timeout, OSError):
         return False
+
+
+def _cdp_page_count(timeout: float = 1.0) -> int:
+    """Count tabs (CDP targets of type 'page') in the running Chrome.
+
+    The "zero-contexts trap" is the menu-bar-only state on macOS where
+    Chrome stays alive after every window closes. Playwright's
+    connect_over_cdp issues Browser.setDownloadBehavior unconditionally,
+    which Chrome refuses in zero-context state with "Browser context
+    management is not supported" — verified in
+    debug/14_30_cdp_reattach_spike. If page count > 0, re-attach works
+    and we can reuse the existing slip Chrome (preserving any user tabs);
+    if it's 0, we must evict + relaunch to escape the trap.
+
+    Returns -1 on probe failure so callers can treat it as
+    "indeterminate — fall back to safe path".
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"{CDP_URL}/json/list", timeout=timeout
+        ) as resp:
+            targets = json.loads(resp.read().decode())
+        return sum(1 for t in targets if t.get("type") == "page")
+    except Exception as e:
+        log.warning(f"AttachAdapter: /json/list probe failed: {e}")
+        return -1
 
 
 def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
@@ -522,24 +555,42 @@ class AttachAdapter(MeetingConnector):
         """
         js = self.join_status
         try:
-            # Always launch a fresh slip Chrome. Reuse never works in
-            # practice: Chrome 121+ refuses Browser.setDownloadBehavior
-            # (which Playwright's connect_over_cdp always issues) against
-            # any Chrome that previously had a Playwright session attached
-            # and disconnected. Every operator-to-operator handoff hits
-            # this. Cheaper and clearer to just start fresh — slip profile
-            # persists in SLIP_PROFILE_DIR so login/cookies survive.
+            # Three-way startup branch (verified by debug/14_30_cdp_reattach_spike):
+            #   1. CDP alive AND ≥1 tab in Chrome → reuse. Skip launch;
+            #      _find_or_open_meet_page below opens the meeting in a
+            #      new tab inside the existing slip Chrome window. This
+            #      preserves whatever other tabs the user opened during
+            #      a previous meeting (looking something up, etc.).
+            #   2. CDP alive AND 0 tabs (macOS menu-bar-only state) →
+            #      evict + launch. Playwright's connect_over_cdp would
+            #      fail with "Browser.setDownloadBehavior: Browser
+            #      context management is not supported" otherwise. No
+            #      user work to preserve in this state.
+            #   3. CDP not alive → launch. Standard cold-start path.
+            launch_needed = True
             if _cdp_endpoint_alive():
-                _evict_other_chrome_on_cdp_port()
-                # Brief settle so the kernel releases the port before
-                # the new Chrome tries to bind.
-                time.sleep(0.5)
-            self._chrome_proc = _launch_slip_chrome(meeting_url)
-            try:
-                _wait_for_cdp_ready()
-            except SlipAttachError:
-                js.signal_failure("cdp_not_ready")
-                return
+                pc = _cdp_page_count()
+                if pc > 0:
+                    log.info(
+                        f"AttachAdapter: reusing existing slip Chrome ({pc} tab(s))"
+                    )
+                    launch_needed = False
+                else:
+                    log.info(
+                        f"AttachAdapter: existing Chrome has {pc} tabs "
+                        "(zero-context state) — evicting + relaunching"
+                    )
+                    _evict_other_chrome_on_cdp_port()
+                    # Brief settle so the kernel releases the port before
+                    # the new Chrome tries to bind.
+                    time.sleep(0.5)
+            if launch_needed:
+                self._chrome_proc = _launch_slip_chrome(meeting_url)
+                try:
+                    _wait_for_cdp_ready()
+                except SlipAttachError:
+                    js.signal_failure("cdp_not_ready")
+                    return
 
             self._playwright = sync_playwright().start()
             try:
@@ -1059,23 +1110,22 @@ class AttachAdapter(MeetingConnector):
         return default
 
     def leave(self):
-        """Disconnect from CDP, then close the slip Chrome process.
-        Idempotent.
+        """Disconnect from CDP. Idempotent. Does NOT close slip Chrome.
 
         Signals the browser thread to exit and waits briefly for clean
         teardown. Audio pipeline shutdown + Playwright teardown happen
         inside the browser thread's finally block so all Playwright
-        calls stay on the thread that owns them. After Playwright is
-        down we evict whatever Chrome is on CDP_PORT — that's the slip
-        Chrome we launched (the user's main Chrome doesn't expose CDP).
+        calls stay on the thread that owns them.
 
-        Closing slip Chrome on shutdown is intentional: leftover slip
-        Chrome from a previous operator run held the Meet pre-join
-        screen in a stuck state across sessions, producing 60s+ lobby
-        waits on the next slip (S221 21:41 run repro'd this). The next
-        slip evicts whatever's on 9222 anyway, but eviction-during-leave
-        means the user sees the Chrome window close when operator does,
-        matching user mental model.
+        Slip Chrome stays alive on purpose: the user may have opened
+        their own tabs in it during the meeting (looking something up
+        for the conversation), and `/operator:hangup` is meant to boot
+        claude from the meeting — not end the meeting for the user. If
+        the user closed the meeting tab manually, the other tabs they
+        had open keep working. The next `operator slip` will reuse the
+        same Chrome window (open the new meeting URL as a new tab) as
+        long as at least one tab is still alive — see _browser_session
+        for the reuse / zero-context branching.
         """
         if self._leave_event.is_set():
             return
@@ -1096,11 +1146,7 @@ class AttachAdapter(MeetingConnector):
             # tear down beyond what the failure path already cleaned.
             self._stop_audio_pipeline()
             self._teardown_playwright()
-        evicted = _evict_other_chrome_on_cdp_port()
-        if evicted:
-            log.info("AttachAdapter: slip Chrome closed")
-        else:
-            log.info("AttachAdapter: detached from Chrome (Chrome already gone)")
+        log.info("AttachAdapter: detached from slip Chrome (Chrome stays alive)")
 
     # ------------------------------------------------------------------
     # Internals
@@ -1288,12 +1334,18 @@ class AttachAdapter(MeetingConnector):
             time.sleep(0.25)
 
         # Pass 2: not found — open a new tab with the URL. This is the
-        # path for "attach to existing debug Chrome where this room
-        # isn't currently open."
+        # path for the slip-Chrome-reuse case: existing Chrome with the
+        # user's other tabs, no meeting tab yet. bring_to_front() so the
+        # tab is foregrounded (matches the fresh-launch UX where
+        # `open -na` brings Chrome to focus).
         log.info(f"AttachAdapter: no existing tab for {meeting_url} — opening new tab")
         try:
             page = self._browser.contexts[0].new_page()
             page.goto(meeting_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.bring_to_front()
+            except Exception as e:
+                log.debug(f"AttachAdapter: bring_to_front non-fatal: {e}")
             return page
         except Exception as e:
             log.warning(f"AttachAdapter: failed to open new tab: {e}")

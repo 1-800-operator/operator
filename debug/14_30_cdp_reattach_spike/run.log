@@ -1,0 +1,20 @@
+[spike] Chrome version:
+Google Chrome 148.0.7778.168 
+[spike] launching: open -na Google Chrome --args --remote-debugging-port=9333 --remote-allow-origins=* --user-data-dir=/var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/spike-cdp-u5crp495/profile --no-first-run --no-default-browser-check data:text/html,<title>USER-TAB-A</title><h1>tab A</h1> data:text/html,<title>USER-TAB-B</title><h1>tab B</h1>
+[spike] CDP up on 9333
+[spike] Chrome PID on port: 585
+(node:90592) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] attach #1 → {'label': 'attach #1 (fresh chrome)', 'connect_ok': True, 'context_count': 1, 'set_download_ok': True, 'new_page_ok': True, 'reuse_existing_page_ok': True, 'errors': []}
+[spike] Chrome PID 585 still alive after attach #1 close
+(node:90606) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] attach #2 → {'label': 'attach #2 (after disconnect — the claim)', 'connect_ok': True, 'context_count': 1, 'set_download_ok': True, 'new_page_ok': True, 'reuse_existing_page_ok': True, 'errors': []}
+(node:90616) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] attach #3 → {'label': 'attach #3 (second re-attach)', 'connect_ok': True, 'context_count': 1, 'set_download_ok': True, 'new_page_ok': True, 'reuse_existing_page_ok': True, 'errors': []}
+[spike] --- VERDICT ---
+[spike]   attach #1 (fresh chrome): connect=True setDownload=True new_page=True reuse=True errors=0
+[spike]   attach #2 (after disconnect — the claim): connect=True setDownload=True new_page=True reuse=True errors=0
+[spike]   attach #3 (second re-attach): connect=True setDownload=True new_page=True reuse=True errors=0
+[spike] killing spike Chrome pid=585

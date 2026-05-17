@@ -1,0 +1,30 @@
+[spike] launching Chrome with 2 user tabs
+[spike] Chrome PID: 662, initial page count: 2
+(node:90705) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] A → {'label': 'A: 2 tabs alive', 'connect_ok': True, 'set_download_ok': True, 'errors': [], 'page_count_pre': 2}
+[spike] closing tab A via raw CDP
+[spike] close ok=True, page count now=1
+(node:90708) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] B → {'label': 'B: 1 tab alive', 'connect_ok': True, 'set_download_ok': True, 'errors': [], 'page_count_pre': 1}
+[spike] closing tab B via raw CDP — Chrome should go to menu-bar-only
+[spike] close ok=True
+[spike]   page count after 0.5s: 0
+[spike] Chrome PID 662 still alive in menu-bar-only state
+(node:90723) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[spike] C → {'label': 'C: 0 tabs (menu-bar-only)', 'connect_ok': False, 'set_download_ok': None, 'errors': ['connect_over_cdp: Error: BrowserType.connect_over_cdp: Protocol error (Browser.setDownloadBehavior): Browser context management is not supported.\nCall log:\n  - <ws preparing> retrieving websocket url from http://localhost:9334\n  - <ws connecting> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32\n  - <ws connected> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32\n  - <ws disconnecting> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32\n  - <ws disconnected> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32 code=1000 reason=\n'], 'page_count_pre': 0}
+[spike] --- VERDICT ---
+[spike]   A: 2 tabs alive: pre_pages=2 connect=True setDownload=True errors=0
+[spike]   B: 1 tab alive: pre_pages=1 connect=True setDownload=True errors=0
+[spike]   C: 0 tabs (menu-bar-only): pre_pages=0 connect=False setDownload=None errors=1
+[spike]       ! connect_over_cdp: Error: BrowserType.connect_over_cdp: Protocol error (Browser.setDownloadBehavior): Browser context management is not supported.
+Call log:
+  - <ws preparing> retrieving websocket url from http://localhost:9334
+  - <ws connecting> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32
+  - <ws connected> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32
+  - <ws disconnecting> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32
+  - <ws disconnected> ws://localhost:9334/devtools/browser/9c830c4a-1e7a-4f7d-b4ba-7276ad907a32 code=1000 reason=
+
+[spike] killing Chrome pid=662
