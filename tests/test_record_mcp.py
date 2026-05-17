@@ -44,12 +44,21 @@ def _write_fixture(entries):
 
 
 def _wire(path: str | None):
-    """Point the resolver at a path (env var route) and clear marker."""
+    """Point the resolver at a path (env var route) and clear marker.
+
+    Also overrides HISTORY_DIR to the parent of `path` so the MCP's
+    _is_safe_record_path validation (added by the audit) accepts the
+    test fixture. Production paths always live under ~/.operator/history;
+    tests use tempfiles, so we shim the validator's notion of where
+    'history' is.
+    """
     record_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker"
     if path is None:
         os.environ.pop(record_server.ENV_PATH, None)
+        record_server.HISTORY_DIR = Path(tempfile.gettempdir())
     else:
         os.environ[record_server.ENV_PATH] = path
+        record_server.HISTORY_DIR = Path(path).resolve().parent
 
 
 def _set_now(t: float):
@@ -147,7 +156,7 @@ def test_list_basic():
     path = _write_fixture([
         {"kind": "meta", "timestamp": now - 100, "slug": "x"},
         {"kind": "session_start", "timestamp": now - 90},
-        {"kind": "chat", "sender": "Alice", "text": "hi", "timestamp": now - 80},
+        {"kind": "chat", "sender": "Alice", "text": "ZZZchatonlymarkerZZZ", "timestamp": now - 80},
         {"kind": "caption", "sender": "Bob", "text": "hello world", "timestamp": now - 60},
         {"kind": "caption", "sender": "Alice", "text": "good morning", "timestamp": now - 30},
     ])
@@ -156,7 +165,7 @@ def test_list_basic():
     out = record_server.list_captions()
     assert "Bob" in out and "hello world" in out, out
     assert "Alice" in out and "good morning" in out, out
-    assert "hi" not in out, "chat-kind entries must not appear"
+    assert "ZZZchatonlymarkerZZZ" not in out, "chat-kind entries must not appear"
     os.unlink(path)
     print("✓ list_captions baseline (caption-only filter)")
 
@@ -470,8 +479,12 @@ def test_missing_timestamp_does_not_crash():
     print("✓ missing-timestamp caption doesn't crash time-window")
 
 
-def test_marker_file_resolution():
-    """Marker file should win over env var when both are set."""
+def test_env_var_wins_over_marker_file():
+    """H-6 security: env var is the primary source — marker is a fallback
+    only for static MCP registrations that miss the env. Production
+    operator sets the env at inner-claude spawn time; the MCP inherits
+    it atomically and a same-uid attacker cannot race-overwrite it the
+    way they could overwrite the on-disk marker file."""
     now = time.time()
     marker_target = _write_fixture([
         {"kind": "session_start", "timestamp": now - 60},
@@ -487,32 +500,78 @@ def test_marker_file_resolution():
         f.write(marker_target)
     record_server.MARKER_FILE = Path(marker_path)
     os.environ[record_server.ENV_PATH] = env_target
+    # _is_safe_record_path scopes both candidates to HISTORY_DIR; both
+    # tempfiles need the same parent for the test to exercise the
+    # priority-order logic rather than the safety filter.
+    record_server.HISTORY_DIR = Path(env_target).resolve().parent
     _set_now(now)
     out = record_server.list_captions()
-    assert "from marker" in out, out
-    assert "from env" not in out, "env var should not have won over marker file"
+    assert "from env" in out, out
+    assert "from marker" not in out, "marker file must not win over env var"
     os.unlink(marker_target)
     os.unlink(env_target)
     os.unlink(marker_path)
     record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
-    print("✓ marker file resolves before env var fallback")
+    print("✓ env var wins over marker file (H-6 priority order)")
 
 
-def test_marker_fallback_to_env():
-    """Empty/missing marker file falls back to env var."""
+def test_marker_fallback_when_env_unset():
+    """No env var → marker file is consulted (legacy compatibility)."""
     now = time.time()
-    env_target = _write_fixture([
+    marker_target = _write_fixture([
         {"kind": "session_start", "timestamp": now - 60},
-        {"kind": "caption", "sender": "Bob", "text": "fallback worked", "timestamp": now - 30},
+        {"kind": "caption", "sender": "Bob", "text": "marker worked", "timestamp": now - 30},
     ])
-    record_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker_xyz"
-    os.environ[record_server.ENV_PATH] = env_target
+    fd, marker_path = tempfile.mkstemp()
+    os.close(fd)
+    with open(marker_path, "w") as f:
+        f.write(marker_target)
+    record_server.MARKER_FILE = Path(marker_path)
+    os.environ.pop(record_server.ENV_PATH, None)
+    record_server.HISTORY_DIR = Path(marker_target).resolve().parent
     _set_now(now)
     out = record_server.list_captions()
-    assert "fallback worked" in out, out
-    os.unlink(env_target)
+    assert "marker worked" in out, out
+    os.unlink(marker_target)
+    os.unlink(marker_path)
     record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
-    print("✓ marker missing → env var fallback works")
+    print("✓ env var unset → marker file fallback works")
+
+
+def test_poisoned_path_rejected_by_safety_filter():
+    """SECURITY regression: a poisoned env var or marker file pointing
+    at a file OUTSIDE ~/.operator/history/ must be rejected by
+    _is_safe_record_path. Without this filter, a same-uid attacker
+    could redirect the MCP to read arbitrary files (~/.ssh/id_rsa,
+    ~/.aws/credentials, a poisoned JSONL they dropped in /tmp) and
+    have the contents served back to claude as 'meeting transcript'."""
+    now = time.time()
+    # Real meeting fixture inside an isolated HISTORY_DIR.
+    safe_dir = Path(tempfile.mkdtemp(prefix="op_history_safe_"))
+    safe_file = safe_dir / "real-meeting.jsonl"
+    safe_file.write_text(
+        json.dumps({"kind": "session_start", "timestamp": now - 60}) + "\n"
+        + json.dumps({"kind": "caption", "sender": "Bob", "text": "real", "timestamp": now - 30}) + "\n"
+    )
+    # Hostile file living OUTSIDE the history dir.
+    hostile = Path(tempfile.mktemp(suffix=".jsonl"))
+    hostile.write_text(
+        json.dumps({"kind": "session_start", "timestamp": now - 60}) + "\n"
+        + json.dumps({"kind": "caption", "sender": "Mallory", "text": "EXFIL", "timestamp": now - 30}) + "\n"
+    )
+    record_server.MARKER_FILE = Path(tempfile.gettempdir()) / "_test_no_marker"
+    record_server.HISTORY_DIR = safe_dir
+    os.environ[record_server.ENV_PATH] = str(hostile)
+    _set_now(now)
+    out = record_server.list_captions()
+    # Hostile content must NOT be served — instead we get the
+    # nothing-wired empty-state because the env var was rejected.
+    assert "EXFIL" not in out, "hostile-path content leaked through safety filter"
+    hostile.unlink()
+    safe_file.unlink()
+    safe_dir.rmdir()
+    record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+    print("✓ poisoned path outside HISTORY_DIR rejected (H-6 safety filter)")
 
 
 def _make_history_dir(meetings: dict[str, list[dict]]) -> Path:
@@ -680,8 +739,9 @@ if __name__ == "__main__":
     test_speakers_single()
     # robustness
     test_missing_timestamp_does_not_crash()
-    test_marker_file_resolution()
-    test_marker_fallback_to_env()
+    test_env_var_wins_over_marker_file()
+    test_marker_fallback_when_env_unset()
+    test_poisoned_path_rejected_by_safety_filter()
     test_format_includes_clock_and_speaker()
     # find_meetings
     test_find_meetings_by_participant()

@@ -2,7 +2,7 @@
 
 Why this exists: macOS attributes TCC checks (Screen Recording, Microphone)
 to the closest user-launched app in a process's responsibility chain — the
-"responsible process". When operator-audio-capture is launched as a normal
+"responsible process". When the Operator audio helper is launched as a normal
 subprocess from Python, its responsible process is whichever IDE/terminal
 the user started operator from (Cursor, iTerm, etc.). SCStream's audio
 gate checks against the responsible process, which on Cursor's
@@ -99,12 +99,51 @@ def _argv_array(args: Sequence[str]) -> ctypes.Array:
     return arr
 
 
-def _envp_array() -> ctypes.Array:
-    items = [f"{k}={v}".encode() for k, v in os.environ.items()] + [None]
+def _envp_array(env: dict[str, str]) -> ctypes.Array:
+    items = [f"{k}={v}".encode() for k, v in env.items()] + [None]
     arr = (ctypes.c_char_p * len(items))()
     for i, a in enumerate(items):
         arr[i] = a
     return arr
+
+
+# Minimal env passed to the audio helper. The helper is a Swift
+# screen/audio-capture binary — it has no auth needs, no MCPs, no reason
+# to see any user-shell secret. The previous default of `os.environ`
+# leaked ANTHROPIC_API_KEY, AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, every
+# `*_TOKEN` / `*_SECRET` the user had exported. The list below is the
+# usual macOS-app minimum: PATH/HOME/USER for filesystem identity,
+# LANG/LC_ALL/LC_CTYPE for UTF-8, TMPDIR for any scratch writes, SHELL
+# because some Foundation/dyld code-paths read it.
+_HELPER_ENV_ALLOWLIST = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "SHELL",
+})
+
+
+def minimal_helper_env(extras: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the env dict to pass to the disclaim-spawned audio helper.
+
+    Allowlist of basic macOS-app env vars only — explicitly does NOT
+    pass through API keys, cloud creds, or anything else from the
+    user's shell. Pass via `extras` only what the helper genuinely
+    needs (e.g. debug toggles operator owns).
+    """
+    env = {
+        k: os.environ[k]
+        for k in _HELPER_ENV_ALLOWLIST
+        if k in os.environ
+    }
+    if extras:
+        env.update(extras)
+    return env
 
 
 class DisclaimedProcess:
@@ -184,6 +223,8 @@ def _exit_code(status: int) -> int:
 
 def spawn_disclaimed(
     args: Sequence[str],
+    *,
+    env: dict[str, str],
     stderr_fd: int | None = None,
 ) -> DisclaimedProcess:
     """posix_spawn args[0] with TCC responsibility disclaimed.
@@ -191,6 +232,12 @@ def spawn_disclaimed(
     Sets up pipes for stdin/stdout (matching subprocess.PIPE) and inherits
     stderr from `stderr_fd` (or 2 if None — caller's stderr). Raises OSError
     on any spawn failure with a meaningful errno.
+
+    `env` is the explicit env dict passed to the child. Callers MUST pass
+    a minimal allowlist (typically via `minimal_helper_env()`) — the wrapper
+    refuses to do the implicit-inherit-everything thing because the
+    disclaimed child runs as its own TCC-responsible process and there is
+    no reason for it to see the launching shell's secrets.
 
     The returned DisclaimedProcess has subprocess.Popen-compatible
     .pid/.stdin/.stdout/.poll/.wait/.terminate/.kill. The child runs as its
@@ -240,7 +287,7 @@ def spawn_disclaimed(
         _check(_responsibility_spawnattrs_setdisclaim(ctypes.byref(attrs), 1), "setdisclaim")
 
         argv = _argv_array(args)
-        envp = _envp_array()
+        envp = _envp_array(env)
         rc = _posix_spawn(
             ctypes.byref(pid_out),
             args[0].encode(),

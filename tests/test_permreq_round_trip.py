@@ -45,6 +45,12 @@ class FakeConnector:
         self.sent = []
         self.chat_messages = []
         self.join_status = None
+        # Bot's local-tile display name. ChatRunner reads this lazily
+        # via get_self_name() to filter out its own echo posts (S-audit
+        # fix — replaces the previous AGENT_NAME hardcoded compare so
+        # an attendee can't spoof the bot's identity by setting their
+        # Meet display name to "Claude").
+        self._self_name = config.AGENT_NAME
 
     def send_chat(self, text):
         self.sent.append(text)
@@ -58,6 +64,9 @@ class FakeConnector:
 
     def get_participant_count(self):
         return 2
+
+    def get_self_name(self):
+        return self._self_name
 
 
 class BrokenSendConnector(FakeConnector):

@@ -50,6 +50,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import struct
 import subprocess
 import sys
@@ -88,12 +89,30 @@ CHROME_BINARY_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 # persist on disk like any Chrome profile dir). First-run sign-in is
 # handled by _run_slip in __main__.py.
 SLIP_PROFILE_DIR = os.path.expanduser("~/.operator/slip_profile")
+# Per-Chrome-instance nonce that gates which Origin header Chrome accepts
+# on CDP WebSocket upgrades. Written when Chrome is freshly launched, read
+# when reusing a running slip Chrome (S239 reuse path). Lives inside the
+# slip profile dir so it's tied to that Chrome instance's lifetime.
+#
+# SECURITY: this replaces the previous --remote-allow-origins=* (which
+# accepted ANY Origin, letting any webpage the user visited mount a
+# cross-origin attack against the slip Chrome holding their Google
+# session). With a 128-bit random nonce, a webpage can't guess the
+# expected Origin. Residual: a same-uid local process can read this file;
+# accepted, since same-uid attackers already have broad capability.
+CDP_ORIGIN_FILE = os.path.join(SLIP_PROFILE_DIR, ".cdp_origin")
+
+# Developer-only audio-debug toggle. When True, every utterance gets
+# written as a WAV under ~/.operator/debug/audio/. Devs flip this in their
+# working copy when iterating on audio; it must stay False on main so
+# end-user installs never accidentally persist raw meeting audio to disk.
+_AUDIO_DEBUG_WAV = False
 # Chrome can take 20+s to bring up the debug server on a profile with
 # extensions or syncing data. 30s is generous; failure beyond that
 # points at a real problem (port collision, Chrome crash, OS issue).
 CDP_READY_TIMEOUT_SECONDS = 30
 
-# operator-audio-capture lives at one of two paths. Production is the
+# The Operator audio helper lives at one of two paths. Production is the
 # signed+notarized .app produced by scripts/build_signed_helper.sh — only
 # this path can capture system audio (SCStream callbacks are silently
 # denied for ad-hoc-signed binaries on macOS 14+). Dev fallback is the
@@ -101,10 +120,10 @@ CDP_READY_TIMEOUT_SECONDS = 30
 # Developer-ID cert is available. Production wins when both exist; mirrors
 # doctor.py:_AUDIO_HELPER_INSTALLED.
 _AUDIO_HELPER_INSTALLED = (
-    Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
-    / "Contents" / "MacOS" / "operator-audio-capture"
+    Path.home() / ".operator" / "bin" / "Operator.app"
+    / "Contents" / "MacOS" / "Operator"
 )
-_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
+_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "Operator"
 
 # AEC3 cleaner binary (S225 spike → step 5 will land a proper install). Same
 # resolution pattern as the audio helper: production install wins over the
@@ -161,7 +180,7 @@ def _resolve_aec_binary() -> Path | None:
 
 
 def _resolve_audio_helper() -> Path | None:
-    """Return the path to operator-audio-capture, or None if missing.
+    """Return the path to the Operator audio helper, or None if missing.
 
     Production install (~/.operator/bin/) wins over in-tree dev build
     when both exist. None means audio capture is unavailable; AttachAdapter
@@ -173,6 +192,29 @@ def _resolve_audio_helper() -> Path | None:
     if _AUDIO_HELPER_DEV.exists() and os.access(_AUDIO_HELPER_DEV, os.X_OK):
         return _AUDIO_HELPER_DEV
     return None
+
+
+def _pid_still_owns_port(pid: int, port: int) -> bool:
+    """True iff `pid` still has a listening TCP socket on `port`.
+
+    Used to close a TOCTOU window in the eviction path: between the
+    initial lsof that named the PID and the kill that targets it, the
+    process can exit and the kernel can recycle the PID to an unrelated
+    same-uid process. Re-asking lsof "does PID still hold this port?"
+    closes the window — if False, we don't kill (the original Chrome
+    is already gone; whatever PID we'd kill now isn't ours to kill).
+    """
+    try:
+        r = subprocess.run(
+            ["lsof", "-nP", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Can't verify → fail safe (don't kill).
+        return False
+    if r.returncode != 0:
+        return False
+    return str(pid) in r.stdout.split()
 
 
 def _evict_other_chrome_on_cdp_port() -> bool:
@@ -205,6 +247,20 @@ def _evict_other_chrome_on_cdp_port() -> bool:
     evicted_any = False
     for pid in pids:
         try:
+            # Re-verify the PID still holds CDP_PORT immediately before
+            # we kill. Closes a TOCTOU window between the lsof above and
+            # this kill — the original PID can exit between the two and
+            # the kernel can recycle it to an unrelated same-uid process.
+            # Without this check, a same-uid attacker spawning short-lived
+            # workers could race us into SIGKILLing arbitrary processes
+            # of their choosing on every operator slip.
+            if not _pid_still_owns_port(pid, CDP_PORT):
+                log.warning(
+                    f"AttachAdapter: pid {pid} no longer holds port "
+                    f"{CDP_PORT} (likely exited + PID recycled) — not "
+                    f"evicting"
+                )
+                continue
             ps_r = subprocess.run(
                 ["ps", "-o", "command=", "-p", str(pid)],
                 capture_output=True, text=True, timeout=2,
@@ -229,6 +285,16 @@ def _evict_other_chrome_on_cdp_port() -> bool:
                     evicted_any = True
                     break
             else:
+                # Before escalating to SIGKILL, re-verify once more —
+                # the process could've exited + recycled during the 2s
+                # SIGTERM wait. Same TOCTOU shape as above.
+                if not _pid_still_owns_port(pid, CDP_PORT):
+                    log.info(
+                        f"AttachAdapter: pid {pid} released port "
+                        f"{CDP_PORT} during SIGTERM wait — not escalating"
+                    )
+                    evicted_any = True
+                    continue
                 try:
                     os.kill(pid, 9)  # SIGKILL
                     log.warning(f"AttachAdapter: SIGKILL'd pid={pid} after SIGTERM timeout")
@@ -292,7 +358,53 @@ def _cdp_page_count(timeout: float = 1.0) -> int:
         return -1
 
 
-def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
+def _new_cdp_origin() -> str:
+    """Generate a fresh 128-bit-random Origin URL used to gate CDP access.
+
+    The string is opaque to humans — its only job is to be unguessable
+    by a webpage trying to mount a cross-origin CDP attack against the
+    slip Chrome holding the user's Google session.
+    """
+    return f"http://operator-{secrets.token_hex(16)}.local"
+
+
+def _write_cdp_origin(origin: str) -> None:
+    """Persist a freshly-generated origin for later reuse by sibling
+    operator processes that attach to the same Chrome instance."""
+    os.makedirs(SLIP_PROFILE_DIR, exist_ok=True, mode=0o700)
+    # Owner-only — the file IS the secret that gates CDP access.
+    fd = os.open(
+        CDP_ORIGIN_FILE,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        os.write(fd, origin.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Belt-and-suspenders against pre-existing loose perms (write above
+    # only applies at create time; if the file existed, perms persist).
+    os.chmod(CDP_ORIGIN_FILE, 0o600)
+
+
+def _read_cdp_origin() -> str | None:
+    """Read the persisted origin for the currently-running slip Chrome,
+    or None if it doesn't exist / is unreadable. Caller decides whether
+    to fall back to generating a new one."""
+    try:
+        with open(CDP_ORIGIN_FILE, "rb") as f:
+            data = f.read().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _launch_slip_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
     """Spawn slip's dedicated Chrome window with debug port + meeting URL.
 
     Uses `open -na 'Google Chrome' --args ...` (macOS-canonical pattern;
@@ -300,6 +412,11 @@ def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
     The user-data-dir is operator-owned (SLIP_PROFILE_DIR), separate
     from the user's main Chrome profile — sidesteps Chrome's silent
     debug-port disable for the default profile.
+
+    `cdp_origin` is the per-launch random Origin URL Chrome will accept
+    on CDP WebSocket upgrades. Playwright must connect with the same
+    Origin header. Caller (`_browser_session`) generates + persists it
+    via _new_cdp_origin / _write_cdp_origin before invoking us.
 
     Returns the Popen handle of the `open` command itself, which exits
     after dispatching. The actual Chrome process is owned by
@@ -323,10 +440,13 @@ def _launch_slip_chrome(meeting_url: str) -> subprocess.Popen:
     args = [
         "open", "-na", "Google Chrome", "--args",
         f"--remote-debugging-port={CDP_PORT}",
-        # Required by Chrome 111+ to allow CDP WebSocket connections from
-        # localhost. Without this, some browser-level CDP methods reject
-        # with "Browser context management is not supported" or similar.
-        "--remote-allow-origins=*",
+        # Chrome 111+ requires --remote-allow-origins to permit CDP
+        # WebSocket upgrades. Previously this was `*` — that lets every
+        # webpage the user visits mount a cross-origin attack against
+        # the slip Chrome's Google session cookies. We now pin to a
+        # per-launch random Origin URL; Playwright sends the matching
+        # Origin header when it connects.
+        f"--remote-allow-origins={cdp_origin}",
         f"--user-data-dir={SLIP_PROFILE_DIR}",
         # Silence first-run / default-browser nags so slip Chrome lands
         # the user directly on the meeting URL.
@@ -585,16 +705,51 @@ class AttachAdapter(MeetingConnector):
                     # the new Chrome tries to bind.
                     time.sleep(0.5)
             if launch_needed:
-                self._chrome_proc = _launch_slip_chrome(meeting_url)
+                # Fresh Chrome → fresh CDP origin. The new nonce is what
+                # Chrome will accept on the WebSocket upgrade; Playwright
+                # must send it as the Origin header below.
+                cdp_origin = _new_cdp_origin()
+                _write_cdp_origin(cdp_origin)
+                self._chrome_proc = _launch_slip_chrome(
+                    meeting_url, cdp_origin
+                )
                 try:
                     _wait_for_cdp_ready()
                 except SlipAttachError:
                     js.signal_failure("cdp_not_ready")
                     return
+            else:
+                # Reuse path — Chrome was launched by a prior operator
+                # session, which persisted its nonce to CDP_ORIGIN_FILE.
+                # Read it; we need the same value as the Origin header.
+                cdp_origin = _read_cdp_origin()
+                if cdp_origin is None:
+                    # File missing / unreadable. Can't connect without
+                    # the matching Origin — abandon reuse, fall back to
+                    # evict + fresh launch.
+                    log.warning(
+                        "AttachAdapter: CDP origin file missing for "
+                        "reused Chrome — evicting + relaunching"
+                    )
+                    _evict_other_chrome_on_cdp_port()
+                    time.sleep(0.5)
+                    cdp_origin = _new_cdp_origin()
+                    _write_cdp_origin(cdp_origin)
+                    self._chrome_proc = _launch_slip_chrome(
+                        meeting_url, cdp_origin
+                    )
+                    try:
+                        _wait_for_cdp_ready()
+                    except SlipAttachError:
+                        js.signal_failure("cdp_not_ready")
+                        return
 
             self._playwright = sync_playwright().start()
             try:
-                self._browser = self._playwright.chromium.connect_over_cdp(CDP_URL)
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    CDP_URL,
+                    headers={"Origin": cdp_origin},
+                )
             except Exception as e:
                 self._teardown_playwright()
                 js.signal_failure("cdp_attach_failed")
@@ -1405,7 +1560,7 @@ class AttachAdapter(MeetingConnector):
             self._audio_processors.clear()
 
     def _start_audio_pipeline(self) -> None:
-        """Spawn operator-audio-capture and wire it through two AudioProcessors.
+        """Spawn the Operator audio helper and wire it through two AudioProcessors.
 
         Best-effort — any failure here logs a warning and leaves the
         connector in chat-only mode. The reasons audio might not come up:
@@ -1428,7 +1583,7 @@ class AttachAdapter(MeetingConnector):
         helper = _resolve_audio_helper()
         if helper is None:
             log.warning(
-                "AttachAdapter: operator-audio-capture not found — slip will run "
+                "AttachAdapter: Operator audio helper not found — slip will run "
                 "chat-only (no transcript). Run install.sh to build the helper."
             )
             return
@@ -1465,16 +1620,22 @@ class AttachAdapter(MeetingConnector):
             log.info("AttachAdapter: leave requested during audio warmup — skipping helper spawn")
             return
 
-        # Debug WAV dumps: set OPERATOR_AUDIO_DEBUG=1 to write every utterance
-        # as a WAV file before STT. Files land in /tmp/operator_audio_debug/S/
-        # and /tmp/operator_audio_debug/M/.
-        if os.environ.get("OPERATOR_AUDIO_DEBUG"):
-            _debug_root = "/tmp/operator_audio_debug"
+        # Debug WAV dumps: developer-only path. Gated on a hardcoded
+        # constant rather than an env var so end-users can't accidentally
+        # enable it (writing every utterance to disk has obvious privacy
+        # cost). Devs hacking on audio flip _AUDIO_DEBUG_WAV in their
+        # working copy. Destination is under ~/.operator/ with 0o700 perms
+        # — never /tmp — even when enabled.
+        if _AUDIO_DEBUG_WAV:
+            _debug_root = os.path.expanduser("~/.operator/debug/audio")
+            os.makedirs(_debug_root, exist_ok=True, mode=0o700)
+            os.chmod(_debug_root, 0o700)
             for _tag, _proc in self._audio_processors.items():
                 _tag_str = _tag.decode() if isinstance(_tag, bytes) else str(_tag)
                 _proc.debug_dir = os.path.join(_debug_root, _tag_str)
-                os.makedirs(_proc.debug_dir, exist_ok=True)
-            log.info(f"AttachAdapter: OPERATOR_AUDIO_DEBUG → {_debug_root}")
+                os.makedirs(_proc.debug_dir, exist_ok=True, mode=0o700)
+                os.chmod(_proc.debug_dir, 0o700)
+            log.info(f"AttachAdapter: _AUDIO_DEBUG_WAV → {_debug_root}")
 
         # Helper stderr → /tmp/operator.log (append). Same destination as
         # operator's own logs so users have one place to look. Health line
@@ -1491,13 +1652,18 @@ class AttachAdapter(MeetingConnector):
         # who launched it. Validated against Cursor/Terminal.app spawn paths
         # in 14.20.4.
         try:
-            from _1_800_operator.pipeline._disclaimed_spawn import spawn_disclaimed
+            from _1_800_operator.pipeline._disclaimed_spawn import (
+                spawn_disclaimed, minimal_helper_env,
+            )
             # spawn_disclaimed dup2's our fd into the child; close the parent
             # handle right after so we don't keep an extra fd to the log
             # open for the lifetime of the connector.
             with open("/tmp/operator.log", "ab") as stderr_sink:
                 self._audio_helper_proc = spawn_disclaimed(
                     [str(helper)],
+                    # Minimal env — the helper has no auth needs and no
+                    # reason to see the user's shell secrets.
+                    env=minimal_helper_env(),
                     stderr_fd=stderr_sink.fileno(),
                 )
         except OSError as e:

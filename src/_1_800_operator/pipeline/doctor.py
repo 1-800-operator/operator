@@ -40,10 +40,10 @@ def chrome_installed() -> bool:
 # Dev fallback is the raw swiftc-built binary in-tree (mic-only). Production
 # wins when both exist; mirrors attach_adapter.py:_AUDIO_HELPER_INSTALLED.
 _AUDIO_HELPER_INSTALLED = (
-    Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
-    / "Contents" / "MacOS" / "operator-audio-capture"
+    Path.home() / ".operator" / "bin" / "Operator.app"
+    / "Contents" / "MacOS" / "Operator"
 )
-_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "operator-audio-capture"
+_AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "Operator"
 
 # AEC3 speaker-bleed cleaner. Production is the cargo-built binary installed
 # under ~/.operator/bin/; dev fallback is the in-tree build. Mirrors
@@ -212,11 +212,15 @@ def _probe_audio_helper() -> dict[str, str] | None:
     if helper is None:
         return None
     try:
+        # Minimal env — the helper has no auth needs and shouldn't see
+        # the user's shell secrets. See _disclaimed_spawn.minimal_helper_env.
+        from _1_800_operator.pipeline._disclaimed_spawn import minimal_helper_env
         r = subprocess.run(
             [str(helper), "--probe"],
             capture_output=True,
             text=True,
             timeout=5,
+            env=minimal_helper_env(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -240,14 +244,14 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
             name="Screen Recording (slip)",
             ok=False,
             detail="audio helper not built",
-            fix="re-run install.sh to build operator-audio-capture",
+            fix="re-run install.sh to build the Operator audio helper",
         )
     if probe is None:
         return CheckResult(
             name="Screen Recording (slip)",
             ok=False,
             detail="audio helper probe failed",
-            fix="re-run install.sh to rebuild operator-audio-capture",
+            fix="re-run install.sh to rebuild the Operator audio helper",
         )
     status = probe.get("screen_recording", "unknown")
     if status == "ok":

@@ -106,14 +106,22 @@ PARTICIPANT_CHECK_INTERVAL = 3  # seconds between participant count checks
 # each paragraph as a distinct message rather than a burst.
 STREAM_PARAGRAPH_MIN_INTERVAL = 0.25
 
-# Sticky conversation window. Once a sender @claude's, follow-up messages
-# from that same sender within CONTINUATION_WINDOW_SECONDS skip the trigger
-# requirement — the bot is "in conversation" with them. The window slides
-# forward on every forwarded message (trigger or continuation). New
-# messages are debounced by CONTINUATION_DEBOUNCE_SECONDS so a quick
+# Sticky conversation window. Once someone @claude's, follow-up messages
+# from ANY participant within CONTINUATION_WINDOW_SECONDS skip the trigger
+# requirement — the bot is "in conversation" with the room. The window
+# slides forward on every forwarded message (trigger or continuation).
+# New messages are debounced by CONTINUATION_DEBOUNCE_SECONDS so a quick
 # correction ("thanks — wait, no, do Y instead") collapses into a single
-# forwarded prompt (the last one). The window is sender-scoped: a
-# different participant must @claude to address the bot.
+# forwarded prompt (the last one).
+#
+# SECURITY: the window is NOT sender-scoped. After any participant opens
+# the window with @claude, any other participant in the meeting can
+# follow up without the trigger and reach the bot. This is intentional
+# (mirrors how a human assistant in the room would respond to anyone
+# during an active back-and-forth), but it means inviting claude into a
+# meeting also invites every participant to drive claude until the
+# window closes. Slip-strict mode disables this — every prompt requires
+# @claude.
 CONTINUATION_WINDOW_SECONDS = 90.0
 CONTINUATION_DEBOUNCE_SECONDS = 2.0
 
@@ -225,6 +233,17 @@ class ChatRunner:
         # been attempted. So: say it once, then go quiet — repeated
         # @mentions after the latch are logged but never re-narrated.
         self._claude_unavailable_announced = False
+
+        # Cached connector self-name (the local Meet tile's display
+        # name). Resolved lazily on the first message tick where the
+        # browser is alive. SECURITY: own-message filtering compares
+        # against THIS, not against a hardcoded "Claude" string — a
+        # participant who spoofs their display name to "Claude" would
+        # otherwise have every message they send silently dropped,
+        # including any "no" reply to a permreq. The local tile's
+        # display name comes from the slip Chrome profile's Google
+        # session and isn't trivially spoofable by other attendees.
+        self._self_name: str | None = None
 
         # PermissionRequest round-trip state (yolo-off mode). The
         # provider tails permreq_requests.jsonl during a turn and fires
@@ -599,8 +618,8 @@ class ChatRunner:
             # on render — exact-equality comparison broke session-164's
             # stuck-LLM watchdog (`...hang tight.\n\n` sent vs `...hang
             # tight.` read back) and triggered a self-reply cascade.
-            if sender and sender.lower() == config.AGENT_NAME.lower():
-                log.debug(f"ChatRunner: skipping own message (sender={sender!r})")
+            if self._is_self_sender(sender):
+                log.debug(f"ChatRunner: skipping own message (sender match)")
                 continue
             if not sender and text in self._own_messages:
                 log.debug(f"ChatRunner: skipping own message (text match)")
@@ -615,7 +634,13 @@ class ChatRunner:
             # just side chat, the user can re-`@claude` to resume.
             self._last_reply_had_question = False
 
-            log.info(f"ChatRunner: new message sender={sender!r} id={msg_id!r} text={text!r}")
+            # SECURITY: don't log chat text. /tmp/operator.log is world-
+            # readable by default; meeting content lives at
+            # ~/.operator/history/<slug>.jsonl. Length only.
+            log.info(
+                "ChatRunner: new message id=%r len=%d",
+                msg_id, len(text or "")
+            )
 
             # Per-message receive-lag breadcrumb. t_dom is stamped by the JS
             # MutationObserver at DOM-arrival; t_drained by the adapter at
@@ -1197,7 +1222,7 @@ class ChatRunner:
             if msg_id and msg_id in self._seen_ids:
                 continue  # already routed elsewhere
             # Skip our own messages (sender filter + text-match fallback).
-            if sender and sender.lower() == config.AGENT_NAME.lower():
+            if self._is_self_sender(sender):
                 continue
             if not sender and text in self._own_messages:
                 continue
@@ -1212,9 +1237,12 @@ class ChatRunner:
             # primary record of consent).
             if self._record is not None:
                 self._record.append(sender=sender, text=text, kind="chat")
+            # Sender + text are NOT logged here — they're already
+            # appended to the meeting record above (the audit trail).
+            # The log line just notes that a reply landed.
             log.info(
-                f"ChatRunner: permreq {active['request_id']} got chat "
-                f"reply from sender={sender!r}: {text!r}"
+                "ChatRunner: permreq %s got chat reply (len=%d)",
+                active['request_id'], len(text or "")
             )
 
             # Hand to the classifier (blocks ~2-3s typically). Falls
@@ -1312,6 +1340,33 @@ class ChatRunner:
         self._permreq_seen_at_post = set()
         self._post_next_permreq()
 
+    def _is_self_sender(self, sender) -> bool:
+        """True iff `sender` is the local Meet tile's display name.
+
+        SECURITY: this is the own-message dedup gate. It was previously a
+        hardcoded compare against config.AGENT_NAME ("Claude"), which let
+        any attendee silently mute themselves (and weaponise the mute by
+        guaranteeing only their accomplice's permreq reply reached the
+        classifier) by setting their Meet display name to "Claude". The
+        connector-authoritative self-name is read lazily on first call
+        (the browser must be alive — a tick will have happened) and
+        cached. If the scrape fails (DOM shape changed, etc.), this
+        returns False and we fall back to the ID-based _seen_ids dedup
+        and the text-match _own_messages fallback elsewhere.
+        """
+        if not sender:
+            return False
+        if self._self_name is None:
+            try:
+                n = self._connector.get_self_name()
+            except Exception:
+                n = ""
+            if n:
+                self._self_name = n.strip()
+        if not self._self_name:
+            return False
+        return sender.strip().lower() == self._self_name.lower()
+
     def _format_permreq_question(self, req):
         """Build the chat post for a permission question.
 
@@ -1352,6 +1407,14 @@ class ChatRunner:
 
     @staticmethod
     def _truncate(s, n):
+        # Collapse whitespace and strip ASCII control chars before
+        # truncating. Same string then flows into the permreq question
+        # posted to chat AND into the classifier prompt's {question}
+        # slot, so a hostile tool_input containing newlines or escape
+        # sequences can't visually break the chat message or fake new
+        # paragraphs inside the classifier prompt.
+        s = "".join(c if (c == " " or c.isprintable()) else " " for c in s)
+        s = " ".join(s.split())
         if len(s) <= n:
             return s
         return s[: n - 3] + "..."

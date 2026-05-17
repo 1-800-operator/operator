@@ -2,7 +2,7 @@
 AudioProcessor — utterance detection + Whisper STT for slip mode.
 
 The connector (AttachAdapter) feeds raw Float32 16kHz mono PCM bytes from
-the operator-audio-capture helper into feed_audio(); this module handles
+the Operator audio helper into feed_audio(); this module handles
 silence-based utterance segmentation and transcription via faster-whisper.
 
 Backend: `faster-whisper` (CTranslate2) on CPU. S233 swapped from
@@ -213,7 +213,12 @@ class AudioProcessor:
 
         audio = np.frombuffer(utterance_audio, dtype=np.float32)
         text = self.transcribe(audio)
-        log.info(f'AudioProcessor: whisper_done "{text}"')
+        # SECURITY: never log the caption text itself. The whole meeting
+        # transcript already lives at ~/.operator/history/<slug>.jsonl
+        # (0o700/0o600); the root logger writes /tmp/operator.log with
+        # default umask (0o644 → world-readable on multi-user macOS, plus
+        # any sandboxed app on the box). Length counter only.
+        log.info("AudioProcessor: whisper_done (%d chars)", len(text or ""))
         if not text:
             return "", None
         if text.lower() in WHISPER_HALLUCINATIONS:

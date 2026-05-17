@@ -12,7 +12,7 @@
 #   5. Downloads Playwright's Chromium runtime (~170 MB).
 #   6. Seeds ~/.operator/.env with commented API-key placeholders.
 #   7. On macOS, checks for Google Chrome and prints an install nudge if missing.
-#   8. On macOS, compiles operator-audio-capture (slip-mode audio helper).
+#   8. On macOS, compiles the Operator audio helper (slip-mode dual-stream).
 #   9. Prints sendoff with the next-step command (auto-prefixed with
 #      `source ~/.local/bin/env` if uv's tool dir wasn't already on PATH).
 #
@@ -24,6 +24,18 @@ REPO_URL="https://github.com/1-800-operator/operator.git"
 ENV_PATH="${HOME}/.operator/.env"
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=10
+
+# Single source of truth for the release pin. install.sh, the plugin
+# marketplace.json `ref`, and the operator-plugin git tag must all agree
+# at release time. Pinning to a tag instead of `main` HEAD closes a
+# supply-chain hole — a phished contributor or a brief account
+# compromise on `main` would otherwise ship arbitrary code (with TCC
+# Mic + Screen Recording grants three steps later) to every install in
+# the compromise window. Same reason rustup / uv / pyenv all pin a tag.
+#
+# Override during pre-release / dev installs:
+#   OPERATOR_INSTALL_REF=main  curl … | bash
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.21}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -87,8 +99,8 @@ echo
 # the uv-managed one provisioned in step 3.
 UV_PY_SPEC=">=${MIN_PY_MAJOR}.${MIN_PY_MINOR}"
 
-bold "Installing operator..."
-uv tool install --force --python "${UV_PY_SPEC}" "git+${REPO_URL}"
+bold "Installing operator (ref=${OPERATOR_INSTALL_REF})..."
+uv tool install --force --python "${UV_PY_SPEC}" "git+${REPO_URL}@${OPERATOR_INSTALL_REF}"
 echo
 
 # -- 5. Seed ~/.operator/.env ------------------------------------------------
@@ -265,15 +277,15 @@ PY
   echo
 fi
 
-# -- 8. macOS audio helper (operator-audio-capture) -------------------------
+# -- 8. macOS audio helper (Operator.app) -----------------------------------
 
 # Slip mode's dual-stream audio capture (mic + system) is delivered by a
 # Swift helper that needs Apple-Dev signing + notarization to be allowed by
 # macOS TCC for SCStream callbacks. There are two paths:
 #
 #   (a) Production: the wheel ships a pre-built, signed, notarized .app at
-#       _1_800_operator/swift/operator-audio-capture.app. We copy it into
-#       ~/.operator/bin/ (Granola-style — user never compiles or signs).
+#       _1_800_operator/swift/Operator.app. We copy it into ~/.operator/bin/
+#       (Granola-style — user never compiles or signs).
 #
 #   (b) From-source dev: the wheel doesn't ship the .app (e.g. you're
 #       installing from a git checkout that hasn't been release-built yet).
@@ -286,7 +298,7 @@ fi
 # Linux skips silently — slip is mac-only.
 
 if [ "${OS}" = "macos" ]; then
-  bold "Installing operator-audio-capture (slip-mode audio helper)..."
+  bold "Installing Operator audio helper (slip-mode dual-stream)..."
   TOOL_DIR="$(uv tool dir)/1-800-operator"
   PY_IN_TOOL="${TOOL_DIR}/bin/python"
   BIN_DIR="${HOME}/.operator/bin"
@@ -296,8 +308,8 @@ if [ "${OS}" = "macos" ]; then
     err "Could not find tool venv python at ${PY_IN_TOOL} — skipping audio helper."
   else
     PKG_SWIFT_DIR="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "swift")')"
-    PREBUILT_APP="${PKG_SWIFT_DIR}/operator-audio-capture.app"
-    INSTALLED_APP="${BIN_DIR}/operator-audio-capture.app"
+    PREBUILT_APP="${PKG_SWIFT_DIR}/Operator.app"
+    INSTALLED_APP="${BIN_DIR}/Operator.app"
 
     if [ -d "${PREBUILT_APP}" ]; then
       # Path (a): production-shipped .app. Copy and we're done.
@@ -317,7 +329,7 @@ if [ "${OS}" = "macos" ]; then
       # on first use. See debug spike 2026-05-15 for the attribution
       # validation (mic granted cleanly; screen recording hit Apple's
       # post-deny cooldown only because the test env was over-cycled).
-      HELPER_BIN="${INSTALLED_APP}/Contents/MacOS/operator-audio-capture"
+      HELPER_BIN="${INSTALLED_APP}/Contents/MacOS/Operator"
       PROBE_BEFORE="$("${HELPER_BIN}" --probe 2>/dev/null || echo '{}')"
       if echo "${PROBE_BEFORE}" | grep -q '"screen_recording":"ok"' \
         && echo "${PROBE_BEFORE}" | grep -q '"microphone":"ok"'; then
@@ -348,7 +360,7 @@ if [ "${OS}" = "macos" ]; then
     elif command -v swiftc >/dev/null 2>&1; then
       # Path (b): dev fallback. Mic-only; system audio will be denied by TCC.
       SWIFT_SRC="${PKG_SWIFT_DIR}/operator-audio-capture.swift"
-      BIN_OUT="${PKG_SWIFT_DIR}/operator-audio-capture"
+      BIN_OUT="${PKG_SWIFT_DIR}/Operator"
       if swiftc "${SWIFT_SRC}" -O -o "${BIN_OUT}"; then
         chmod +x "${BIN_OUT}"
         # Ad-hoc sign with stable identifier so TCC grants survive rebuilds.
@@ -401,7 +413,11 @@ if [ "${OS}" = "macos" ]; then
     if [ ! -f "${PKG_RUST_DIR}/Cargo.toml" ]; then
       warn "Rust source not present in wheel (${PKG_RUST_DIR}) — skipping aec3 build."
     else
-      if cargo build --release --manifest-path "${PKG_RUST_DIR}/Cargo.toml"; then
+      # --locked + --frozen refuse to touch Cargo.lock and refuse to
+      # talk to crates.io if Cargo.lock is missing or out of date. Same
+      # supply-chain hygiene as the uv-tool pin above: an upstream
+      # crate version-bump shouldn't silently land on user machines.
+      if cargo build --release --locked --frozen --manifest-path "${PKG_RUST_DIR}/Cargo.toml"; then
         cp "${PKG_RUST_DIR}/target/release/aec3" "${BIN_DIR}/aec3"
         chmod +x "${BIN_DIR}/aec3"
         info "Installed aec3: ${BIN_DIR}/aec3"

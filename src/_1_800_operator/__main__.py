@@ -115,8 +115,8 @@ def _kill_orphaned_children():
 
 
 _SLIP_LOCK_PATH = Path.home() / ".operator" / "slip.pid"
-_AUDIO_HELPER_APP = Path.home() / ".operator" / "bin" / "operator-audio-capture.app"
-_AUDIO_HELPER_BIN = _AUDIO_HELPER_APP / "Contents" / "MacOS" / "operator-audio-capture"
+_AUDIO_HELPER_APP = Path.home() / ".operator" / "bin" / "Operator.app"
+_AUDIO_HELPER_BIN = _AUDIO_HELPER_APP / "Contents" / "MacOS" / "Operator"
 
 
 def _probe_helper_tcc() -> str:
@@ -128,9 +128,14 @@ def _probe_helper_tcc() -> str:
     if not _AUDIO_HELPER_BIN.exists():
         return ""
     try:
+        # Minimal env — the helper has no auth needs. Without this it'd
+        # inherit the full shell env including API keys / cloud creds /
+        # GitHub tokens. See _disclaimed_spawn.minimal_helper_env docstring.
+        from _1_800_operator.pipeline._disclaimed_spawn import minimal_helper_env
         r = subprocess.run(
             [str(_AUDIO_HELPER_BIN), "--probe"],
             capture_output=True, text=True, timeout=5,
+            env=minimal_helper_env(),
         )
         return r.stdout.strip()
     except (subprocess.SubprocessError, OSError):
@@ -151,7 +156,7 @@ def _preflight_audio_helper_tcc() -> None:
       2. If both perms granted → no-op (fast path, the common case).
       3. If either missing → invoke `open -W -a` on the helper bundle.
          macOS attributes the prompts to the bundle (not the parent
-         IDE/terminal) so the user sees dialogs for "operator-audio-capture."
+         IDE/terminal) so the user sees dialogs for "Operator."
          The `-W` blocks until the helper exits (~10s via its watchdog).
       4. Re-probe. Warn but don't fail if the user denied — slip can
          still run chat-only; better to let them proceed than block the
@@ -801,6 +806,14 @@ def _run_slip(name, rest, *, mode="slip"):
     # --mcp-config) reads from this path.
     slug = slug_from_url(url)
     meeting_record = MeetingRecord(slug=slug, meta={"meet_url": url, "mode": mode})
+
+    # Export the meeting-record path so the bundled MCP server picks it up
+    # at spawn time. inner-claude inherits this env, and the MCP subprocess
+    # under inner-claude inherits it in turn — atomic, can't be race-
+    # overwritten by any same-uid attacker the way the marker file could.
+    # Marker file is still written below as a legacy fallback for static
+    # MCP registrations that miss this env, and is now validated MCP-side.
+    os.environ["OPERATOR_MEETING_RECORD_PATH"] = str(meeting_record.path)
 
     # Two-tier resume-session resolution (see comment block at top of _run_slip).
     resume_source = None
