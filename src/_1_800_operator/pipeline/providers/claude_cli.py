@@ -1081,14 +1081,106 @@ class ClaudeCLIProvider(LLMProvider):
     def _assistant_texts(events):
         """Extract assistant text blocks from transcript events, in order.
 
+        Convenience wrapper that drops the denied-texts return value.
+        Use `_assistant_texts_split` when you need both lists (e.g. to
+        suppress the Stop-hook backstop from re-injecting a denied text).
+        """
+        texts, _denied = ClaudeCLIProvider._assistant_texts_split(events)
+        return texts
+
+    @staticmethod
+    def _assistant_texts_split(events):
+        """Return (texts_to_post, denied_texts) extracted from transcript
+        events, in chronological order.
+
         Transcript event shape: {"type": "assistant", "message":
         {"content": [{"type": "text", "text": ...}, {"type": "tool_use",
-        ...}]}}. tool_use blocks and non-assistant events are skipped;
-        `content` is also tolerated as a bare string. Returns the list of
-        non-empty text strings.
+        ...}]}}. `content` is also tolerated as a bare string. text and
+        tool_use blocks may also appear in SEPARATE assistant messages —
+        observed live: the text and the tool_use it precedes commonly
+        land as two adjacent assistant events with their own timestamps
+        (e.g. line 45: text "Making that change now.", line 46: tool_use
+        Edit).
+
+        Pre-tool-narration deny filter (S238): Claude Code defers writing
+        an assistant message containing a tool_use to disk while a
+        PreToolUse hook is blocking. When the hook eventually returns
+        deny, the entire turn — pre-tool text, tool_use, deny tool_result,
+        post-deny text — flushes to the transcript at once. Without
+        filtering, the pump would ship the pre-tool narration ("Making
+        that change now!") right after the user said no — contradictory.
+
+        Algorithm: walk events in order. Accumulate assistant text blocks
+        in `pending` until we hit a tool_use; then attribute `pending` to
+        that tool_use_id and drain. If the tool_use is in the denied set
+        (its tool_result starts with operator's deny signature), the
+        drained texts go to `denied_texts`; otherwise they go to
+        `texts_to_post`. A new user PROMPT (not a tool_result) also
+        drains `pending` to `texts_to_post`, since a fresh turn starting
+        with no tool_use attribution means the pending texts weren't
+        pre-tool narration. Anything still pending at end-of-events ships
+        as a regular reply (post-deny response from claude lands here).
         """
-        texts = []
+        DENY_SIG = "The user did not approve this action."
+
+        # Pass 1: discover denied tool_use_ids from deny-signed tool_results.
+        denied_tool_use_ids: set[str] = set()
         for ev in events:
+            if not isinstance(ev, dict) or ev.get("type") != "user":
+                continue
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_use_id = block.get("tool_use_id")
+                if not isinstance(tool_use_id, str):
+                    continue
+                result_content = block.get("content")
+                text = ""
+                if isinstance(result_content, str):
+                    text = result_content
+                elif isinstance(result_content, list):
+                    for sub in result_content:
+                        if isinstance(sub, dict) and sub.get("type") == "text":
+                            text += sub.get("text", "") or ""
+                if text.startswith(DENY_SIG):
+                    denied_tool_use_ids.add(tool_use_id)
+
+        # Pass 2: walk events in order, attributing pending text blocks to
+        # subsequent tool_uses (same message OR a later one).
+        texts: list[str] = []
+        denied_texts: list[str] = []
+        pending: list[str] = []
+
+        def _is_user_prompt(ev) -> bool:
+            """user event with no tool_result block — a fresh prompt."""
+            if not isinstance(ev, dict) or ev.get("type") != "user":
+                return False
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                return False
+            content = msg.get("content")
+            if isinstance(content, str):
+                return True
+            if isinstance(content, list):
+                return not any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+            return False
+
+        for ev in events:
+            if _is_user_prompt(ev):
+                # New turn segment: anything pending wasn't attached to a
+                # tool — ship as a regular reply.
+                texts.extend(pending)
+                pending = []
+                continue
             if not isinstance(ev, dict) or ev.get("type") != "assistant":
                 continue
             msg = ev.get("message")
@@ -1102,11 +1194,28 @@ class ClaudeCLIProvider(LLMProvider):
             else:
                 continue
             for block in blocks:
-                if isinstance(block, dict) and block.get("type") == "text":
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
                     t = block.get("text")
                     if isinstance(t, str) and t.strip():
-                        texts.append(t)
-        return texts
+                        pending.append(t)
+                elif btype == "tool_use":
+                    tuid = block.get("id")
+                    target = (
+                        denied_texts
+                        if isinstance(tuid, str) and tuid in denied_tool_use_ids
+                        else texts
+                    )
+                    target.extend(pending)
+                    pending = []
+
+        # End-of-events: anything still pending wasn't followed by a tool
+        # (typical post-deny response from claude). Ship as a regular reply.
+        texts.extend(pending)
+
+        return texts, denied_texts
 
     @staticmethod
     def _has_foreign_hook_feedback(events):
@@ -1314,6 +1423,7 @@ class ClaudeCLIProvider(LLMProvider):
         tx_offset = [self._transcript_size()]
         tx_buf = [b""]
         posted: list[str] = []
+        denied: set[str] = set()  # texts filtered out by the deny-aware extractor
         last_block_ts = [None]   # monotonic time operator last saw an assistant block
         foreign_hook = [False]   # a foreign Stop hook redirected this turn
 
@@ -1321,11 +1431,16 @@ class ClaudeCLIProvider(LLMProvider):
             tx_offset[0], tx_buf[0], events = self._read_transcript_lines(
                 tx_offset[0], tx_buf[0]
             )
-            for block in self._assistant_texts(events):
+            blocks, denied_blocks = self._assistant_texts_split(events)
+            for block in blocks:
                 posted.append(block)
                 last_block_ts[0] = time.monotonic()
                 if on_paragraph is not None:
                     flush_paragraphs(block, on_paragraph, force_final=True)
+            for block in denied_blocks:
+                # Record so the Stop-hook backstop doesn't re-inject a
+                # pre-tool narration that we just filtered out.
+                denied.add(block)
             if not foreign_hook[0] and self._has_foreign_hook_feedback(events):
                 foreign_hook[0] = True
 
@@ -1382,9 +1497,11 @@ class ClaudeCLIProvider(LLMProvider):
 
         # Backstop: if the Stop payload's last_assistant_message never
         # came through the transcript tail (no transcript path captured,
-        # or a write race), post it now so the turn isn't silent.
+        # or a write race), post it now so the turn isn't silent. Skip
+        # if it was filtered out as pre-tool-on-denied narration — re-
+        # injecting it would defeat the filter.
         stop_text = self._extract_assistant_text(reply)
-        if stop_text and stop_text not in posted:
+        if stop_text and stop_text not in posted and stop_text not in denied:
             posted.append(stop_text)
             if on_paragraph is not None:
                 flush_paragraphs(stop_text, on_paragraph, force_final=True)
