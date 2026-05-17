@@ -124,10 +124,16 @@ live-meeting validation.
   1-hour meeting to confirm no thermal throttling. The 388% CPU figure
   is per-utterance burst, not sustained. Not blocking, but worth
   measuring before publishing the change.
-- **`beam_size` tuning** — faster-whisper default is 5, can lower to 1
+- ~~**`beam_size` tuning** — faster-whisper default is 5, can lower to 1
   (greedy) for ~20-30% latency improvement at a small WER cost. If
   p50 latency is too high in practice, drop beam_size before increasing
-  hardware demands.
+  hardware demands.~~ **Resolved S240 (2026-05-17)** — re-benched at
+  beam_size 1/3/5 on the same 12-utterance set (see `bench_beam_size.py`
+  in this dir). Projected 20-30% latency win did not materialise:
+  p50 is flat (~3450ms at every beam_size) because the turbo decoder is
+  fast enough that the CPU-int8 encoder dominates wall-clock. WER is
+  best at beam_size=5 (14.4% vs 15.1% at 1 and 16.4% at 3). Kept at 5,
+  now sourced from `WHISPER_BEAM_SIZE` constant in `pipeline/audio.py`.
 - **`vad_filter`** — faster-whisper's built-in VAD is solid; might let
   us drop operator's existing silence-based segmentation in audio.py.
   Separate spike, not part of the swap.

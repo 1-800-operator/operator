@@ -49,6 +49,13 @@ UTTERANCE_SILENCE_THRESHOLD = 2
 UTTERANCE_MAX_DURATION = 10
 UTTERANCE_SILENCE_RMS = 0.02
 
+# faster-whisper decoder beam. Benched at S240 against beam_size 1/3/5 on
+# the 12-utterance ground-truth set (debug/14_28_cpu_whisper_spike/
+# bench_beam_size.py): no p50 latency win at any lower value (turbo's
+# 4-layer decoder is fast enough that the encoder dominates wall-clock on
+# CPU int8), and 5 has the lowest WER. Don't lower without re-benching.
+WHISPER_BEAM_SIZE = 5
+
 # Whisper hallucinates these when fed near-silence. Match-and-drop after
 # transcribe(); preserves real utterances that happen to be just "thanks".
 # Lowercased + stripped before compare.
@@ -121,7 +128,7 @@ class AudioProcessor:
             segments, _info = _MODEL.transcribe(
                 np.zeros(SAMPLE_RATE, dtype=np.float32),
                 language="en",
-                beam_size=5,
+                beam_size=WHISPER_BEAM_SIZE,
                 vad_filter=False,
             )
             # Materialise the generator — faster-whisper does no compute
@@ -282,7 +289,7 @@ class AudioProcessor:
             segments, _info = _MODEL.transcribe(
                 audio,
                 language="en",
-                beam_size=5,
+                beam_size=WHISPER_BEAM_SIZE,
                 vad_filter=False,
             )
             # Materialise inside the lock — faster-whisper does no compute

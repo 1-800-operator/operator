@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from _1_800_operator import config
+from _1_800_operator.pipeline.audio import WHISPER_BEAM_SIZE
 from _1_800_operator.pipeline.claude_code_import import _probe_claude_code
 
 CHROME_PATH = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -334,7 +335,7 @@ def _check_faster_whisper_warm() -> CheckResult:
             segments, _info = model.transcribe(
                 np.zeros(16000, dtype=np.float32),
                 language="en",
-                beam_size=5,
+                beam_size=WHISPER_BEAM_SIZE,
                 vad_filter=False,
             )
             # Materialise the generator — faster-whisper does no compute
