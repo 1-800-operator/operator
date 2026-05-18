@@ -21,7 +21,36 @@ import io
 import time
 
 from _1_800_operator import config
-from _1_800_operator.pipeline.doctor import _check_cwd_trusted, _render_last_failure
+from _1_800_operator.pipeline.doctor import (
+    _check_cwd_trusted,
+    _check_meeting_record_mcp,
+    _render_last_failure,
+)
+
+
+# ── helpers for the meeting-record MCP check ────────────────────────────────
+
+_OK_MCP_LINE = (
+    "operator-meeting-record: /Users/jojo/.local/share/uv/tools/1-800-operator"
+    "/bin/python -m _1_800_operator.mcp_servers.record_server - ✓ Connected\n"
+)
+
+
+def _settings(tmp: Path, allow_entries: list[str] | None) -> Path:
+    """Write a minimal ~/.claude/settings.json; allow_entries=None omits the key."""
+    p = tmp / "settings.json"
+    if allow_entries is None:
+        p.write_text("{}", encoding="utf-8")
+    else:
+        p.write_text(
+            json.dumps({"permissions": {"allow": allow_entries}}),
+            encoding="utf-8",
+        )
+    return p
+
+
+def _runner(rc: int, out: str):
+    return lambda: (rc, out)
 
 
 def _registry(tmp, projects):
@@ -185,6 +214,111 @@ def test_render_last_failure_garbage_is_silent():
     print("  garbage file → silent OK")
 
 
+def test_meeting_record_mcp_happy_path():
+    """Registered + connected + allowlisted → ok."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(Path(tmp), ["mcp__operator-meeting-record__*"])
+        r = _check_meeting_record_mcp(
+            settings_path=settings,
+            mcp_list_runner=_runner(0, _OK_MCP_LINE),
+        )
+        assert r.ok, r
+        assert "allowlisted" in r.detail, r.detail
+    print("  registered + allowlisted → ok OK")
+
+
+def test_meeting_record_mcp_not_registered():
+    """`claude mcp list` doesn't mention our server → fail with dual-target fix."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(Path(tmp), ["mcp__operator-meeting-record__*"])
+        other_servers_output = (
+            "github: /usr/local/bin/github-mcp-server stdio - ✓ Connected\n"
+            "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ✓ Connected\n"
+        )
+        r = _check_meeting_record_mcp(
+            settings_path=settings,
+            mcp_list_runner=_runner(0, other_servers_output),
+        )
+        assert not r.ok, r
+        assert "not registered" in r.detail, r.detail
+        # Dual-target fix: outer-claude path AND copy-pasteable installer URL.
+        assert "ask Claude to fix this" in r.fix, r.fix
+        assert "1-800-operator.com/install" in r.fix, r.fix
+    print("  not in mcp list → fail OK")
+
+
+def test_meeting_record_mcp_registered_but_disconnected():
+    """Registered but health-check failed (e.g. ✗ Failed to connect) → fail with the CLI's status verbatim."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(Path(tmp), ["mcp__operator-meeting-record__*"])
+        broken_line = (
+            "operator-meeting-record: /old/path/python -m _1_800_operator.mcp_servers.record_server "
+            "- ✗ Failed to connect\n"
+        )
+        r = _check_meeting_record_mcp(
+            settings_path=settings,
+            mcp_list_runner=_runner(0, broken_line),
+        )
+        assert not r.ok, r
+        assert "not connected" in r.detail, r.detail
+        assert "Failed to connect" in r.detail, r.detail
+    print("  registered but failed health → fail OK")
+
+
+def test_meeting_record_mcp_allowlist_missing():
+    """Registered + healthy but allowlist entry absent → fail (desktop-app silent-fail risk)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(Path(tmp), ["Bash(operator:*)"])  # other entries present, ours absent
+        r = _check_meeting_record_mcp(
+            settings_path=settings,
+            mcp_list_runner=_runner(0, _OK_MCP_LINE),
+        )
+        assert not r.ok, r
+        assert "missing from" in r.detail, r.detail
+        assert "1-800-operator.com/install" in r.fix, r.fix
+    print("  allowlist missing → fail OK")
+
+
+def test_meeting_record_mcp_settings_file_missing():
+    """settings.json absent → fail (allowlist verification can't pass)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        absent = Path(tmp) / "nope.json"
+        r = _check_meeting_record_mcp(
+            settings_path=absent,
+            mcp_list_runner=_runner(0, _OK_MCP_LINE),
+        )
+        assert not r.ok, r
+        assert "missing" in r.detail, r.detail
+    print("  settings.json absent → fail OK")
+
+
+def test_meeting_record_mcp_settings_garbage_fails_open():
+    """Unparseable settings.json → optional warning, doesn't block ok-exit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "settings.json"
+        p.write_text("{not json", encoding="utf-8")
+        r = _check_meeting_record_mcp(
+            settings_path=p,
+            mcp_list_runner=_runner(0, _OK_MCP_LINE),
+        )
+        assert r.ok and r.optional, r
+        assert "couldn't parse" in r.detail, r.detail
+    print("  garbage settings.json → optional warning OK")
+
+
+def test_meeting_record_mcp_list_command_fails():
+    """`claude mcp list` non-zero or timed out → fail with the rc surfaced."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(Path(tmp), ["mcp__operator-meeting-record__*"])
+        r = _check_meeting_record_mcp(
+            settings_path=settings,
+            mcp_list_runner=_runner(124, "timed out"),
+        )
+        assert not r.ok, r
+        assert "rc=124" in r.detail, r.detail
+    print("  mcp list rc!=0 → fail OK")
+
+
 def main():
     tests = [
         test_trusted_cwd,
@@ -196,6 +330,13 @@ def main():
         test_render_last_failure_absent_is_silent,
         test_render_last_failure_dumps_structured_record,
         test_render_last_failure_garbage_is_silent,
+        test_meeting_record_mcp_happy_path,
+        test_meeting_record_mcp_not_registered,
+        test_meeting_record_mcp_registered_but_disconnected,
+        test_meeting_record_mcp_allowlist_missing,
+        test_meeting_record_mcp_settings_file_missing,
+        test_meeting_record_mcp_settings_garbage_fails_open,
+        test_meeting_record_mcp_list_command_fails,
     ]
     for t in tests:
         print(t.__name__)

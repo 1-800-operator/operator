@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from _1_800_operator import config
 from _1_800_operator.pipeline.audio import WHISPER_BEAM_SIZE
@@ -144,7 +146,7 @@ def _check_cwd_trusted(*, registry_path: Path | None = None,
                        cwd: Path | None = None) -> CheckResult:
     """Claude Code's workspace-trust state for the current directory.
 
-    `operator slip` spawns inner-claude with cwd = the dir operator was
+    `operator slip` spawns claude with cwd = the dir operator was
     invoked from. If Claude Code hasn't been trusted for that dir, it
     shows a first-run "trust this folder?" dialog and blocks on input —
     which wedges the meeting bot's boot: the SessionStart hook never
@@ -198,6 +200,180 @@ def _check_cwd_trusted(*, registry_path: Path | None = None,
     )
 
 
+# Canonical installer one-liner — same URL the README and the install.sh
+# header advertise. Reproduced here so doctor's fix lines stay literally
+# copy-pasteable for terminal users who never want to leave their shell.
+_INSTALLER_CMD = "curl -LsSf https://1-800-operator.com/install | bash"
+
+
+def _installer_fix(suffix: str = "") -> str:
+    """Standard dual-target fix line for anything install.sh would re-set-up.
+
+    Two audiences, one line:
+      • A Claude Code session reading doctor output (e.g. one that ran
+        /operator:doctor) — it sees "ask Claude to fix this" and knows
+        it's the addressee. It already has the install.sh contents in
+        the repo and full Bash + Edit tool access, so it can resolve
+        the issue without a context switch.
+      • Terminal-only users (no Claude Code session in the loop) get the
+        verbatim curl command they can paste into the shell.
+
+    `suffix` lets a specific check add extra wording (e.g. a pre-req that
+    needs installing before the installer can finish, like cargo for aec3).
+    """
+    base = f"ask Claude to fix this, or re-run the installer: {_INSTALLER_CMD}"
+    return f"{suffix} — {base}" if suffix else base
+
+
+_MCP_SERVER_NAME = "operator-meeting-record"
+_MCP_ALLOWLIST_ENTRY = "mcp__operator-meeting-record__*"
+# Regex matches the `claude mcp list` line for our server. The CLI prints
+#   "<name>: <command_or_url> - <status>"
+# where <status> starts with "✓" when connected. We capture the status
+# tail so the doctor message can include the CLI's own wording on failure.
+_MCP_LIST_LINE = re.compile(
+    rf"^{re.escape(_MCP_SERVER_NAME)}:\s.*?-\s(?P<status>.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _run_claude_mcp_list() -> tuple[int, str]:
+    """Default `claude mcp list` runner. Returns (returncode, combined_output).
+
+    Timeout sized to the CLI's worst case — it health-checks every
+    registered server in series, including hosted connectors. 15s
+    accommodates a few slow-but-reachable HTTP servers; a longer hang
+    almost certainly means the user's claude install itself is wedged.
+    """
+    try:
+        r = subprocess.run(
+            ["claude", "mcp", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "timed out"
+    except OSError as e:
+        return 127, str(e)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def _check_meeting_record_mcp(
+    *,
+    settings_path: Path | None = None,
+    mcp_list_runner: Callable[[], tuple[int, str]] | None = None,
+) -> CheckResult:
+    """Bundled operator-meeting-record MCP is registered AND allowlisted.
+
+    Two silent failure modes that today only surface mid-meeting:
+
+      1. **Registration missing or unhealthy** — `claude mcp list` either
+         doesn't show operator-meeting-record at all (install.sh never
+         finished, or a user-scope `claude mcp remove` was run) or shows
+         it with a non-connected status. Claude can call the tool names,
+         but the call fails at dispatch.
+
+      2. **Allowlist missing** — `~/.claude/settings.json`
+         permissions.allow lacks the `mcp__operator-meeting-record__*`
+         wildcard. In the Claude Code desktop app (most users' default
+         surface), the call silent-fails with no approval prompt and the
+         model goes quiet. (See project memory: desktop-app silences
+         non-allowlisted Bash + MCP calls.)
+
+      Both are install.sh's job; this check catches drift after upgrades
+      or manual edits. Fix line routes either through the Claude Code
+      session (which can run the install commands directly) or the
+      canonical curl-piped installer (see _installer_fix).
+
+    Requires claude CLI on PATH. If absent, the dedicated claude-CLI
+    check has already failed loudly; we skip here to avoid double-noise.
+    """
+    if shutil.which("claude") is None:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=True,
+            detail="skipped (claude CLI not on PATH)",
+            fix="",
+            optional=True,
+        )
+
+    runner = mcp_list_runner or _run_claude_mcp_list
+    rc, out = runner()
+    if rc != 0:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=False,
+            detail=f"`claude mcp list` failed (rc={rc}): {out.strip()[:120]}",
+            fix=_installer_fix("run `claude mcp list` directly to investigate first"),
+        )
+    match = _MCP_LIST_LINE.search(out)
+    if match is None:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=False,
+            detail=(
+                "not registered — Claude can't read meeting captions or "
+                "search past meetings"
+            ),
+            fix=_installer_fix(),
+        )
+    status = match.group("status").strip()
+    # `claude mcp list` prefixes connected servers with "✓". Anything
+    # else (✗ Failed to connect, ! Needs authentication, etc.) means the
+    # tools aren't reachable from claude either.
+    if not status.startswith("✓"):
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=False,
+            detail=f"registered but not connected: {status}",
+            fix=_installer_fix(),
+        )
+
+    # Allowlist half.
+    path = settings_path or (Path.home() / ".claude" / "settings.json")
+    try:
+        cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=False,
+            detail=(
+                f"registered, but ~/.claude/settings.json is missing — desktop-app "
+                f"tool calls will silent-fail"
+            ),
+            fix=_installer_fix(),
+        )
+    except (OSError, ValueError) as e:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=True,
+            detail=f"registered; couldn't parse settings.json to verify allowlist ({e})",
+            fix="",
+            optional=True,
+        )
+    allow = (
+        cfg.get("permissions", {}).get("allow", [])
+        if isinstance(cfg, dict) else []
+    )
+    if not isinstance(allow, list) or _MCP_ALLOWLIST_ENTRY not in allow:
+        return CheckResult(
+            name="operator-meeting-record MCP",
+            ok=False,
+            detail=(
+                f"registered, but {_MCP_ALLOWLIST_ENTRY!r} missing from "
+                f"settings.json — desktop-app tool calls will silent-fail"
+            ),
+            fix=_installer_fix(),
+        )
+    return CheckResult(
+        name="operator-meeting-record MCP",
+        ok=True,
+        detail="registered and allowlisted",
+        fix="",
+    )
+
+
 _TCC_STATUS_DETAIL = {
     "ok": "granted",
     "denied": "denied",
@@ -245,14 +421,14 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
             name="Screen Recording (slip)",
             ok=False,
             detail="audio helper not built",
-            fix="re-run install.sh to build the Operator audio helper",
+            fix=_installer_fix(),
         )
     if probe is None:
         return CheckResult(
             name="Screen Recording (slip)",
             ok=False,
             detail="audio helper probe failed",
-            fix="re-run install.sh to rebuild the Operator audio helper",
+            fix=_installer_fix(),
         )
     status = probe.get("screen_recording", "unknown")
     if status == "ok":
@@ -307,7 +483,7 @@ def _check_faster_whisper_warm() -> CheckResult:
             name="faster-whisper warmup",
             ok=False,
             detail=f"import failed: {e} — slip will run chat-only",
-            fix="re-run install.sh",
+            fix=_installer_fix(),
             optional=True,
         )
     # Hint goes to stdout (not stderr) so the desktop-app harness doesn't
@@ -383,14 +559,14 @@ def _check_aec_binary() -> CheckResult:
             name="aec3 cleaner (slip)",
             ok=False,
             detail="not installed and cargo missing — mic transcripts may include speaker bleed",
-            fix="install Rust (https://rustup.rs/), then re-run install.sh",
+            fix=_installer_fix("install Rust first (https://rustup.rs/)"),
             optional=True,
         )
     return CheckResult(
         name="aec3 cleaner (slip)",
         ok=False,
         detail="not installed — mic transcripts may include speaker bleed",
-        fix="re-run install.sh to build aec3",
+        fix=_installer_fix(),
         optional=True,
     )
 
@@ -507,6 +683,7 @@ def run_doctor() -> int:
     """
     checks = [
         _check_claude(),
+        _check_meeting_record_mcp(),
         _check_chrome(),
         _check_git(),
         _check_cwd_trusted(),

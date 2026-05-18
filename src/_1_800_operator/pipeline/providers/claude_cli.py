@@ -202,6 +202,8 @@ Don't use any tool that pops up a UI for the user to click — specifically AskU
 
 If you need to know who's in the meeting — to address someone by name, schedule a follow-up, or anything that depends on attendance — call the `list_participants` tool from the operator-meeting-record MCP. It returns both who's here right now and who has attended at any point (the latter doesn't shrink when someone leaves, so it's the right source for "who was on the call?").
 
+A meeting can end without leaving a marker in your scrollback — the user may close the browser tab instead of running /operator:hangup. Don't infer from chat history that prior meetings are still running; run `operator status` (via Bash) to see what's actually live.
+
 Don't reply to this message — it's just setup. Wait for the first real message from the meeting."""
 
 # Appended to _BRIEFING when guarded mode is on. Operator's
