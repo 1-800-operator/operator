@@ -96,8 +96,8 @@ def test_drain_is_noop_while_permreq_active():
     # Question is already in sent (it goes via direct _send, not queue).
     question_count = len(runner._connector.sent)
     # Now simulate claude's PTY pump enqueueing pre-tool narration.
-    runner._send_queue.put(("marking it done now.", "chat"))
-    runner._send_queue.put(("about to write the file", "chat"))
+    runner._send_queue.put(("marking it done now.", "chat", False))
+    runner._send_queue.put(("about to write the file", "chat", False))
     runner._drain_pending_sends()
     # Still active — nothing new should have been sent.
     assert len(runner._connector.sent) == question_count, runner._connector.sent
@@ -111,7 +111,7 @@ def test_allow_flushes_held_narration_on_next_drain():
     runner = make_runner(classifier=FakeClassifier(verdict=True))
     req = make_req()
     runner._on_permission_request(req)
-    runner._send_queue.put(("marking it done now.", "chat"))
+    runner._send_queue.put(("marking it done now.", "chat", False))
     # Simulate the chat reply "yes" arriving.
     runner._connector.chat_messages = [
         {"id": "msg-1", "sender": "alice", "text": "yes go ahead"},
@@ -133,8 +133,8 @@ def test_deny_purges_held_narration():
     runner = make_runner(classifier=FakeClassifier(verdict=False))
     req = make_req()
     runner._on_permission_request(req)
-    runner._send_queue.put(("marking it done now.", "chat"))
-    runner._send_queue.put(("about to write the file", "chat"))
+    runner._send_queue.put(("marking it done now.", "chat", False))
+    runner._send_queue.put(("about to write the file", "chat", False))
     pre_send_count = len(runner._connector.sent)
     runner._connector.chat_messages = [
         {"id": "msg-1", "sender": "alice", "text": "no, leave it"},
@@ -159,13 +159,13 @@ def test_post_deny_narration_still_flushes():
     is one-shot at resolve time, not an ongoing block."""
     runner = make_runner(classifier=FakeClassifier(verdict=False))
     runner._on_permission_request(make_req())
-    runner._send_queue.put(("marking it done now.", "chat"))  # gets purged
+    runner._send_queue.put(("marking it done now.", "chat", False))  # gets purged
     runner._connector.chat_messages = [
         {"id": "msg-1", "sender": "alice", "text": "no"},
     ]
     runner._check_permreq_chat_for_answer()
     # Now claude's post-result narration comes through.
-    runner._send_queue.put(("got it, leaving as is.", "chat"))
+    runner._send_queue.put(("got it, leaving as is.", "chat", False))
     runner._drain_pending_sends()
     # The post-result line landed; the pre-tool line did not.
     sent_texts = runner._connector.sent
@@ -181,7 +181,7 @@ def test_safety_timeout_also_purges():
     runner = make_runner(classifier=FakeClassifier(verdict=False))
     req = make_req()
     runner._on_permission_request(req)
-    runner._send_queue.put(("marking it done now.", "chat"))
+    runner._send_queue.put(("marking it done now.", "chat", False))
     # Force the timeout: walk the active-since clock back.
     runner._permreq_active["_active_since_mono"] = (
         time.monotonic() - runner._permreq_safety_timeout_s - 1.0
@@ -199,8 +199,8 @@ def test_no_permreq_drain_works_normally():
     """Sanity: when no permreq is active, drain flushes immediately —
     the hold-and-drop logic only applies during a permreq."""
     runner = make_runner()
-    runner._send_queue.put(("just narrating", "chat"))
-    runner._send_queue.put(("more narration", "chat"))
+    runner._send_queue.put(("just narrating", "chat", False))
+    runner._send_queue.put(("more narration", "chat", False))
     runner._drain_pending_sends()
     assert runner._connector.sent == ["just narrating", "more narration"]
     print("  no permreq → drain flushes immediately (status quo): OK")

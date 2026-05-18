@@ -226,7 +226,7 @@ class ChatRunner:
         # inside _send_and_collect_streaming, but it cycles through
         # out_q.get every 0.5s and we drain on each cycle).
         self._main_thread = threading.current_thread()
-        self._send_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._send_queue: queue.Queue[tuple[str, str, bool]] = queue.Queue()
         # "claude is unavailable" gets posted exactly once per meeting.
         # The provider's _run_turn does its own retry-once + latch; by
         # the time an exception reaches us here, recovery has already
@@ -1056,11 +1056,11 @@ class ChatRunner:
             elapsed = time.monotonic() - last[0]
             if elapsed < STREAM_PARAGRAPH_MIN_INTERVAL:
                 time.sleep(STREAM_PARAGRAPH_MIN_INTERVAL - elapsed)
-            self._send(text)
+            self._send(text, is_reply=True)
             last[0] = time.monotonic()
         return on_paragraph
 
-    def _send(self, text, kind: str = "chat"):
+    def _send(self, text, kind: str = "chat", *, is_reply: bool = False):
         """Send a chat message, append it to the meeting record, and track it as our own.
 
         `kind` is persisted to the record but filtered by `pipeline/llm.py` when
@@ -1091,7 +1091,7 @@ class ChatRunner:
         uses it to detect a send failure and resolve eagerly with deny.
         """
         if threading.current_thread() is not self._main_thread:
-            self._send_queue.put((text, kind))
+            self._send_queue.put((text, kind, is_reply))
             return None
         text_normalized = text.strip()
         with self._send_lock:
@@ -1123,12 +1123,12 @@ class ChatRunner:
                 self._seen_ids.add(msg_id)
             self._last_send_time = time.time()
             # First-paragraph DOM-visibility stamp for the end-to-end TIMING
-            # trace. Only counts genuine claude replies (kind=="chat") and
-            # only the first one of the turn. Stamped post-send so it
-            # reflects when send_chat actually returned (i.e. when the
-            # message landed in Meet's DOM), not when it was enqueued.
+            # trace. Gated on `is_reply` (set only by the streaming on_paragraph
+            # callback) — permreq questions and failure-narration also flow
+            # through here as `kind="chat"`, but they shouldn't stamp the
+            # "first claude reply visible" metric.
             if (
-                kind == "chat"
+                is_reply
                 and self._turn_timing is not None
                 and "t_first_visible" not in self._turn_timing
             ):
@@ -1164,10 +1164,10 @@ class ChatRunner:
         drained = 0
         while drained < 16:
             try:
-                text, kind = self._send_queue.get_nowait()
+                text, kind, is_reply = self._send_queue.get_nowait()
             except queue.Empty:
                 return
-            self._send(text, kind=kind)
+            self._send(text, kind=kind, is_reply=is_reply)
             drained += 1
 
     def _purge_held_sends(self, reason: str):
@@ -1180,7 +1180,7 @@ class ChatRunner:
         discarded = 0
         while True:
             try:
-                text, _kind = self._send_queue.get_nowait()
+                text, _kind, _is_reply = self._send_queue.get_nowait()
             except queue.Empty:
                 break
             log.info(
