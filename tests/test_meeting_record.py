@@ -45,16 +45,22 @@ def read_lines(path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def test_slug_from_url():
-    """Happy path, empties, and malformed inputs all resolve safely."""
-    assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == "pgy-qauk-frn"
-    assert slug_from_url("") == "unknown-meeting"
-    assert slug_from_url(None) == "unknown-meeting"  # type: ignore[arg-type]
-    # Strips unsafe characters
-    assert slug_from_url("https://meet.google.com/abc_def!@#") == "abcdef"
+    """Happy path, empties, and malformed inputs all resolve safely.
+
+    Slug is `<code>_<YYYYMMDD>` — day-scoped so recurring meetings
+    don't merge into one JSONL.
+    """
+    from datetime import datetime
+    today = datetime.now().strftime("%Y%m%d")
+    assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == f"pgy-qauk-frn_{today}"
+    assert slug_from_url("") == f"unknown-meeting_{today}"
+    assert slug_from_url(None) == f"unknown-meeting_{today}"  # type: ignore[arg-type]
+    # Strips unsafe characters from the code part; date suffix stays clean
+    assert slug_from_url("https://meet.google.com/abc_def!@#") == f"abcdef_{today}"
     # Path-only fallback when urlparse yields no path
-    assert slug_from_url("bare-slug") == "bare-slug"
+    assert slug_from_url("bare-slug") == f"bare-slug_{today}"
     # All-unsafe chars → fallback
-    assert slug_from_url("!@#$%") == "unknown-meeting"
+    assert slug_from_url("!@#$%") == f"unknown-meeting_{today}"
     print("PASS  test_slug_from_url")
 
 

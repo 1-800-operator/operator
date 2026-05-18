@@ -1,7 +1,7 @@
 """
 MeetingRecord — per-meeting JSONL chat log that doubles as LLM history.
 
-File path: ~/.operator/history/<meet_slug>.jsonl
+File path: ~/.operator/history/<meet_code>_<YYYYMMDD>.jsonl
 One JSON object per line: {"timestamp": float, "sender": str, "text": str, "kind": "chat"}.
 
 Append-only. Local-only. Users can delete ~/.operator/history/ freely.
@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,21 +30,30 @@ DEFAULT_ROOT = Path.home() / ".operator" / "history"
 
 
 def slug_from_url(url: str) -> str:
-    """Derive a stable meeting slug from a Google Meet URL.
+    """Derive a per-day meeting slug from a Google Meet URL.
 
-    https://meet.google.com/pgy-qauk-frn → 'pgy-qauk-frn'. Returns
-    'unknown-meeting' if the URL has no usable path.
+    Returns `<code>_<YYYYMMDD>` where `code` is the Meet code parsed
+    from the URL path (e.g. https://meet.google.com/pgy-qauk-frn →
+    `pgy-qauk-frn_20260517`) and the date is local time at call time.
+    Returns `unknown-meeting_<YYYYMMDD>` if the URL has no usable path.
+
+    Day-scoping keeps recurring meetings (same Meet code, different
+    day) in separate JSONLs — the v1 product story for cross-meeting
+    memory hinges on `find_meetings` returning one row per day per
+    code instead of one merged blob per code. Edge case accepted: the
+    same code used twice in one day collides into one JSONL.
     """
     if not url:
-        return "unknown-meeting"
-    try:
-        path = urlparse(url).path.strip("/")
-    except Exception:
-        path = ""
-    if not path:
-        path = url.strip("/")
-    clean = re.sub(r"[^A-Za-z0-9-]", "", path)
-    return clean or "unknown-meeting"
+        code = "unknown-meeting"
+    else:
+        try:
+            path = urlparse(url).path.strip("/")
+        except Exception:
+            path = ""
+        if not path:
+            path = url.strip("/")
+        code = re.sub(r"[^A-Za-z0-9-]", "", path) or "unknown-meeting"
+    return f"{code}_{datetime.now().strftime('%Y%m%d')}"
 
 
 class MeetingRecord:

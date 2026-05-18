@@ -50,11 +50,13 @@ def test_meeting_record_tail_roundtrip(tmp_dir=None):
 
 
 def test_slug_from_url():
+    from datetime import datetime
     from _1_800_operator.pipeline.meeting_record import slug_from_url
-    assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == "pgy-qauk-frn"
-    assert slug_from_url("https://meet.google.com/abc-defg-hij?pli=1") == "abc-defg-hij"
-    assert slug_from_url("") == "unknown-meeting"
-    assert slug_from_url("pgy-qauk-frn") == "pgy-qauk-frn"
+    today = datetime.now().strftime("%Y%m%d")
+    assert slug_from_url("https://meet.google.com/pgy-qauk-frn") == f"pgy-qauk-frn_{today}"
+    assert slug_from_url("https://meet.google.com/abc-defg-hij?pli=1") == f"abc-defg-hij_{today}"
+    assert slug_from_url("") == f"unknown-meeting_{today}"
+    assert slug_from_url("pgy-qauk-frn") == f"pgy-qauk-frn_{today}"
     print("  slug_from_url: PASS")
 
 
