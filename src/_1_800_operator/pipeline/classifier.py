@@ -300,8 +300,13 @@ class PermissionClassifier:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+            # SIGTERM grace deliberately short. Empirical teardown timing
+            # (5 meetings, S243) showed the classifier sidecar (same shape
+            # as inner-claude — Node + claude CLI) never exits gracefully
+            # within 5s. The 0.5s here is functionally equivalent today but
+            # leaves room if a future claude adds a faster SIGTERM handler.
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

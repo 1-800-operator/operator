@@ -785,8 +785,14 @@ class ClaudeCLIProvider(LLMProvider):
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+            # SIGTERM grace deliberately short. Empirical teardown timing
+            # (5 meetings, S243) showed inner-claude never exits gracefully
+            # within 5s — Node + MCPs always need SIGKILL. The 0.5s here is
+            # functionally equivalent today but leaves room if a future claude
+            # adds a faster SIGTERM handler. The SIGKILL wait below is the real
+            # ceiling.
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

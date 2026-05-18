@@ -1119,17 +1119,33 @@ def _run_slip(name, rest, *, mode="slip"):
         _shutdown_called = True
         if signum:
             log.info(f"Received signal {signum} — shutting down")
-        # Order matters here. `runner.stop()` blocks 5-12s waiting for
-        # the inner-claude PTY to drain + the classifier sidecar to
-        # exit. We don't want /operator:status to lie or /operator:slip
-        # to refuse with "already running" during that window. The
-        # marker and the slip lockfile are pure lookup signals (nothing
-        # in the teardown path reads them), so release them FIRST —
-        # subsequent slip/status calls then see truth immediately. The
-        # roster file is different: chat_runner writes it every
-        # PARTICIPANT_CHECK_INTERVAL, so unlinking it before stop()
-        # races with a re-write. Unlink it AFTER runner.stop() to be
-        # safe.
+        # Shutdown structure (post-S243):
+        #
+        # Fast phase  (sync, ~0s): unlink .current_meeting marker + release
+        #   slip.pid. These are pure lookup signals — nothing in the rest of
+        #   the teardown reads them, so releasing first means subsequent
+        #   /operator:status and /operator:slip see truth immediately (the
+        #   H-11 "hangup feels fast" promise).
+        #
+        # Phase 1     (parallel): runner.stop() (which itself parallelizes
+        #   provider.stop + classifier.stop) AND connector.leave (browser
+        #   thread + audio pipeline + Playwright). They touch independent
+        #   subprocess + thread state; no shared mutable data. Each branch
+        #   has its own try/except — one failure must not stall the other.
+        #   30s safety join per branch — wedges fall through to the reaper.
+        #
+        # Phase 2     (sync, ~0s): meeting_record.close() bakes
+        #   participants_final + meeting_end into the JSONL. Reads
+        #   runner._attended_participants which is stable only after
+        #   runner.stop returned (chat thread joined). Roster file unlinks
+        #   here too — chat_runner can no longer race-rewrite it.
+        #
+        # Phase 3     (~0.6s): _kill_orphaned_children. MUST run after Phase 1
+        #   branches join, else we could SIGKILL grandchildren a branch was
+        #   still tearing down.
+        import time as _time
+        import threading as _threading
+        _t_start = _time.monotonic()
         try:
             marker = Path.home() / ".operator" / ".current_meeting"
             if marker.exists():
@@ -1137,13 +1153,41 @@ def _run_slip(name, rest, *, mode="slip"):
         except OSError:
             pass
         _release_slip_lock()
-        runner.stop()
-        # Bake the cumulative attendee list + the meeting_end terminator
-        # into the JSONL so post-meeting lookup tools (find_meetings,
-        # list_meetings) can answer "who was on the X meeting?" against
-        # disk-resident state. After runner.stop() the chat thread is
-        # joined so _attended_participants is stable. Best-effort — never
-        # let close() failures block teardown.
+        _t_fast = _time.monotonic()
+
+        # Phase 1: parallel teardown of inner subprocs + browser/audio.
+        _t_runner_end = [_t_fast]
+        _t_leave_end = [_t_fast]
+
+        def _do_runner_stop():
+            try:
+                runner.stop()
+            except Exception as e:
+                log.warning(f"_shutdown: runner.stop raised: {e}")
+            finally:
+                _t_runner_end[0] = _time.monotonic()
+
+        def _do_connector_leave():
+            try:
+                connector.leave()
+            except Exception as e:
+                log.warning(f"_shutdown: connector.leave raised: {e}")
+            finally:
+                _t_leave_end[0] = _time.monotonic()
+
+        t_runner_thread = _threading.Thread(target=_do_runner_stop, daemon=True)
+        t_leave_thread = _threading.Thread(target=_do_connector_leave, daemon=True)
+        t_runner_thread.start()
+        t_leave_thread.start()
+        t_runner_thread.join(timeout=30)
+        t_leave_thread.join(timeout=30)
+        if t_runner_thread.is_alive():
+            log.warning("_shutdown: runner.stop branch did not complete in 30s — abandoning to reaper")
+        if t_leave_thread.is_alive():
+            log.warning("_shutdown: connector.leave branch did not complete in 30s — abandoning to reaper")
+        _t_phase1_end = _time.monotonic()
+
+        # Phase 2: bake participants_final + meeting_end into JSONL.
         try:
             attended = sorted(getattr(runner, "_attended_participants", set()))
             self_name = getattr(runner, "_last_self_name", "") or ""
@@ -1156,8 +1200,21 @@ def _run_slip(name, rest, *, mode="slip"):
                 roster.unlink()
         except OSError:
             pass
-        connector.leave()
+        _t_record = _time.monotonic()
+
+        # Phase 3: safety-net reap.
         _kill_orphaned_children()
+        _t_done = _time.monotonic()
+        log.info(
+            f"TIMING shutdown mode=slip "
+            f"fast_unlink={_t_fast - _t_start:.2f}s "
+            f"runner_stop={_t_runner_end[0] - _t_fast:.2f}s "
+            f"connector_leave={_t_leave_end[0] - _t_fast:.2f}s "
+            f"phase1_total={_t_phase1_end - _t_fast:.2f}s "
+            f"record_close={_t_record - _t_phase1_end:.2f}s "
+            f"reap={_t_done - _t_record:.2f}s "
+            f"total={_t_done - _t_start:.2f}s"
+        )
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -1282,6 +1339,15 @@ def _run_wiretap(url):
         _shutdown_called = True
         if signum:
             log.info(f"Received signal {signum} — shutting down")
+        # Same parallel-teardown structure as slip mode (see slip _shutdown
+        # for the phase explanation). Wiretap has no provider + no
+        # classifier so runner.stop is a fast no-op; connector.leave still
+        # has the audio pipeline + Playwright teardown to do. The
+        # asymmetric parallelism is fine; structure stays uniform across
+        # modes so failure paths look the same.
+        import time as _time
+        import threading as _threading
+        _t_start = _time.monotonic()
         try:
             marker = Path.home() / ".operator" / ".current_meeting"
             if marker.exists():
@@ -1289,7 +1355,39 @@ def _run_wiretap(url):
         except OSError:
             pass
         _release_slip_lock()
-        runner.stop()
+        _t_fast = _time.monotonic()
+
+        _t_runner_end = [_t_fast]
+        _t_leave_end = [_t_fast]
+
+        def _do_runner_stop():
+            try:
+                runner.stop()
+            except Exception as e:
+                log.warning(f"_shutdown: runner.stop raised: {e}")
+            finally:
+                _t_runner_end[0] = _time.monotonic()
+
+        def _do_connector_leave():
+            try:
+                connector.leave()
+            except Exception as e:
+                log.warning(f"_shutdown: connector.leave raised: {e}")
+            finally:
+                _t_leave_end[0] = _time.monotonic()
+
+        t_runner_thread = _threading.Thread(target=_do_runner_stop, daemon=True)
+        t_leave_thread = _threading.Thread(target=_do_connector_leave, daemon=True)
+        t_runner_thread.start()
+        t_leave_thread.start()
+        t_runner_thread.join(timeout=30)
+        t_leave_thread.join(timeout=30)
+        if t_runner_thread.is_alive():
+            log.warning("_shutdown: runner.stop branch did not complete in 30s — abandoning to reaper")
+        if t_leave_thread.is_alive():
+            log.warning("_shutdown: connector.leave branch did not complete in 30s — abandoning to reaper")
+        _t_phase1_end = _time.monotonic()
+
         try:
             attended = sorted(getattr(runner, "_attended_participants", set()))
             self_name = getattr(runner, "_last_self_name", "") or ""
@@ -1302,8 +1400,19 @@ def _run_wiretap(url):
                 roster.unlink()
         except OSError:
             pass
-        connector.leave()
+        _t_record = _time.monotonic()
         _kill_orphaned_children()
+        _t_done = _time.monotonic()
+        log.info(
+            f"TIMING shutdown mode=wiretap "
+            f"fast_unlink={_t_fast - _t_start:.2f}s "
+            f"runner_stop={_t_runner_end[0] - _t_fast:.2f}s "
+            f"connector_leave={_t_leave_end[0] - _t_fast:.2f}s "
+            f"phase1_total={_t_phase1_end - _t_fast:.2f}s "
+            f"record_close={_t_record - _t_phase1_end:.2f}s "
+            f"reap={_t_done - _t_record:.2f}s "
+            f"total={_t_done - _t_start:.2f}s"
+        )
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

@@ -423,6 +423,11 @@ class ChatRunner:
     def stop(self):
         """Signal the polling loop to exit and tear down the LLM provider.
 
+        provider.stop() and classifier.stop() each take ~0.85s post-S243
+        (SIGTERM grace + PTY reader join + SIGKILL); they're independent
+        subprocesses so we run them in parallel here. Sequential cost was
+        ~1.7s in the empirical sweep; parallel ~0.85s.
+
         Calling provider.stop() before the safety net SIGKILLs the
         subprocess closes the race where the provider's mid-turn
         restart path would otherwise spawn a fresh claude subprocess
@@ -430,17 +435,56 @@ class ChatRunner:
         classifier sidecar (yolo-off mode), which is otherwise a
         long-lived child that would survive past the parent.
         """
+        t_start = time.monotonic()
         self._stop_event.set()
-        if self._provider is not None:
+
+        # Per-branch end timestamps so we keep separate TIMING visibility
+        # despite parallel execution. Initialized to t_start so a no-op
+        # branch (provider/classifier is None) reports 0.00s rather than
+        # garbage.
+        t_provider_end = [t_start]
+        t_classifier_end = [t_start]
+
+        def _stop_provider():
             try:
-                self._provider.stop()
+                if self._provider is not None:
+                    self._provider.stop()
             except Exception as e:
                 log.warning(f"ChatRunner: provider.stop raised: {e}")
-        if self._classifier is not None:
+            finally:
+                t_provider_end[0] = time.monotonic()
+
+        def _stop_classifier():
             try:
-                self._classifier.stop()
+                if self._classifier is not None:
+                    self._classifier.stop()
             except Exception as e:
                 log.warning(f"ChatRunner: classifier.stop raised: {e}")
+            finally:
+                t_classifier_end[0] = time.monotonic()
+
+        prov_thread = threading.Thread(target=_stop_provider, daemon=True)
+        clf_thread = threading.Thread(target=_stop_classifier, daemon=True)
+        prov_thread.start()
+        clf_thread.start()
+
+        # 30s safety join — if a branch wedges (PTY reader stuck, dead
+        # lock on subprocess.wait), don't hang shutdown forever. The
+        # orphan reaper in __main__._shutdown catches anything left.
+        prov_thread.join(timeout=30)
+        clf_thread.join(timeout=30)
+        if prov_thread.is_alive():
+            log.warning("ChatRunner: provider.stop branch did not complete in 30s — abandoning")
+        if clf_thread.is_alive():
+            log.warning("ChatRunner: classifier.stop branch did not complete in 30s — abandoning")
+
+        t_done = time.monotonic()
+        log.info(
+            f"TIMING runner_stop "
+            f"provider={t_provider_end[0] - t_start:.2f}s "
+            f"classifier={t_classifier_end[0] - t_start:.2f}s "
+            f"total={t_done - t_start:.2f}s"
+        )
 
     def _safe_leave(self):
         """Wrap connector.leave() — if it raises (e.g. Playwright already
