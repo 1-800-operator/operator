@@ -1,6 +1,6 @@
 """Live smoke for AttachAdapter._start_audio_pipeline against the real helper.
 
-Spawns operator-audio-capture, lets it stream for ~3s (under the 10s no-callback
+Spawns the Operator audio helper, lets it stream for ~3s (under the 10s no-callback
 watchdog), counts frames received per stream, then stops cleanly. NOT a unit
 test — requires Screen Recording + Microphone TCC granted to the parent
 terminal, otherwise the helper exits with code 4/5 and the smoke fails fast.
@@ -26,7 +26,7 @@ from _1_800_operator.connectors.attach_adapter import (
 def main() -> int:
     helper = _resolve_audio_helper()
     if helper is None:
-        print("FAIL: operator-audio-capture not found. Build with `swiftc src/_1_800_operator/swift/operator-audio-capture.swift -O -o src/_1_800_operator/swift/operator-audio-capture`")
+        print("FAIL: Operator audio helper not found. Build with `swiftc src/_1_800_operator/swift/operator-audio-capture.swift -O -o src/_1_800_operator/swift/Operator`")
         return 1
     print(f"helper: {helper}")
 

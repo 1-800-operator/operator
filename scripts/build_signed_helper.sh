@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the operator-audio-capture helper as a notarized .app bundle.
+# Build the Operator audio helper as a notarized .app bundle.
 #
 # Run on a machine that has:
 #   - swiftc (Xcode Command Line Tools)
@@ -7,7 +7,7 @@
 #   - notarytool credentials stored as keychain profile "notarytool-password"
 #     (one-time setup: xcrun notarytool store-credentials notarytool-password ...)
 #
-# Output: ~/.operator/bin/operator-audio-capture.app (signed + notarized + stapled)
+# Output: ~/.operator/bin/Operator.app (signed + notarized + stapled)
 #
 # This is the release-time artifact builder. End users never run this; they
 # get the prebuilt .app via the wheel (eventually) or this script bundled
@@ -21,15 +21,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SWIFT_SRC="${REPO_ROOT}/src/_1_800_operator/swift/operator-audio-capture.swift"
 INFO_PLIST="${REPO_ROOT}/src/_1_800_operator/swift/Info.plist"
 ENTITLEMENTS="${REPO_ROOT}/src/_1_800_operator/swift/helper.entitlements"
+ICNS="${REPO_ROOT}/src/_1_800_operator/swift/Operator.icns"
 
 BUNDLE_ID="com.1-800-operator.audio-capture"
 SIGN_IDENTITY="Developer ID Application: Jojo Shapiro (DSW7V72HT7)"
 NOTARY_PROFILE="notarytool-password"
 
 OUT_DIR="${HOME}/.operator/bin"
-APP_NAME="operator-audio-capture.app"
+APP_NAME="Operator.app"
 APP_PATH="${OUT_DIR}/${APP_NAME}"
-ZIP_PATH="${OUT_DIR}/operator-audio-capture.zip"
+ZIP_PATH="${OUT_DIR}/Operator.zip"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -38,7 +39,7 @@ err()  { printf '\033[31m  %s\033[0m\n' "$1" >&2; }
 
 # -- Preflight --------------------------------------------------------------
 
-bold "Building signed + notarized operator-audio-capture.app"
+bold "Building signed + notarized Operator.app"
 echo
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -69,7 +70,7 @@ if ! security find-generic-password -s "com.apple.gke.notary.tool" -a "${NOTARY_
   echo
 fi
 
-for f in "${SWIFT_SRC}" "${INFO_PLIST}" "${ENTITLEMENTS}"; do
+for f in "${SWIFT_SRC}" "${INFO_PLIST}" "${ENTITLEMENTS}" "${ICNS}"; do
   if [ ! -f "$f" ]; then
     err "Missing required source file: $f"
     exit 1
@@ -80,7 +81,7 @@ done
 
 bold "1/5  Compiling Swift helper..."
 mkdir -p "${OUT_DIR}"
-TMP_BIN="$(mktemp -t operator-audio-capture.XXXXXX)"
+TMP_BIN="$(mktemp -t Operator.XXXXXX)"
 swiftc "${SWIFT_SRC}" -O -o "${TMP_BIN}"
 chmod +x "${TMP_BIN}"
 info "Built: ${TMP_BIN}"
@@ -93,9 +94,11 @@ bold "2/5  Assembling .app bundle..."
 # can't poison the new build.
 rm -rf "${APP_PATH}"
 mkdir -p "${APP_PATH}/Contents/MacOS"
+mkdir -p "${APP_PATH}/Contents/Resources"
 cp "${INFO_PLIST}" "${APP_PATH}/Contents/Info.plist"
-mv "${TMP_BIN}" "${APP_PATH}/Contents/MacOS/operator-audio-capture"
-chmod +x "${APP_PATH}/Contents/MacOS/operator-audio-capture"
+cp "${ICNS}" "${APP_PATH}/Contents/Resources/Operator.icns"
+mv "${TMP_BIN}" "${APP_PATH}/Contents/MacOS/Operator"
+chmod +x "${APP_PATH}/Contents/MacOS/Operator"
 # Validate the plist before the codesign step uses it.
 plutil -lint "${APP_PATH}/Contents/Info.plist" >/dev/null
 info "Bundle: ${APP_PATH}"

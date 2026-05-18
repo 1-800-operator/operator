@@ -1,0 +1,34 @@
+[
+  {
+    "mechanism": "A: plain Popen",
+    "helper_pid": 5483,
+    "helper_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "responsible_pid": 3674,
+    "responsible_comm": "/Applications/Cursor.app/Contents/MacOS/Cursor",
+    "self_attributed": false
+  },
+  {
+    "mechanism": "B: _disclaimed_spawn",
+    "helper_pid": 5488,
+    "helper_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "responsible_pid": 5488,
+    "responsible_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "self_attributed": true
+  },
+  {
+    "mechanism": "C: open -W -n -a",
+    "helper_pid": 5496,
+    "helper_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "responsible_pid": 5496,
+    "responsible_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "self_attributed": true
+  },
+  {
+    "mechanism": "D: open -g -n -a",
+    "helper_pid": 5505,
+    "helper_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "responsible_pid": 5505,
+    "responsible_comm": "/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator",
+    "self_attributed": true
+  }
+]

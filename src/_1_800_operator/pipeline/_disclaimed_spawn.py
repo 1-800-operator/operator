@@ -243,6 +243,29 @@ def spawn_disclaimed(
     .pid/.stdin/.stdout/.poll/.wait/.terminate/.kill. The child runs as its
     own responsible process — TCC checks key against args[0]'s code-signed
     identifier, not the launcher's responsibility chain.
+
+    ## When to use this vs `open -W -n -a`
+
+    Operator has two correct mechanisms for spawning the audio helper with
+    self-attribution to its own bundle. They're picked per-context:
+
+    - **`spawn_disclaimed` (this function)** — long-lived spawns where the
+      parent needs stdin/stdout pipes for the lifetime of the child.
+      Used by `attach_adapter._start_audio_pipeline` for the duration of
+      a meeting (helper writes framed PCM to stdout for ~hours).
+
+    - **`open -W -n -a /path/to/App.app`** — one-shot foreground launches
+      where the helper just needs to surface TCC dialogs interactively
+      and exit. Used by `__main__._preflight_audio_helper_tcc` for the
+      install-time / cold-start warmup. `open -W` provides Launch Services
+      lifecycle (blocks until exit) for free; we don't need pipes.
+
+    Both produce identical TCC attribution to the helper's own bundle
+    identity — measured empirically in `debug/14_31_tcc_warmup_spike/`.
+    The plain `subprocess.Popen([helper])` pattern is the failure mode:
+    it inherits the calling shell's responsibility chain, so the helper's
+    TCC checks resolve against (say) Cursor's grant instead of Operator's.
+    Never use plain Popen for the helper outside of throwaway debug.
     """
     if not args:
         raise ValueError("args must be non-empty")

@@ -10,6 +10,8 @@ Usage:
     operator doctor               Diagnostic check — is the world ready?
     operator                      Print usage
 """
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -117,10 +119,36 @@ def _kill_orphaned_children():
 _SLIP_LOCK_PATH = Path.home() / ".operator" / "slip.pid"
 _AUDIO_HELPER_APP = Path.home() / ".operator" / "bin" / "Operator.app"
 _AUDIO_HELPER_BIN = _AUDIO_HELPER_APP / "Contents" / "MacOS" / "Operator"
+_HELPER_BUNDLE_ID = "com.1-800-operator.audio-capture"
+_LSREGISTER = Path(
+    "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/"
+    "LaunchServices.framework/Versions/A/Support/lsregister"
+)
+
+# macOS System Settings deep-link URLs (macOS 13+). When the user has
+# explicitly denied a TCC service, the only path back is manual re-enable
+# in Settings — `CGRequestScreenCaptureAccess` / `AVCaptureDevice.requestAccess`
+# both no-op silently after explicit deny. Surfacing the right pane saves
+# the user from hunting through Privacy & Security.
+_SETTINGS_DEEP_LINK_SCREEN_CAPTURE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+)
+_SETTINGS_DEEP_LINK_MICROPHONE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+)
 
 
 def _probe_helper_tcc() -> str:
     """Return the helper's `--probe` JSON, or '' if unrunnable.
+
+    Spawns the probe via `_disclaimed_spawn` so the child runs as its own
+    TCC-responsible process. Without disclaim, `CGPreflightScreenCaptureAccess()`
+    inside the probe checks against the parent IDE/terminal's grant rather
+    than the helper bundle's — and on a freshly-installed setup where the
+    IDE isn't granted but the helper is, the probe would falsely report
+    "denied" and trigger an unnecessary warmup. See
+    debug/14_31_tcc_warmup_spike/ for the empirical measurement that
+    pinned this attribution down.
 
     Helper is short-lived (<200ms); probe is safe to call from anywhere.
     Falls back to '' so callers can treat parse failures as "unknown."
@@ -131,36 +159,155 @@ def _probe_helper_tcc() -> str:
         # Minimal env — the helper has no auth needs. Without this it'd
         # inherit the full shell env including API keys / cloud creds /
         # GitHub tokens. See _disclaimed_spawn.minimal_helper_env docstring.
-        from _1_800_operator.pipeline._disclaimed_spawn import minimal_helper_env
-        r = subprocess.run(
+        from _1_800_operator.pipeline._disclaimed_spawn import (
+            minimal_helper_env,
+            spawn_disclaimed,
+        )
+        p = spawn_disclaimed(
             [str(_AUDIO_HELPER_BIN), "--probe"],
-            capture_output=True, text=True, timeout=5,
             env=minimal_helper_env(),
         )
-        return r.stdout.strip()
-    except (subprocess.SubprocessError, OSError):
+        try:
+            out_bytes = p.stdout.read(4096)
+            p.wait(timeout=5)
+        finally:
+            if p.poll() is None:
+                try:
+                    p.kill()
+                    p.wait(timeout=2)
+                except Exception:
+                    pass
+        return out_bytes.decode("utf-8", errors="replace").strip()
+    except Exception:
         return ""
 
 
+def _parse_probe_status(probe: str) -> tuple[str, str]:
+    """Extract (screen_recording, microphone) status strings from probe JSON.
+
+    Returns ('unknown', 'unknown') on parse failure so callers can treat
+    unknown the same as not-yet-prompted (run the warmup, see what happens).
+    """
+    if not probe:
+        return ("unknown", "unknown")
+    try:
+        d = json.loads(probe)
+    except (json.JSONDecodeError, ValueError):
+        return ("unknown", "unknown")
+    return (
+        str(d.get("screen_recording", "unknown")),
+        str(d.get("microphone", "unknown")),
+    )
+
+
+def _ls_cleanup_stale_helpers() -> int:
+    """Unregister Launch Services entries for our bundle ID that don't point
+    at the canonical install path. Returns count of paths unregistered.
+
+    Why this exists: every `uv tool install --reinstall` extracts a fresh
+    wheel into a new `~/.cache/uv/archive-v0/<hash>/` dir, and Launch
+    Services auto-registers any `.app` it finds during directory scans.
+    Over a development cycle that's dozens of stale copies all claiming
+    the same bundle ID (`com.1-800-operator.audio-capture`). When the
+    TCC warmup dialog click attaches to "whichever copy LS resolved
+    first," the grant can land on a stale archive copy instead of our
+    canonical `~/.operator/bin/Operator.app`, and the runtime helper
+    invocation silently fails because its code-requirement doesn't match
+    the granted entry. The S240 debugging arc hit this with 36 stale
+    registrations; cleanup fixed it instantly.
+
+    Idempotent — safe to call on every cold start. Best-effort; failures
+    are swallowed (LS cleanup is defense, not load-bearing).
+    """
+    if not _LSREGISTER.exists():
+        return 0
+    try:
+        r = subprocess.run(
+            [str(_LSREGISTER), "-dump"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if r.returncode != 0:
+        return 0
+
+    # lsregister -dump emits sections with "path: <path>" headers; within
+    # each section, our bundle ID appears as `identifier: <bid>` and inside
+    # CFBundleIdentifier strings. Match either form by substring within
+    # the section bounded by the next "path:" line.
+    paths_for_bundle: set[str] = set()
+    current_path: str | None = None
+    for raw in r.stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("path:"):
+            current_path = line[len("path:"):].strip()
+        elif _HELPER_BUNDLE_ID in line and current_path:
+            paths_for_bundle.add(current_path)
+
+    canonical = str(_AUDIO_HELPER_APP)
+    stale = [p for p in paths_for_bundle if p != canonical]
+
+    count = 0
+    for p in stale:
+        try:
+            subprocess.run(
+                [str(_LSREGISTER), "-u", p],
+                capture_output=True, timeout=5,
+            )
+            count += 1
+        except (subprocess.SubprocessError, OSError):
+            pass
+    return count
+
+
+def _open_settings_pane(url: str) -> None:
+    """Open a System Settings deep link. Best-effort."""
+    try:
+        subprocess.run(["open", url], capture_output=True, timeout=3)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
 def _preflight_audio_helper_tcc() -> None:
-    """First-run TCC warmup for the signed audio helper.
+    """First-run / per-slip TCC warmup for the signed audio helper.
 
     install.sh runs the equivalent warmup at install time, but TCC state
-    can desync afterwards (OS upgrade, manual `tccutil reset`, the bundle
-    being re-copied, etc.). This preflight catches that case so users
-    don't hit a silent broken-audio slip when they're a minute away from
-    a real meeting.
+    can desync afterwards (OS upgrade, manual `tccutil reset`, the user
+    toggling perms off in Settings, the bundle being re-copied, etc.).
+    This preflight catches that case so users don't hit a silent broken-
+    audio slip when they're a minute away from a real meeting.
 
     Flow:
-      1. Probe helper's current TCC state.
-      2. If both perms granted → no-op (fast path, the common case).
-      3. If either missing → invoke `open -W -a` on the helper bundle.
-         macOS attributes the prompts to the bundle (not the parent
-         IDE/terminal) so the user sees dialogs for "Operator."
-         The `-W` blocks until the helper exits (~10s via its watchdog).
-      4. Re-probe. Warn but don't fail if the user denied — slip can
-         still run chat-only; better to let them proceed than block the
-         meeting they're trying to join.
+      1. **LS cleanup** — `lsregister -u` any cached duplicate
+         registrations of our bundle ID. Without this, a TCC grant click
+         can attach to a stale wheel-cache copy and the runtime helper
+         silently runs with the wrong code requirement (S240 hit 36
+         duplicates). Idempotent, ~100ms.
+      2. **Probe** the helper's TCC state via `_disclaimed_spawn` (so the
+         probe answers against the helper's own identity, not the parent
+         IDE's — see `_probe_helper_tcc` docstring).
+      3. **Both granted → no-op fast path** (the common case).
+      4. **`not_determined` or `unknown` → run the warmup**. Invoke
+         `open -W -n -a` on the helper bundle. macOS surfaces dialogs
+         attributed to "Operator" (verified in
+         debug/14_31_tcc_warmup_spike/). The `-W` blocks until the helper
+         exits (~10s via its watchdog). Re-probe; report success.
+      5. **`denied` → DON'T re-run the warmup**. macOS no-ops
+         `CGRequestScreenCaptureAccess` / `AVCaptureDevice.requestAccess`
+         after explicit deny — re-running the warmup would just spin for
+         10s and exit without surfacing anything. Instead, deep-link the
+         user straight to the relevant System Settings pane and tell them
+         what to re-enable. Slip degrades to chat-only; user fixes once
+         and reruns.
+
+    **Why `open -W -n -a` for the warmup (not `_disclaimed_spawn`):** both
+    mechanisms produce correct attribution (spike: 14_31_tcc_warmup_spike).
+    They're picked per-context for ergonomics — `open -W` is a one-shot
+    foreground launcher that blocks until the helper exits and gives us
+    Launch Services lifecycle for free, which is what the warmup needs.
+    `_disclaimed_spawn` is built for long-lived pipe-managed spawns (slip-
+    live), where you need stdin/stdout plumbing across the whole meeting.
+    See `_disclaimed_spawn.spawn_disclaimed` docstring for the contrast.
 
     Helper isn't installed → no-op (dev fallback path or skipped install).
     Non-macOS → no-op (slip is mac-only anyway, but defensive).
@@ -170,10 +317,47 @@ def _preflight_audio_helper_tcc() -> None:
     if not _AUDIO_HELPER_BIN.exists():
         return
 
-    before = _probe_helper_tcc()
-    if '"screen_recording":"ok"' in before and '"microphone":"ok"' in before:
+    # (1) LS cleanup — strip stale duplicates so any subsequent warmup
+    # click attaches to the canonical bundle unambiguously.
+    n_stale = _ls_cleanup_stale_helpers()
+    if n_stale:
+        log = logging.getLogger("operator")
+        log.info(
+            f"Unregistered {n_stale} stale Launch Services entries for "
+            f"{_AUDIO_HELPER_APP.name}"
+        )
+
+    # (2) Probe current state (self-attributed via _disclaimed_spawn).
+    sr, mic = _parse_probe_status(_probe_helper_tcc())
+    if sr == "ok" and mic == "ok":
         return  # fast path — both granted
 
+    # (5) Explicit denies — re-warmup can't recover; surface help and
+    # open the relevant Settings pane.
+    denied: list[tuple[str, str]] = []
+    if sr == "denied":
+        denied.append(("Screen & System Audio Recording", _SETTINGS_DEEP_LINK_SCREEN_CAPTURE))
+    if mic == "denied":
+        denied.append(("Microphone", _SETTINGS_DEEP_LINK_MICROPHONE))
+    if denied:
+        print()
+        print("⚠ Operator audio capture is disabled in macOS Privacy & Security.")
+        print()
+        for pane, _ in denied:
+            print(f"  {pane}: DENIED")
+        print()
+        print("  Fix: System Settings → Privacy & Security → enable 'Operator' under:")
+        for pane, _ in denied:
+            print(f"        - {pane}")
+        print()
+        print("  Slip will continue in chat-only mode until you re-enable.")
+        # Open the first relevant pane to save the user a navigation click.
+        _open_settings_pane(denied[0][1])
+        print()
+        return
+
+    # (4) Not-determined / unknown / partial-ok — warmup will surface
+    # fresh dialogs for whichever perm is missing.
     print(
         "macOS audio permissions needed — surfacing dialogs for the audio helper.\n"
         "  Click Allow on each as it appears (Screen Recording + Microphone).\n"
@@ -187,20 +371,20 @@ def _preflight_audio_helper_tcc() -> None:
     except (subprocess.SubprocessError, OSError):
         pass
 
-    after = _probe_helper_tcc()
-    if '"screen_recording":"ok"' in after and '"microphone":"ok"' in after:
+    sr2, mic2 = _parse_probe_status(_probe_helper_tcc())
+    if sr2 == "ok" and mic2 == "ok":
         print("✓ Audio permissions granted — proceeding.")
         return
 
-    # Still missing. Most likely cause is user-deny (click Don't Allow)
-    # or Apple's prompt cooldown after recent rapid-fire grants/denies.
-    # Don't block the slip — degraded slip (silent captions) beats
-    # refusing to join the meeting the user is about to attend.
+    # Still missing after warmup. Most likely cause: user clicked Don't
+    # Allow (which flips status to denied for next run) or Apple's prompt
+    # cooldown after recent rapid-fire grants/denies. Don't block the
+    # slip — degraded slip beats refusing to join the user's meeting.
     print(
-        "Audio permissions not granted yet — slip will launch but captions will be silent.\n"
-        f"  To fix: System Settings → Privacy & Security → Screen Recording (and Microphone)\n"
-        f"          → '+' → {_AUDIO_HELPER_APP} → enable\n"
-        f"          Then re-run /operator:slip."
+        f"⚠ Audio permissions not fully granted (screen_recording={sr2}, microphone={mic2}).\n"
+        "  Slip will run in chat-only mode (no caption transcript).\n"
+        "  Fix: System Settings → Privacy & Security → enable 'Operator' under\n"
+        "       Screen & System Audio Recording AND Microphone. Then re-run slip."
     )
 
 

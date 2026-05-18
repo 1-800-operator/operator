@@ -317,6 +317,28 @@ if [ "${OS}" = "macos" ]; then
       cp -R "${PREBUILT_APP}" "${INSTALLED_APP}"
       info "Installed signed helper: ${INSTALLED_APP}"
 
+      # Launch Services cleanup. Every `uv tool install --reinstall` extracts
+      # the wheel into a fresh `~/.cache/uv/archive-v0/<hash>/` dir, and LS
+      # auto-registers any `.app` it finds. Over a development cycle that's
+      # dozens of stale copies all claiming `com.1-800-operator.audio-capture`.
+      # When the TCC warmup dialog click attaches to "whichever copy LS
+      # resolved first," the grant can land on a stale archive copy instead
+      # of our canonical INSTALLED_APP, and the runtime helper silently fails
+      # (S240 hit 36 stale registrations). Cleanup is idempotent + best-effort.
+      LSREG="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+      if [ -x "${LSREG}" ]; then
+        n_stale=0
+        while IFS= read -r p; do
+          if [ -n "$p" ] && [ "$p" != "${INSTALLED_APP}" ]; then
+            "${LSREG}" -u "$p" >/dev/null 2>&1 && n_stale=$((n_stale + 1))
+          fi
+        done < <("${LSREG}" -dump 2>/dev/null | awk '/^path:/{path=$2} /com\.1-800-operator\.audio-capture/{print path; path=""}' | sort -u)
+        if [ "$n_stale" -gt 0 ]; then
+          info "Unregistered $n_stale stale Launch Services entries for the helper bundle."
+        fi
+      fi
+
+
       # TCC warmup. The helper bundle carries its own TCC identity
       # (com.1-800-operator.audio-capture). When the slip flow exec's the
       # inner binary as a subprocess of operator (which is itself a child
