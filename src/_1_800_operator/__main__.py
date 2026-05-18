@@ -963,6 +963,18 @@ def _run_slip(name, rest, *, mode="slip"):
     # ("operator slip is already running…") regardless of exit code. The
     # success-path output shape is what callers parse anyway.
     _t_argv_done = _startup_time.monotonic()
+
+    # Configure file logging now (before any preflight) so the preflights
+    # can emit their own TIMING breadcrumbs. The post-fork basicConfig in
+    # the child is a no-op once handlers exist.
+    logging.basicConfig(
+        filename="/tmp/operator.log",
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    )
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     other_pid = _acquire_slip_lock()
     if other_pid is not None:
         existing_url = _read_current_meeting_url()
@@ -1021,19 +1033,10 @@ def _run_slip(name, rest, *, mode="slip"):
     except OSError:
         pass
 
-    # Configure file logging BEFORE the fork so the parent can emit the
-    # pre-daemonize TIMING line. The child's post-fork basicConfig (below,
-    # after _daemonize_and_announce returns) is a no-op once handlers
-    # exist, so this is safe to do here. File handler fd is dup'd across
-    # the fork — both processes append to /tmp/operator.log atomically
-    # (POSIX write(2) ≤ PIPE_BUF guarantees per-line atomicity).
-    logging.basicConfig(
-        filename="/tmp/operator.log",
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    )
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # File logging was configured earlier in this function (right after
+    # argv parse) so preflights could emit their own TIMING breadcrumbs.
+    # Emit the pre-daemonize startup line now; the child inherits the
+    # file-handler fd across the fork and appends atomically.
     _log_pre = logging.getLogger("operator")
     _t_fork = _startup_time.monotonic()
     _log_pre.info(
