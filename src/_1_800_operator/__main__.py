@@ -15,7 +15,14 @@ import logging
 import os
 import subprocess
 import sys
+import time as _startup_time
 from pathlib import Path
+
+# Module-load timestamp — anchors the `TIMING slip_startup` line so we can
+# attribute Python import overhead separately from operator's own preflight
+# work. Stamp here (top of __main__) rather than inside main() so transitive
+# imports above are counted as boot, not as dispatch.
+_T_MODULE_LOAD = _startup_time.monotonic()
 
 from _1_800_operator import config
 
@@ -317,6 +324,13 @@ def _preflight_audio_helper_tcc() -> None:
     if not _AUDIO_HELPER_BIN.exists():
         return
 
+    # Phase timing — the whole function is on the synchronous pre-fork
+    # path, so every ms is user-visible. Probes split the two fast-path
+    # phases (lsregister cleanup + helper --probe) and the slow-path
+    # warmup. Emitted as one TIMING line at function exit so the slip
+    # startup trace can subtract this cost.
+    _t_tcc_entry = _startup_time.monotonic()
+
     # (1) LS cleanup — strip stale duplicates so any subsequent warmup
     # click attaches to the canonical bundle unambiguously.
     n_stale = _ls_cleanup_stale_helpers()
@@ -326,10 +340,18 @@ def _preflight_audio_helper_tcc() -> None:
             f"Unregistered {n_stale} stale Launch Services entries for "
             f"{_AUDIO_HELPER_APP.name}"
         )
+    _t_after_ls = _startup_time.monotonic()
 
     # (2) Probe current state (self-attributed via _disclaimed_spawn).
     sr, mic = _parse_probe_status(_probe_helper_tcc())
+    _t_after_probe = _startup_time.monotonic()
     if sr == "ok" and mic == "ok":
+        logging.getLogger("operator").info(
+            f"TIMING tcc_preflight path=fast "
+            f"ls_cleanup_ms={int((_t_after_ls - _t_tcc_entry) * 1000)} "
+            f"probe_ms={int((_t_after_probe - _t_after_ls) * 1000)} "
+            f"sr={sr} mic={mic}"
+        )
         return  # fast path — both granted
 
     # (5) Explicit denies — re-warmup can't recover; surface help and
@@ -363,6 +385,7 @@ def _preflight_audio_helper_tcc() -> None:
         "  Click Allow on each as it appears (Screen Recording + Microphone).\n"
         "  This takes ~10 seconds. The helper exits on its own when done."
     )
+    _t_before_warmup = _startup_time.monotonic()
     try:
         subprocess.run(
             ["open", "-W", "-n", "-a", str(_AUDIO_HELPER_APP)],
@@ -370,8 +393,18 @@ def _preflight_audio_helper_tcc() -> None:
         )
     except (subprocess.SubprocessError, OSError):
         pass
+    _t_after_warmup = _startup_time.monotonic()
 
     sr2, mic2 = _parse_probe_status(_probe_helper_tcc())
+    _t_after_reprobe = _startup_time.monotonic()
+    logging.getLogger("operator").info(
+        f"TIMING tcc_preflight path=warmup "
+        f"ls_cleanup_ms={int((_t_after_ls - _t_tcc_entry) * 1000)} "
+        f"probe_ms={int((_t_after_probe - _t_after_ls) * 1000)} "
+        f"warmup_ms={int((_t_after_warmup - _t_before_warmup) * 1000)} "
+        f"reprobe_ms={int((_t_after_reprobe - _t_after_warmup) * 1000)} "
+        f"sr_before={sr} mic_before={mic} sr_after={sr2} mic_after={mic2}"
+    )
     if sr2 == "ok" and mic2 == "ok":
         print("✓ Audio permissions granted — proceeding.")
         return
@@ -855,6 +888,13 @@ def _run_slip(name, rest, *, mode="slip"):
                   classifier sidecar. ChatRunner forwards every chat
                   message to claude (no trigger gating).
     """
+    # Pre-daemonize phase timing. The parent process synchronously runs
+    # preflights before forking; the bash `!` block in the desktop-app
+    # surface waits for the parent's _os._exit(0), so every ms here is
+    # user-visible startup latency. The child inherits the file-logging
+    # handler (set up just before the fork) so the TIMING line lands in
+    # /tmp/operator.log even though the parent dies immediately after.
+    _t_slip_entry = _startup_time.monotonic()
     guarded = mode in ("slip", "strict")
     # Resume-session resolution has two tiers (see logic below):
     #   1. --resume-session <id> on the command line.
@@ -922,6 +962,7 @@ def _run_slip(name, rest, *, mode="slip"):
     # normally, and the SKILL.md's "Error" branch matches by the line shape
     # ("operator slip is already running…") regardless of exit code. The
     # success-path output shape is what callers parse anyway.
+    _t_argv_done = _startup_time.monotonic()
     other_pid = _acquire_slip_lock()
     if other_pid is not None:
         existing_url = _read_current_meeting_url()
@@ -936,6 +977,7 @@ def _run_slip(name, rest, *, mode="slip"):
                 f"Use /operator:hangup to leave that meeting first, then retry."
             )
         return 0
+    _t_lock_done = _startup_time.monotonic()
 
     # claude binary preflight — fail loud and early; no browser dance,
     # no config load if claude isn't installed, logged out, or too old.
@@ -953,6 +995,7 @@ def _run_slip(name, rest, *, mode="slip"):
             f"Fix that and re-run. (`operator doctor` runs the full check.)"
         )
         return 0
+    _t_claude_check_done = _startup_time.monotonic()
 
     # First-run TCC warmup for the signed audio helper. No-op when both
     # perms are already granted (common case after install.sh's warmup);
@@ -962,6 +1005,7 @@ def _run_slip(name, rest, *, mode="slip"):
     # continues if user denies — degraded slip (silent captions) beats
     # refusing to join the meeting they're about to attend.
     _preflight_audio_helper_tcc()
+    _t_tcc_done = _startup_time.monotonic()
 
     # All synchronous validation has passed. Hand the caller (Bash tool,
     # shell, etc.) a one-line success acknowledgement, then detach so
@@ -976,12 +1020,13 @@ def _run_slip(name, rest, *, mode="slip"):
         Path(config.LAST_FAILURE_PATH).unlink(missing_ok=True)
     except OSError:
         pass
-    _daemonize_and_announce(url)
 
-    import logging
-    import signal
-    import time as _time
-
+    # Configure file logging BEFORE the fork so the parent can emit the
+    # pre-daemonize TIMING line. The child's post-fork basicConfig (below,
+    # after _daemonize_and_announce returns) is a no-op once handlers
+    # exist, so this is safe to do here. File handler fd is dup'd across
+    # the fork — both processes append to /tmp/operator.log atomically
+    # (POSIX write(2) ≤ PIPE_BUF guarantees per-line atomicity).
     logging.basicConfig(
         filename="/tmp/operator.log",
         level=logging.DEBUG,
@@ -989,6 +1034,24 @@ def _run_slip(name, rest, *, mode="slip"):
     )
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    _log_pre = logging.getLogger("operator")
+    _t_fork = _startup_time.monotonic()
+    _log_pre.info(
+        f"TIMING slip_startup "
+        f"python_boot_ms={int((_t_slip_entry - _T_MODULE_LOAD) * 1000)} "
+        f"argv_ms={int((_t_argv_done - _t_slip_entry) * 1000)} "
+        f"lock_ms={int((_t_lock_done - _t_argv_done) * 1000)} "
+        f"claude_check_ms={int((_t_claude_check_done - _t_lock_done) * 1000)} "
+        f"tcc_preflight_ms={int((_t_fork - _t_claude_check_done) * 1000)} "
+        f"total_ms={int((_t_fork - _T_MODULE_LOAD) * 1000)} "
+        f"mode={mode}"
+    )
+
+    _daemonize_and_announce(url)
+
+    import signal
+    import time as _time
+
     log = logging.getLogger("operator")
 
     from _1_800_operator.bridges import claude as claude_bridge

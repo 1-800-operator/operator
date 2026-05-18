@@ -904,6 +904,10 @@ class ChatRunner:
             parts.append(f"gate_ms={t['t_handle_start'] - t['t_drained']}")
         if t.get("t_handle_start") and t.get("t_first_visible"):
             parts.append(f"to_first_visible_ms={t['t_first_visible'] - t['t_handle_start']}")
+        if "send_chat_first_ms" in t:
+            parts.append(f"send_chat_first_ms={t['send_chat_first_ms']}")
+        if "send_chat_max_ms" in t:
+            parts.append(f"send_chat_max_ms={t['send_chat_max_ms']}")
         parts.append(f"total_ms={int(elapsed * 1000)}")
         if failed:
             parts.append("failed=1")
@@ -1083,12 +1087,24 @@ class ChatRunner:
         text_normalized = text.strip()
         with self._send_lock:
             self._own_messages.add(text_normalized)
+            t_send_start = time.monotonic()
             try:
                 msg_id = self._connector.send_chat(text)
             except Exception as e:
                 log.error(f"ChatRunner: send_chat failed: {e}")
                 self._own_messages.discard(text_normalized)
                 return None
+            send_chat_ms = int((time.monotonic() - t_send_start) * 1000)
+            # Per-turn first + max send_chat round-trip into self._turn_timing.
+            # Only chat-kind paragraphs (claude replies) count — permreq /
+            # narration sends use the same path but aren't part of the
+            # "reply latency" question the TIMING summary answers.
+            if kind == "chat" and self._turn_timing is not None:
+                if "send_chat_first_ms" not in self._turn_timing:
+                    self._turn_timing["send_chat_first_ms"] = send_chat_ms
+                cur_max = self._turn_timing.get("send_chat_max_ms", 0)
+                if send_chat_ms > cur_max:
+                    self._turn_timing["send_chat_max_ms"] = send_chat_ms
             # Record only after successful send — otherwise the LLM's next
             # turn replays a phantom assistant message the user never
             # received.

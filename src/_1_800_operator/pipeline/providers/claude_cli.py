@@ -1504,6 +1504,7 @@ class ClaudeCLIProvider(LLMProvider):
         posted: list[str] = []
         denied: set[str] = set()  # texts filtered out by the deny-aware extractor
         last_block_ts = [None]   # monotonic time operator last saw an assistant block
+        first_block_ts = [None]  # monotonic time operator FIRST saw an assistant block (for ttft_ms)
         foreign_hook = [False]   # a foreign Stop hook redirected this turn
 
         # H-20 cross-poll deny tracking. The pre-tool-narration deny
@@ -1532,7 +1533,10 @@ class ClaudeCLIProvider(LLMProvider):
 
         def _post_block(text: str):
             posted.append(text)
-            last_block_ts[0] = time.monotonic()
+            now = time.monotonic()
+            if first_block_ts[0] is None:
+                first_block_ts[0] = now
+            last_block_ts[0] = now
             if on_paragraph is not None:
                 flush_paragraphs(text, on_paragraph, force_final=True)
 
@@ -1599,6 +1603,7 @@ class ClaudeCLIProvider(LLMProvider):
             self._poll_permreqs()
 
         self._send_message(user_text)
+        t_after_send = time.monotonic()
 
         # Generous per-turn timeout — claude tool loops can run minutes
         # legitimately. The user cancels via /operator:hangup if a tool
@@ -1689,8 +1694,16 @@ class ClaudeCLIProvider(LLMProvider):
                     f"block and Stop hook — foreign hooks may have run"
                 )
 
+        pty_paste_ms = int((t_after_send - t_start) * 1000)
+        ttft_ms = (
+            int((first_block_ts[0] - t_after_send) * 1000)
+            if first_block_ts[0] is not None
+            else -1
+        )
         log.info(
             f"TIMING claude_cli_turn={elapsed:.1f}s "
+            f"pty_paste_ms={pty_paste_ms} "
+            f"ttft_ms={ttft_ms} "
             f"reply_blocks={len(posted)} "
             f"reply_chars={len(text) if text else 0} "
             f"foreign_hook={foreign_hook[0]} "
