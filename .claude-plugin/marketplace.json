@@ -11,10 +11,10 @@
       "source": {
         "source": "github",
         "repo": "1-800-operator/operator-plugin",
-        "ref": "v0.1.23"
+        "ref": "v0.1.24"
       },
       "description": "Send Claude Code into a Google Meet. Slash commands to join, check status, hang up, and run diagnostics against an installed operator CLI.",
-      "version": "0.1.23",
+      "version": "0.1.24",
       "author": {
         "name": "1-800-Operator",
         "url": "https://1-800-operator.com"
