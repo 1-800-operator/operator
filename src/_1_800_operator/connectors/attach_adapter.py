@@ -500,6 +500,14 @@ def _launch_slip_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
         # the user directly on the meeting URL.
         "--no-first-run",
         "--no-default-browser-check",
+        # Pin Meet UI language to en-US regardless of the slip Chrome's
+        # Google account locale. Many of operator's DOM selectors match
+        # against English aria-labels ("Leave call", "Chat with everyone",
+        # "Send a message", "Reframe", "Backgrounds and effects" — the
+        # local-tile predicate), and those silently mis-fire on
+        # non-English locales. Single-line lockdown beats fixing each
+        # selector for every locale.
+        "--lang=en-US",
         meeting_url,
     ]
     log.info(f"AttachAdapter: launching slip Chrome via: {' '.join(args)}")
@@ -689,6 +697,15 @@ class AttachAdapter(MeetingConnector):
         self._observer_installed = False
         self._slip_start_at = time.monotonic()
         self._meeting_entry_at = None
+        # Silent-breakage detector for the speaking observer. Meet's
+        # obfuscated "speaking" class (currently BlxGDf) rotates roughly
+        # quarterly. When that happens, the observer silently fires
+        # ZERO events and speaker attribution falls back to "Unknown"
+        # without telling anyone. We log a one-time warning if zero
+        # speaking events have been seen N minutes into a meeting that
+        # has remote participants. Fires once per meeting, then suppresses.
+        self._speaking_events_seen = 0
+        self._speaking_breakage_warned = False
         # Pre-warm the whisper model in parallel with everything else the
         # join sequence does (Chrome eviction + launch + CDP attach + lobby
         # wait). The synchronous warm inside _start_audio_pipeline used to
@@ -1252,8 +1269,28 @@ class AttachAdapter(MeetingConnector):
             events = page.evaluate(DRAIN_SPEAKING_QUEUE_JS) or []
         except Exception:
             return
+        # Silent-breakage check: 10 min into the meeting, if we've still
+        # seen ZERO speaking events, the obfuscated "speaking" class in
+        # chat_dom_js.py:INSTALL_SPEAKING_OBSERVER_JS has likely been
+        # rotated by a Meet release. Warn ONCE so the dev can update it.
+        # Fires regardless of whether THIS poll had events — if events
+        # have ever arrived, _speaking_events_seen > 0 and we skip.
+        if (
+            not self._speaking_breakage_warned
+            and self._speaking_events_seen == 0
+            and self._meeting_entry_at is not None
+            and (time.monotonic() - self._meeting_entry_at) > 600
+        ):
+            log.warning(
+                "AttachAdapter: 10+ min into meeting with ZERO speaking events — "
+                "Meet's obfuscated speaking-indicator class may have rotated. "
+                "Check chat_dom_js.py:INSTALL_SPEAKING_OBSERVER_JS (currently looks for "
+                "class 'BlxGDf')."
+            )
+            self._speaking_breakage_warned = True
         if not events:
             return
+        self._speaking_events_seen += len(events)
         with self._speaking_lock:
             for ev in events:
                 pid = ev.get("participant_id") or ""
@@ -1382,22 +1419,20 @@ class AttachAdapter(MeetingConnector):
     def _wait_for_meeting_entry(self, page):
         """Block until the user has entered the meeting.
 
-        Detects entry by requiring BOTH the 'Leave call' button AND the
-        'Chat with everyone' button to be visible. The reason for the
-        two-signal AND: Meet renders the in-call control bar (including
-        Leave call) the moment a user clicks 'Ask to join', even while
-        the page is still on the 'Please wait until a meeting host
-        brings you into the call' lobby screen. A 'Leave call'-only
-        check therefore false-positives during the lobby wait — bot
-        declares 'Joined' while the host hasn't admitted yet, then the
-        chat-runner spins forever trying to open a chat panel that
-        doesn't exist in the lobby DOM. The 'Chat with everyone' button
-        is the discriminator: it does NOT render in the green-room
-        pre-join state, and it does NOT render in the lobby waiting
-        state — only in the actual in-call DOM. Confirmed via DOM dumps
-        of all three states (session 205 repro). Bonus: chat_runner is
-        about to open chat anyway, so waiting for the chat button is in
-        the spirit of the detector.
+        Detects entry by the visibility of the 'Chat with everyone'
+        button. Meet renders the in-call control bar (including 'Leave
+        call') the moment the user clicks 'Ask to join', so 'Leave call'
+        false-positives during the lobby wait. 'Chat with everyone' is
+        the discriminator: it does NOT render in the green-room pre-join
+        state, and it does NOT render in the lobby waiting state — only
+        in the actual in-call DOM. Confirmed via DOM dumps of all three
+        states (session 205 repro).
+
+        Previously this was an AND of both buttons; the Leave-call check
+        was redundant once chat-button presence proved we're in-call.
+        Host-disabled-chat: the chat button still renders (verified
+        S243), the input field is greyed at send-time — that's a clean
+        send-time failure rather than an entry-detection hang.
 
         Polls every 1s. No timeout — lobby admission can take many minutes
         (host on another call, large meetings with multiple admits,
@@ -1415,15 +1450,8 @@ class AttachAdapter(MeetingConnector):
         last_log = time.monotonic()
         while not self._leave_event.is_set():
             try:
-                leave_btn = page.get_by_role("button", name="Leave call")
                 chat_btn = page.get_by_role("button", name="Chat with everyone")
-                leave_visible = (
-                    leave_btn.count() > 0 and leave_btn.first.is_visible()
-                )
-                chat_visible = (
-                    chat_btn.count() > 0 and chat_btn.first.is_visible()
-                )
-                if leave_visible and chat_visible:
+                if chat_btn.count() > 0 and chat_btn.first.is_visible():
                     self._meeting_entry_at = time.monotonic()
                     log.info("AttachAdapter: meeting entry detected")
                     print("Joined — claude is listening.\n", file=sys.stderr, flush=True)
@@ -1532,10 +1560,14 @@ class AttachAdapter(MeetingConnector):
     def _find_or_open_meet_page(self, meeting_url):
         """Find an existing Meet tab for this exact room, or open a new one.
 
-        Strict match on the room-code path (e.g. `/abc-defg-hij`) — not
-        just the meet.google.com host. If the user has another Meet tab
-        open for a different room, attaching to the wrong one would be
-        a silent disaster.
+        Matches on the room-code segment (`xxx-yyyy-zzz`) appearing
+        anywhere in the URL — not a strict path equality. The looser
+        match survives Meet's transient URL states (auth bounces,
+        `?authuser=N` query params, `/_meet/...` shells during sign-in
+        redirects). Room codes are 10-char patterns specific enough that
+        accidental matches against unrelated tabs are vanishingly
+        unlikely. Falls back to the full URL path if no room-code is
+        found in the meeting_url (defensive).
 
         Polls briefly for fresh-launch races (Chrome was just relaunched
         with the URL as argv — tab might lag CDP attach by a few hundred
@@ -1543,17 +1575,28 @@ class AttachAdapter(MeetingConnector):
         both relaunch and attach-to-existing-debug-Chrome cases without
         a parallel code path.
         """
-        target_path = urlparse(meeting_url).path.rstrip('/')
+        # Meet room codes are 3-4-3 lowercase letter groups separated by
+        # dashes (e.g. `aux-hdto-nen`). Use the FIRST match from the
+        # meeting_url; if there's none (unusual URL shape), fall back to
+        # full-path equality.
+        room_code_match = re.search(r"\b[a-z]{3,4}-[a-z]{3,4}-[a-z]{3,4}\b", meeting_url)
+        room_code = room_code_match.group(0) if room_code_match else None
+        target_path_fallback = urlparse(meeting_url).path.rstrip('/')
 
-        # Pass 1: scan for an existing exact-room match. Brief poll (~3s)
-        # handles the post-relaunch race where Chrome's tab list hasn't
+        def _tab_matches(page_url):
+            if room_code:
+                return room_code in page_url
+            return urlparse(page_url).path.rstrip('/') == target_path_fallback
+
+        # Pass 1: scan for an existing match. Brief poll (~3s) handles
+        # the post-relaunch race where Chrome's tab list hasn't
         # propagated to CDP yet.
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             for context in self._browser.contexts:
                 for page in context.pages:
                     try:
-                        if urlparse(page.url).path.rstrip('/') == target_path:
+                        if _tab_matches(page.url):
                             log.info(f"AttachAdapter: found existing Meet tab at {page.url}")
                             return page
                     except Exception:

@@ -52,8 +52,13 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
             text = el.innerText.trim();
         }
         // Extract sender — walk up to 4 parents, find a sibling div whose
-        // text matches "Name + Timestamp". Avoids depending on obfuscated class names.
-        const TIME_RE = new RegExp('\\\\d{1,2}:\\\\d{2}\\\\s*(AM|PM)', 'i');
+        // FIRST child has its OWN sibling that's the timestamp. The sender
+        // header is rendered as two stacked leaves: [name leaf] + [timestamp
+        // leaf]. We pick the parent whose first text-bearing leaf differs
+        // from the message body's leaf, which is the structural sender
+        // header. Locale-agnostic — prior implementation used an AM/PM
+        // regex on the rendered timestamp which broke on 24-hour locales
+        // (de-DE, fr-FR, most of EU/Asia: "14:30" with no AM/PM marker).
         let sender = '';
         let foundSender = false;
         let node = el;
@@ -61,10 +66,15 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
             node = node.parentElement;
             if (!node) break;
             for (const sib of node.children) {
-                const t = sib.innerText?.trim();
-                if (t && TIME_RE.test(t)) {
-                    const lines = t.split('\\n');
-                    sender = lines.length >= 2 ? lines[0] : '';
+                if (sib === el || sib.contains(el)) continue;
+                const t = (sib.innerText || '').trim();
+                if (!t) continue;
+                const lines = t.split('\\n').map(s => s.trim()).filter(Boolean);
+                // The header always renders as 2 stacked leaves: name then
+                // timestamp. A 2-line block with the SECOND line containing
+                // digits is the sender header.
+                if (lines.length >= 2 && /\\d/.test(lines[1])) {
+                    sender = lines[0];
                     foundSender = true;
                     break;
                 }
@@ -73,8 +83,21 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
         return {id: msgId, sender: sender, text: text, t_dom: Date.now()};
     }
 
-    const textarea = document.querySelector('textarea[aria-label="Send a message"]');
-    const container = textarea ? textarea.closest('[data-panel-id]') : null;
+    // Locate the chat panel directly by structural signal — the one
+    // [data-panel-id] container that EITHER contains the chat textarea
+    // OR has [data-message-id] descendants. Two positive signals OR'd
+    // together so we survive the empty-chat case AND the textarea-
+    // rearranged-elsewhere case. Prior implementation used closest()
+    // from the textarea, which would have silently picked the wrong
+    // panel if Meet ever moved the textarea outside its panel.
+    let container = null;
+    for (const panel of document.querySelectorAll('[data-panel-id]')) {
+        if (panel.querySelector('textarea[aria-label="Send a message"]') ||
+            panel.querySelector('[data-message-id]')) {
+            container = panel;
+            break;
+        }
+    }
     if (!container) return;
 
     window.__operatorChatObserver = new MutationObserver(mutations => {
