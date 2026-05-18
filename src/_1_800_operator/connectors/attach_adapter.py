@@ -324,18 +324,22 @@ def _evict_other_chrome_on_cdp_port() -> bool:
                 continue
             log.info(f"AttachAdapter: evicting Chrome on port {CDP_PORT} pid={pid}")
             os.kill(pid, 15)  # SIGTERM
-            # Wait up to 2s for graceful exit, escalate to SIGKILL if needed
-            for _ in range(20):
+            # Slip Chrome dies in ~100ms on SIGTERM (empirically measured
+            # in debug/eviction_spike). 500ms is 5× headroom; if it
+            # doesn't die in that, escalate to SIGKILL. Modern Chrome
+            # cleanly reclaims its own stale SingletonLock on next
+            # launch (spike-verified) so no profile cleanup needed.
+            for _ in range(10):  # 10 × 50ms = 500ms
                 try:
                     os.kill(pid, 0)  # check if alive
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                 except OSError:
                     evicted_any = True
                     break
             else:
                 # Before escalating to SIGKILL, re-verify once more —
-                # the process could've exited + recycled during the 2s
-                # SIGTERM wait. Same TOCTOU shape as above.
+                # the process could've exited + recycled during the wait.
+                # Same TOCTOU shape as above.
                 if not _pid_still_owns_port(pid, CDP_PORT):
                     log.info(
                         f"AttachAdapter: pid {pid} released port "
@@ -345,7 +349,12 @@ def _evict_other_chrome_on_cdp_port() -> bool:
                     continue
                 try:
                     os.kill(pid, 9)  # SIGKILL
-                    log.warning(f"AttachAdapter: SIGKILL'd pid={pid} after SIGTERM timeout")
+                    log.warning(
+                        f"AttachAdapter: Chrome pid={pid} didn't exit on "
+                        f"SIGTERM in 500ms — SIGKILL'd. May have left stale "
+                        f"state in {SLIP_PROFILE_DIR}; Chrome usually "
+                        f"recovers on next launch."
+                    )
                     evicted_any = True
                 except Exception as e:
                     log.warning(f"AttachAdapter: SIGKILL failed pid={pid}: {e}")
@@ -739,6 +748,16 @@ class AttachAdapter(MeetingConnector):
         when the browser disconnects.
         """
         js = self.join_status
+        # Per-phase stamps for the TIMING browser_join line. Anchored on
+        # entry to this thread, so subtracting `_slip_start_at` would
+        # include a tiny dispatch lag (join() → thread start, usually <5ms).
+        _t_bs_entry = time.monotonic()
+        _t_after_cdp_probe = _t_bs_entry
+        _t_after_chrome_launch = _t_bs_entry
+        _t_after_playwright = _t_bs_entry
+        _t_after_cdp_attach = _t_bs_entry
+        _t_after_meet_tab = _t_bs_entry
+        _launched = False
         try:
             # Three-way startup branch (verified by debug/14_30_cdp_reattach_spike):
             #   1. CDP alive AND ≥1 tab in Chrome → reuse. Skip launch;
@@ -752,9 +771,24 @@ class AttachAdapter(MeetingConnector):
             #      context management is not supported" otherwise. No
             #      user work to preserve in this state.
             #   3. CDP not alive → launch. Standard cold-start path.
+            # Fine-grained timing for cdp_probe — when cdp_probe_ms balloons,
+            # the cost is almost always eviction (SIGTERM + 2s wait loop +
+            # 0.5s settle), not the cheap socket/page-count/uds checks.
+            # Each slot starts at -1 (not stamped); the emit step joins
+            # them in order, so a skipped phase contributes 0 to the
+            # breakdown rather than smearing into the next.
+            _t_socket_done = -1.0
+            _t_page_count_done = -1.0
+            _t_uds_done = -1.0
+            _t_eviction_done = -1.0
+            _t_settle_done = -1.0
+            _evicted = False
+
             launch_needed = True
             if _cdp_endpoint_alive():
+                _t_socket_done = time.monotonic()
                 pc = _cdp_page_count()
+                _t_page_count_done = time.monotonic()
                 if pc > 0:
                     # Verify the Chrome on 9222 is OUR slip Chrome. The
                     # Origin-nonce check (security C-1) handles foreign
@@ -764,6 +798,7 @@ class AttachAdapter(MeetingConnector):
                     # accept our Origin header and let us silently attach
                     # in the wrong profile.
                     owner_uds = _chrome_user_data_dir_on_cdp_port()
+                    _t_uds_done = time.monotonic()
                     is_slip = (
                         owner_uds is not None
                         and os.path.realpath(owner_uds)
@@ -783,17 +818,46 @@ class AttachAdapter(MeetingConnector):
                             "evicting + relaunching"
                         )
                         _evict_other_chrome_on_cdp_port()
-                        time.sleep(0.5)
+                        _evicted = True
+                        _t_eviction_done = time.monotonic()
+                        # No fixed settle — port is free at Chrome death
+                        # (spike-verified). _launch_slip_chrome + _wait_for_cdp_ready
+                        # below will see the freed port immediately.
+                        _t_settle_done = time.monotonic()
                 else:
                     log.info(
                         f"AttachAdapter: existing Chrome has {pc} tabs "
                         "(zero-context state) — evicting + relaunching"
                     )
                     _evict_other_chrome_on_cdp_port()
-                    # Brief settle so the kernel releases the port before
-                    # the new Chrome tries to bind.
-                    time.sleep(0.5)
+                    _evicted = True
+                    _t_eviction_done = time.monotonic()
+                    _t_settle_done = time.monotonic()
+            else:
+                _t_socket_done = time.monotonic()
+            _t_after_cdp_probe = time.monotonic()
+            # Walk the stamps in order; for each unstamped slot, fall back
+            # to the prior stamp so the field reads 0 instead of mangling
+            # the next field's delta.
+            def _ms(prev: float, cur: float) -> int:
+                if cur < 0:
+                    return 0
+                return int((cur - prev) * 1000)
+            _stamps = [_t_bs_entry]
+            for _s in (_t_socket_done, _t_page_count_done, _t_uds_done,
+                       _t_eviction_done, _t_settle_done):
+                _stamps.append(_s if _s >= 0 else _stamps[-1])
+            log.info(
+                f"TIMING cdp_probe "
+                f"socket_ms={_ms(_stamps[0], _t_socket_done)} "
+                f"page_count_ms={_ms(_stamps[1], _t_page_count_done)} "
+                f"uds_ms={_ms(_stamps[2], _t_uds_done)} "
+                f"evict_ms={_ms(_stamps[3], _t_eviction_done)} "
+                f"settle_ms={_ms(_stamps[4], _t_settle_done)} "
+                f"evicted={_evicted}"
+            )
             if launch_needed:
+                _launched = True
                 # Fresh Chrome → fresh CDP origin. The new nonce is what
                 # Chrome will accept on the WebSocket upgrade; Playwright
                 # must send it as the Origin header below.
@@ -821,7 +885,6 @@ class AttachAdapter(MeetingConnector):
                         "reused Chrome — evicting + relaunching"
                     )
                     _evict_other_chrome_on_cdp_port()
-                    time.sleep(0.5)
                     cdp_origin = _new_cdp_origin()
                     _write_cdp_origin(cdp_origin)
                     self._chrome_proc = _launch_slip_chrome(
@@ -833,7 +896,9 @@ class AttachAdapter(MeetingConnector):
                         js.signal_failure("cdp_not_ready")
                         return
 
+            _t_after_chrome_launch = time.monotonic()
             self._playwright = sync_playwright().start()
+            _t_after_playwright = time.monotonic()
             try:
                 self._browser = self._playwright.chromium.connect_over_cdp(
                     CDP_URL,
@@ -844,12 +909,14 @@ class AttachAdapter(MeetingConnector):
                 js.signal_failure("cdp_attach_failed")
                 log.error(f"AttachAdapter: connect_over_cdp failed: {e}")
                 return
+            _t_after_cdp_attach = time.monotonic()
 
             self._page = self._find_or_open_meet_page(meeting_url)
             if self._page is None:
                 self._teardown_playwright()
                 js.signal_failure("meet_tab_open_failed")
                 return
+            _t_after_meet_tab = time.monotonic()
             log.info(f"AttachAdapter: attached to Meet tab at {self._page.url}")
 
             # Mark the session live so off-thread is_connected() short-
@@ -862,6 +929,18 @@ class AttachAdapter(MeetingConnector):
             if not self._wait_for_meeting_entry(self._page):
                 js.signal_failure("chrome_closed_before_entry")
                 return
+            _t_after_entry = time.monotonic()
+            log.info(
+                f"TIMING browser_join "
+                f"cdp_probe_ms={int((_t_after_cdp_probe - _t_bs_entry) * 1000)} "
+                f"chrome_launch_ms={int((_t_after_chrome_launch - _t_after_cdp_probe) * 1000)} "
+                f"playwright_ms={int((_t_after_playwright - _t_after_chrome_launch) * 1000)} "
+                f"cdp_attach_ms={int((_t_after_cdp_attach - _t_after_playwright) * 1000)} "
+                f"meet_tab_ms={int((_t_after_meet_tab - _t_after_cdp_attach) * 1000)} "
+                f"lobby_wait_ms={int((_t_after_entry - _t_after_meet_tab) * 1000)} "
+                f"total_ms={int((_t_after_entry - _t_bs_entry) * 1000)} "
+                f"launched={_launched}"
+            )
 
             # Open the chat panel and install the MutationObserver
             # IMMEDIATELY after meeting entry — before audio pipeline,

@@ -325,36 +325,29 @@ def _preflight_audio_helper_tcc() -> None:
         return
 
     # Phase timing — the whole function is on the synchronous pre-fork
-    # path, so every ms is user-visible. Probes split the two fast-path
-    # phases (lsregister cleanup + helper --probe) and the slow-path
-    # warmup. Emitted as one TIMING line at function exit so the slip
-    # startup trace can subtract this cost.
+    # path, so every ms is user-visible. Emitted as one TIMING line at
+    # function exit so the slip startup trace can subtract this cost.
     _t_tcc_entry = _startup_time.monotonic()
 
-    # (1) LS cleanup — strip stale duplicates so any subsequent warmup
-    # click attaches to the canonical bundle unambiguously.
-    n_stale = _ls_cleanup_stale_helpers()
-    if n_stale:
-        log = logging.getLogger("operator")
-        log.info(
-            f"Unregistered {n_stale} stale Launch Services entries for "
-            f"{_AUDIO_HELPER_APP.name}"
-        )
-    _t_after_ls = _startup_time.monotonic()
-
-    # (2) Probe current state (self-attributed via _disclaimed_spawn).
+    # (1) Probe current state FIRST (self-attributed via _disclaimed_spawn,
+    # which targets _AUDIO_HELPER_BIN directly — bypasses Launch Services
+    # entirely, so the probe result is unaffected by LS pollution).
     sr, mic = _parse_probe_status(_probe_helper_tcc())
     _t_after_probe = _startup_time.monotonic()
     if sr == "ok" and mic == "ok":
+        # Fast path — perms already granted on canonical. LS cleanup is
+        # irrelevant here: with perms granted, no warmup dialog fires, so
+        # there's no risk of a click attaching to a stale wheel-cache
+        # copy. Cleanup is kicked off post-fork by the child thread (see
+        # _run_slip) to keep the LS DB tidy without blocking the user.
         logging.getLogger("operator").info(
             f"TIMING tcc_preflight path=fast "
-            f"ls_cleanup_ms={int((_t_after_ls - _t_tcc_entry) * 1000)} "
-            f"probe_ms={int((_t_after_probe - _t_after_ls) * 1000)} "
+            f"probe_ms={int((_t_after_probe - _t_tcc_entry) * 1000)} "
             f"sr={sr} mic={mic}"
         )
-        return  # fast path — both granted
+        return
 
-    # (5) Explicit denies — re-warmup can't recover; surface help and
+    # (2) Explicit denies — re-warmup can't recover; surface help and
     # open the relevant Settings pane.
     denied: list[tuple[str, str]] = []
     if sr == "denied":
@@ -378,8 +371,17 @@ def _preflight_audio_helper_tcc() -> None:
         print()
         return
 
-    # (4) Not-determined / unknown / partial-ok — warmup will surface
-    # fresh dialogs for whichever perm is missing.
+    # (3) Not-determined / unknown / partial-ok — warmup is about to
+    # fire. Clean stale LS entries FIRST so the warmup dialog click
+    # attaches to the canonical bundle, not a stale wheel-cache copy
+    # (S240 hit this with 36 duplicates from repeat reinstalls).
+    n_stale = _ls_cleanup_stale_helpers()
+    if n_stale:
+        logging.getLogger("operator").info(
+            f"Unregistered {n_stale} stale Launch Services entries for "
+            f"{_AUDIO_HELPER_APP.name}"
+        )
+    _t_after_ls = _startup_time.monotonic()
     print(
         "macOS audio permissions needed — surfacing dialogs for the audio helper.\n"
         "  Click Allow on each as it appears (Screen Recording + Microphone).\n"
@@ -399,8 +401,8 @@ def _preflight_audio_helper_tcc() -> None:
     _t_after_reprobe = _startup_time.monotonic()
     logging.getLogger("operator").info(
         f"TIMING tcc_preflight path=warmup "
-        f"ls_cleanup_ms={int((_t_after_ls - _t_tcc_entry) * 1000)} "
-        f"probe_ms={int((_t_after_probe - _t_after_ls) * 1000)} "
+        f"probe_ms={int((_t_after_probe - _t_tcc_entry) * 1000)} "
+        f"ls_cleanup_ms={int((_t_after_ls - _t_after_probe) * 1000)} "
         f"warmup_ms={int((_t_after_warmup - _t_before_warmup) * 1000)} "
         f"reprobe_ms={int((_t_after_reprobe - _t_after_warmup) * 1000)} "
         f"sr_before={sr} mic_before={mic} sr_after={sr2} mic_after={mic2}"
@@ -1107,6 +1109,22 @@ def _run_slip(name, rest, *, mode="slip"):
     from _1_800_operator.pipeline.providers import build_provider
 
     t_start = _time.monotonic()
+
+    # Background LS-cleanup. The pre-fork preflight reversed (probe first;
+    # cleanup only if a warmup dialog is about to fire) so the fast path
+    # doesn't pay the ~3-4s `lsregister -dump` cost. Keep cosmetic
+    # tidiness by sweeping stale entries in a daemon thread now — no
+    # user-visible latency, and the LS DB stays clean for the next
+    # warmup that does happen.
+    import threading as _threading_bg
+    def _bg_ls_cleanup():
+        try:
+            n = _ls_cleanup_stale_helpers()
+            if n:
+                log.info(f"bg: unregistered {n} stale Launch Services entries")
+        except Exception as exc:
+            log.warning(f"bg LS cleanup failed: {exc}")
+    _threading_bg.Thread(target=_bg_ls_cleanup, daemon=True, name="ls-cleanup").start()
 
     # Build meeting record up-front — URL is known, no meet.new resolution
     # gymnastics needed. The transcript MCP server (spawned by claude via
