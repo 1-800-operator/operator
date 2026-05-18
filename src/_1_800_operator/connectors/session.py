@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 # separated by hyphens. Used to distinguish a real meeting URL from the
 # `/new` interstitial (which may carry query strings like `?authuser=0&hs=178`).
 _MEET_ROOM_RE = re.compile(r"^/[a-z]{3,}-[a-z]{3,}-[a-z]{3,}/?$")
+_MEET_CODE_RE = re.compile(r"^[a-z]{3,}-[a-z]{3,}-[a-z]{3,}$")
 
 
 def _is_real_meet_room(url: str) -> bool:
@@ -32,6 +33,34 @@ def _is_real_meet_room(url: str) -> bool:
     if "meet.google.com" not in (parsed.netloc or ""):
         return False
     return bool(_MEET_ROOM_RE.match(parsed.path or ""))
+
+
+def normalize_meet_url(raw: str | None) -> str | None:
+    """Canonicalize a user-pasted Meet URL to `https://meet.google.com/<code>`.
+
+    Tolerates the shapes a user is likely to paste from the browser:
+    surrounding whitespace, missing scheme, `?authuser=N`/`?hs=…` query
+    strings, `#fragment`, trailing slash. Validates that the path is a
+    Meet room code (xxx-xxxx-xxx style); returns None for anything else
+    so the caller can reject the input before daemonizing.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if not s.startswith(("http://", "https://")):
+        s = "https://" + s
+    try:
+        parsed = urlparse(s)
+    except Exception:
+        return None
+    if "meet.google.com" not in (parsed.netloc or "").lower():
+        return None
+    code = (parsed.path or "").strip("/")
+    if not _MEET_CODE_RE.match(code):
+        return None
+    return f"https://meet.google.com/{code}"
 
 
 class JoinStatus:

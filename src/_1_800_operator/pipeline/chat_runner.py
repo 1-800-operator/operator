@@ -386,12 +386,21 @@ class ChatRunner:
             join_timeout = config.LOBBY_WAIT_SECONDS + 60
             if not join_status.ready.wait(timeout=join_timeout):
                 log.error(f"ChatRunner: join timed out ({join_timeout}s)")
+                _write_last_failure(
+                    self._record, self._provider,
+                    RuntimeError(f"join timed out after {join_timeout}s — "
+                                 f"meeting may be invalid or unreachable"),
+                )
                 self._safe_leave()
                 return
             if not join_status.success:
                 reason = join_status.failure_reason or "unknown"
                 log.error(f"ChatRunner: join failed: {reason}")
                 ui.err(f"Join failed: {reason}")
+                _write_last_failure(
+                    self._record, self._provider,
+                    RuntimeError(f"join failed: {reason}"),
+                )
                 self._safe_leave()
                 return
 

@@ -587,9 +587,13 @@ def main():
             print("Usage: operator wiretap <https://meet.google.com/xxx-xxxx-xxx>\n")
             _print_usage()
             return 0
-        url = argv[1]
-        if not url.startswith(("http://", "https://")):
-            print(f"wiretap requires a Meet URL: got {url!r}\n")
+        from _1_800_operator.connectors.session import normalize_meet_url
+        url = normalize_meet_url(argv[1])
+        if url is None:
+            print(
+                f"That doesn't look like a Meet room URL: {argv[1]!r}. "
+                f"Expected something like https://meet.google.com/xxx-xxxx-xxx.\n"
+            )
             _print_usage()
             return 0
         return _run_wiretap(url)
@@ -758,13 +762,15 @@ def _run_status():
     Reads the ~/.operator/.current_meeting marker written by _run_slip at
     join and deleted at shutdown. If the marker exists and points at a
     JSONL whose meta line carries meet_url, print "in meeting <url>";
-    otherwise "not in a meeting". No --verbose flavor — the plugin's
-    status skill just wants a one-liner.
+    otherwise "not in a meeting". When not in a meeting, also surface the
+    most recent failure (if any) so a user whose last slip silently failed
+    has a breadcrumb pointing at the URL/cause.
     """
     import json
     marker = Path.home() / ".operator" / ".current_meeting"
     if not marker.exists():
         print("not in a meeting")
+        _print_last_failure_hint()
         return 0
     try:
         jsonl_path = Path(marker.read_text(encoding="utf-8").strip())
@@ -779,6 +785,31 @@ def _run_status():
     else:
         print("in meeting")
     return 0
+
+
+def _print_last_failure_hint():
+    """Append a one-line hint about the last slip failure, if recent.
+
+    Only fires when last_failure.json exists and was written within the
+    last hour — older failures are stale (the file is cleared on the next
+    successful slip start, but if the user never retried, anything beyond
+    an hour is more noise than signal for "did my last attempt work?").
+    """
+    import json
+    path = Path(config.LAST_FAILURE_PATH)
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    ts = payload.get("ts") or 0
+    if not ts or (_startup_time.time() - ts) > 3600:
+        return
+    msg = payload.get("message") or "unknown failure"
+    meet_url = payload.get("meeting_url") or ""
+    suffix = f" (meeting {meet_url})" if meet_url else ""
+    print(f"last slip failed: {msg}{suffix}")
 
 
 def _run_hangup():
@@ -942,6 +973,16 @@ def _run_slip(name, rest, *, mode="slip"):
     if not url:
         print(
             "slip requires a Meet URL: operator slip claude <https://meet.google.com/xxx-xxxx-xxx>"
+        )
+        return 0
+
+    from _1_800_operator.connectors.session import normalize_meet_url
+    raw_url = url
+    url = normalize_meet_url(raw_url)
+    if url is None:
+        print(
+            f"That doesn't look like a Meet room URL: {raw_url!r}. "
+            f"Expected something like https://meet.google.com/xxx-xxxx-xxx."
         )
         return 0
 
