@@ -170,10 +170,75 @@ def test_helper_starvation_does_not_finalize_utterance():
     )
 
 
+def test_shutdown_drains_pending_buffer():
+    """S244: capturing=False must drain the in-flight _audio_buffer once
+    more before returning, instead of dropping bytes that arrived between
+    the last 0.5s tick and the flag flip.
+
+    Pre-fix: a speech burst fed immediately before `capturing = False`
+    would be lost — the while loop exited at the top of the next iteration
+    without ever calling drain_audio_buffer on the residual.
+    Post-fix: the residual is drained once and appended to utterance_audio
+    when (a) we were already mid-utterance OR (b) the residual itself is
+    above the speech RMS threshold.
+    """
+    proc = AudioProcessor()
+    proc.capturing = True
+
+    def feeder():
+        # Pre-roll some silence so the loop's first tick reads quiet.
+        proc.feed_audio(pcm_bytes(0.3, rms=0.0))
+        time.sleep(0.3)
+        # 0.8s speech burst (fully read by next tick).
+        proc.feed_audio(pcm_bytes(0.8, rms=UTTERANCE_SILENCE_RMS * 4))
+        time.sleep(0.6)
+        # Now stuff the buffer with a fresh burst RIGHT BEFORE flipping
+        # capturing. Pre-fix this gets dropped; post-fix it's appended.
+        proc.feed_audio(pcm_bytes(0.5, rms=UTTERANCE_SILENCE_RMS * 4))
+        proc.capturing = False
+
+    threading.Thread(target=feeder, daemon=True).start()
+    # capture_next_utterance returns when capturing flips False. We don't
+    # care what whisper transcribes — we care that the returned utterance
+    # included BOTH the in-loop burst (0.8s) AND the post-flip residual
+    # (0.5s). We can't easily inspect utterance_audio length from outside,
+    # so we assert via a wrapper that records the byte count.
+    captured_lengths: list[int] = []
+    orig_transcribe = proc.transcribe
+
+    def spy_transcribe(audio):
+        # audio is Float32 ndarray; 4 bytes per sample.
+        captured_lengths.append(len(audio) * 4)
+        return orig_transcribe(audio)
+
+    proc.transcribe = spy_transcribe  # type: ignore[method-assign]
+    proc.capture_next_utterance()
+    assert captured_lengths, "transcribe was never called — drain didn't fire"
+    captured = captured_lengths[0]
+    # 0.8s + 0.5s = 1.3s at 16kHz Float32 = ~83200 bytes (plus the 0.5s
+    # silence pre-pad transcribe adds = +32000). We measure the spy input
+    # so subtract the silence pre-pad: spy sees the silence-padded array.
+    # The 0.5s pad accounts for 32000 bytes. So we expect ≥ 0.8s + 0.5s
+    # speech + 0.5s pad = ~115000 bytes total.
+    # Pre-fix would yield: 0.8s speech + 0.5s pad = ~83000 bytes (residual
+    # 0.5s lost).
+    pre_fix_upper = int((0.8 + 0.5) * SAMPLE_RATE * 4)  # ~83200 bytes (pre-fix max)
+    expected_min = int((0.8 + 0.5 + 0.5) * SAMPLE_RATE * 4 * 0.9)  # ~103000 (post-fix, 10% slop)
+    assert captured > pre_fix_upper, (
+        f"utterance audio {captured} bytes — looks like the post-flip "
+        f"residual was lost (pre-fix upper bound was {pre_fix_upper})"
+    )
+    print(
+        f"OK shutdown_drains_pending_buffer "
+        f"(captured {captured} bytes incl. silence pad ≥ post-flip residual)"
+    )
+
+
 if __name__ == "__main__":
     print("Loading faster-whisper-large-v3-turbo (first run downloads ~1.5GB)…")
     test_silence_only_returns_empty()
     test_speech_burst_finalizes_on_silence()
     test_repetition_hallucination_filter()
     test_helper_starvation_does_not_finalize_utterance()
+    test_shutdown_drains_pending_buffer()
     print("\nAll audio tests passed.")

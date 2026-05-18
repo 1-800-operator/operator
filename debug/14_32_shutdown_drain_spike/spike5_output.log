@@ -1,0 +1,21 @@
+Using 2 real WAVs (≥6s of speech each)
+JSONL target: /var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/tmpih18mag3_attach_integration.jsonl
+Spawning worker via adapter._spawn_audio_worker()...
+  spawn returned in 0.002s
+  worker pid=40036, has_audio_worker=True
+Sleeping 8s for whisper warmup...
+Pushing mic_label event...
+  [Alice] streaming utterance_1778777490_0023.wav (393KB)
+  [Bob] streaming utterance_1778699499_0055.wav (294KB)
+Calling send_audio_worker_shutdown + closing stdin via _stop_audio_pipeline...
+Waiting for JSONL to gain meeting_end line (drain in progress)...
+Sealed in 2.52s post-stdin-close
+
+=== JSONL contents (5 lines) ===
+  [caption] Alice      Just going through the Mattel tickets from this morning, then we're going to kic
+  [caption] Bob        So I'm going to keep an eye on that. Mostly Hebrews and Natas are going to be do
+  [caption] Bob        customer, that was kind of where we were going with this, but then at the same t
+  [participants_final] {"timestamp": 1779131682.426367, "currently_present": [], "attended": ["Alice", "Bob"], "self_name": "Jojo"}
+  [meeting_end] {"timestamp": 1779131682.426367}
+
+PASS — AttachAdapter ↔ whisper_worker integration works

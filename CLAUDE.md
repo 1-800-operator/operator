@@ -55,7 +55,7 @@ python tests/test_permreq_round_trip.py        # slip-guarded permission-ask flo
 python tests/test_pretool_narration_hold.py    # hold/drop pre-tool narration on permreq
 python tests/test_permission_classifier.py     # yes/no classifier for free-form replies
 python tests/test_attach_audio_wiring.py       # speaker attribution timeline overlap
-python tests/test_audio_processor.py           # whisper pipeline + utterance windowing
+python tests/test_audio_processor.py           # whisper pipeline + utterance windowing + shutdown drain
 python tests/test_heartbeat.py                 # operator failure-narration (_narrate_failure)
 python tests/test_915_reconnection.py          # disconnect + grace-period exit
 python tests/test_doctor.py                    # operator doctor checks
@@ -96,7 +96,15 @@ Pipeline
                                  claude subprocess that classifies free-form chat replies
                                  to permission asks as allow/deny/unrelated
   pipeline/audio.py           — Whisper (faster-whisper, CPU) transcription pipeline,
-                                 consumes Swift audio-helper output
+                                 consumes Swift audio-helper output. Runs inside the
+                                 whisper_worker subprocess in production (S244); main
+                                 process pipes audio frames in via stdin.
+  pipeline/whisper_worker.py  — Subprocess that owns whisper STT + speaker attribution +
+                                 caption JSONL writes (S244). Decoupled from main's
+                                 shutdown — drains residual audio + writes
+                                 participants_final + meeting_end after main exits, so
+                                 the trailing utterance of a meeting always lands instead
+                                 of being raced by the shutdown reaper.
   pipeline/aec_cleaner.py     — Optional AEC3 echo cancellation (Rust crate via PyO3)
   pipeline/doctor.py          — `operator doctor` checks (claude CLI, Chrome, git, TCC,
                                  workspace trust)
@@ -118,7 +126,7 @@ Bridge + bundled MCP
 
 ### Key Data Flow
 
-1. `AttachAdapter.join()` CDP-attaches to slip Chrome (a dedicated user-data-dir under `~/.operator/slip_profile/`, separate from the user's main Chrome to dodge Chrome 121+ CDP restrictions), navigates to the meeting URL, signs in if needed via the persisted slip-profile cookies, enters the meeting, opens the chat panel, installs the chat-message MutationObserver, and spawns the Swift audio helper that pipes mic + system audio into the whisper pipeline. Speaker attribution for each utterance is computed at finalize time by maximum interval-overlap against a bounded `_speaking_history` deque populated by the JS observer (S235 fix — naive snapshot-at-finalize used to flip neighboring speakers).
+1. `AttachAdapter.join()` CDP-attaches to slip Chrome (a dedicated user-data-dir under `~/.operator/slip_profile/`, separate from the user's main Chrome to dodge Chrome 121+ CDP restrictions), navigates to the meeting URL, signs in if needed via the persisted slip-profile cookies, enters the meeting, opens the chat panel, installs the chat-message MutationObserver, and spawns the Swift audio helper that pipes mic + system audio into the whisper pipeline. **Whisper STT lives in a `whisper_worker` subprocess (S244)** — main pipes framed PCM frames to it via stdin (1-byte tag + 4-byte BE length + payload), and worker writes captions directly to the meeting JSONL. On shutdown, main closes worker stdin and exits in ~0.6s; the worker drains its residual audio + writes `participants_final` + `meeting_end` independently (own session group via `start_new_session=True`, so the safety-net reaper doesn't see it). This decoupling is why the trailing utterance of a meeting lands instead of being raced — pre-S244 the in-process drain had only 1.5s to finish what could take 3-7s. Speaker attribution for each utterance is computed at finalize time by maximum interval-overlap against a bounded speaking-event timeline; the JS observer fires `_send_worker_event({type: "speaker_start"|"speaker_stop", ...})` so the worker has a local timeline copy for attribution. (S235 fix — naive snapshot-at-finalize used to flip neighboring speakers).
 2. `ChatRunner._loop()` polls `read_chat()` every 500 ms, drops already-seen / own messages, and forwards messages containing the `@claude` trigger phrase. After an `@claude`, operator intelligently relays same-sender follow-ups even when they don't include the trigger — implemented as a sticky conversation window (S234) for `CONTINUATION_WINDOW_SECONDS` (90s), with `CONTINUATION_DEBOUNCE_SECONDS` (2s) coalescing rapid corrections. Sender-scoped — a different participant has to `@claude` to take the floor. User-facing skill copy (`skills/slip/SKILL.md`) advertises this as "intelligent follow-up relay" rather than exposing the timer. Slip mode is "speak when spoken to" — no 1-on-1 bypass. The same polling tick snapshots the participant roster to `~/.operator/.current_meeting_participants.json` for the `list_participants` MCP tool.
 3. `LLMClient.ask()` reads the meeting JSONL tail via `MeetingRecord.tail(n)` and sends the latest user turn to `ClaudeCLIProvider`. The inner-claude subprocess owns its full tool loop, system prompt, and context. The **spawn** stays naked — no `--append-system-prompt`, no `--mcp-config`, no `-p` — see the `project_anthropic_detection_vector.md` memory for why. But operator's *first bracketed-paste* (turn 0) is an operator-authored briefing (`ClaudeCLIProvider._BRIEFING`): it tells inner-claude it's in a live meeting and to narrate its tool calls. A first-turn paste rides the channel a human types on, so it carries no spawn-signature weight — the naked-spawn invariant constrains spawn *flags*, not the message stream (narrowed S228). Turn 0's reply is consumed and never posted.
 4. Claude narrates its own tool calls in its own voice (`[🤖 Claude] …`), because the briefing asked it to — there is no operator-side narration layer. The only provider callback ChatRunner wires is `tick` (off-thread send-queue drain during the in-turn reply tail). The Phase 14.22 "section G" operator-side `progress`/`denial`/`connection` narration callbacks were built, live-tested, and removed in S228: the raw `running Bash: <command>` lines were cryptic, `PostToolUseFailure` got misclassified as a permission denial, and Claude self-narrating in plain language is simply better.

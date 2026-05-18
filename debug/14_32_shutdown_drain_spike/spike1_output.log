@@ -1,0 +1,18 @@
+Loading whisper model (cold-load timing)...
+Cold load: 1.88s
+
+Longest real WAV: 12.30s
+
+sample                                                        audio_s transcribe_s  rt_ratio
+----------------------------------------------------------------------------------------------------
+utterance_1778705481_0001.wav                                    1.48        3.232      2.18x
+utterance_1778699499_0055.wav                                    9.20        3.736      0.41x
+utterance_1778777490_0023.wav                                   12.30        3.727      0.30x
+synthetic_10s                                                   10.00        3.601      0.36x
+synthetic_12s                                                   12.00        3.842      0.32x
+
+Worst-case end-of-meeting drain envelope (two legs, each 10s, serialised):
+  S+M back-to-back transcribe: 7.308s wall-clock
+
+Conclusion: a Phase-1 drain wait of ~10s would cover
+the realistic worst case with 50% headroom. (Today's 1.5s join is insufficient.)

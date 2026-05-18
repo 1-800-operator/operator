@@ -1,0 +1,8 @@
+Two processes appending 900 lines each to /var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/tmp5xj_uiv5.jsonl
+Wrote in 0.06s
+
+Expected lines: 1800, got: 1800
+Counts: {'A': 900, 'B': 900}
+Parse failures (interleaved writes): 0
+
+PASS — O_APPEND is atomic on this filesystem for our payload sizes

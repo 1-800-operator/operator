@@ -46,6 +46,7 @@ Lifecycle:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -57,7 +58,6 @@ import sys
 import threading
 import time
 from collections import deque
-from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -141,6 +141,7 @@ _AEC_BINARY_DEV = (
 # Source of truth: src/_1_800_operator/swift/operator-audio-capture.swift.
 _FRAME_TAG_SYSTEM = b"S"
 _FRAME_TAG_MIC = b"M"
+_FRAME_TAG_EVENT = b"E"  # control event payload (UTF-8 JSON) for whisper_worker stdin
 _FRAME_HEADER_LEN = 5  # 1 byte tag + 4 byte BE u32 length
 
 # Speaker labels written into the meeting record. The mic leg gets the
@@ -568,9 +569,42 @@ class AttachAdapter(MeetingConnector):
     cookies persist, and subsequent slip runs skip the sign-in.
     """
 
-    def __init__(self, reply_prefix: str = ""):
+    def __init__(self, reply_prefix: str = "", jsonl_path: "str | Path | None" = None):
         super().__init__()
         self._reply_prefix = reply_prefix
+        # Path to the meeting JSONL. When provided, audio captions land in
+        # the JSONL via the whisper_worker subprocess (S244 — drain decoupled
+        # from main shutdown). When None, falls back to the legacy in-process
+        # AudioProcessor path (caption_callback delivers captions to the
+        # caller). The fallback is exercised by tests + the Linux/no-helper
+        # path where no audio is captured anyway.
+        from pathlib import Path as _Path
+        self._jsonl_path: _Path | None = _Path(jsonl_path) if jsonl_path else None
+        self._audio_worker_proc: subprocess.Popen | None = None
+        # Latest known attended/self_name snapshot — ChatRunner pushes
+        # this every polling tick via update_pending_shutdown_payload(). On
+        # the page-close path the browser thread tears down the audio
+        # pipeline before __main__._shutdown can call send_audio_worker_shutdown,
+        # so the seal event would race the EOF. Using a buffered "always
+        # current" snapshot lets _stop_audio_pipeline send the event right
+        # before closing worker stdin, guaranteeing it arrives.
+        self._pending_shutdown_payload: "dict | None" = None
+        # `_audio_worker_pid` is set at spawn time and NEVER cleared, even
+        # after _stop_audio_pipeline drops the Popen handle. The shutdown
+        # safety-net reaper queries this so it can exclude the worker from
+        # its pgrep -P kill list — otherwise the worker (which legitimately
+        # outlives main to drain residual audio) gets SIGTERM/SIGKILL'd
+        # before it can write the JSONL seal. start_new_session=True only
+        # changes the session/pgroup, not the parent PID, so pgrep -P still
+        # sees the worker as a child.
+        self._audio_worker_pid: int | None = None
+        self._audio_worker_lock = threading.Lock()
+        # Separate from _audio_worker_lock to avoid reentrancy when
+        # _maybe_respawn_worker (called from _send_worker_frame) needs
+        # to send mic_label + speaker-history replay events, each of
+        # which goes through _send_worker_frame and acquires the write lock.
+        self._audio_worker_respawn_lock = threading.Lock()
+        self._audio_worker_shutdown_sent = False
         self._playwright = None
         self._browser = None
         self._page = None
@@ -593,34 +627,16 @@ class AttachAdapter(MeetingConnector):
         # _browser_session so leave() can wait for clean teardown.
         self._browser_alive = threading.Event()
         self._browser_closed = threading.Event()
-        # Audio pipeline (14.20.4) — populated by _start_audio_pipeline()
-        # after meeting entry. Stays None when the helper binary hasn't
-        # been built. set_caption_callback may be invoked before or after
-        # join(); the callback is late-bound when set post-join.
-        self._caption_callback = None
+        # Audio pipeline (S244): the main process owns the Swift audio
+        # helper + AEC3 cleaner; the whisper_worker subprocess owns
+        # AudioProcessor, speaker attribution, bleed dedupe, and caption
+        # writes to the JSONL. _audio_helper_proc and _aec_cleaner are the
+        # only audio state main retains. The whisper-worker fields are
+        # initialized in the whisper_worker block above.
         self._audio_helper_proc: subprocess.Popen | None = None
-        self._audio_processors: dict[bytes, "object"] = {}
         self._audio_threads: list[threading.Thread] = []
         self._audio_stop = threading.Event()
-        # AEC cleaner subprocess (S225 spike → step 3 integration). Stays
-        # None when the aec3 binary isn't installed/built; in that case
-        # mic frames go straight to the M-leg AudioProcessor and the
-        # M transcript will contain speaker bleed when system audio is
-        # playing — there is no bleed defense in the fallback path.
         self._aec_cleaner: "object | None" = None
-        # Residual-bleed dedupe: small rolling buffer of recently-finalized
-        # S-leg caption texts (normalized). When an M-leg caption is about
-        # to fire, we check it against this list — if it fuzzy-matches a
-        # recent S-leg entry, it's almost certainly residual bleed that AEC
-        # didn't fully cancel and we drop it. See config.BLEED_DEDUPE_*.
-        self._recent_s_captions: deque[tuple[float, str]] = deque(maxlen=16)
-        self._recent_s_captions_lock = threading.Lock()
-        # Pre-warm thread for faster-whisper-large-v3-turbo. Spawned at
-        # join() start so the cold model load (1-2s warm cache, up to ~100s
-        # first run when the ~1.5GB model downloads from HuggingFace) runs
-        # in parallel with Chrome launch + lobby wait; _start_audio_pipeline
-        # joins this thread before spawning the helper. None until first join().
-        self._whisper_warmup_thread: threading.Thread | None = None
         # Latency anchors for the TIMING listening_ready line:
         #   _slip_start_at    — set at join() entry (≈ when operator slip fired)
         #   _meeting_entry_at — set when the in-call DOM appears (≈ when
@@ -640,11 +656,14 @@ class AttachAdapter(MeetingConnector):
         self._last_s_speaker: str = ""
         # Timeline of speaking events for interval-based attribution.
         # Each entry is (t, name, kind) where kind ∈ {"start", "stop"}.
-        # _audio_utterance_loop attributes a Whisper segment by looking
-        # up who was speaking at the segment's speech_start_time, not
-        # who is speaking now — see _attribute_s_leg() and S234 spike
-        # in debug/14_29_speaker_attribution_spike/. 512 entries ≈ 8min
-        # of dense conversation, well past any plausible Whisper lag.
+        # Mirrored to the whisper_worker subprocess via [E] events so its
+        # utterance loops can look up "who was speaking at this segment's
+        # speech_start_time" rather than "who is speaking now" — Whisper
+        # finalizes ~300-1000ms after the speaker stops, by which point
+        # the DOM indicator may have moved to the next speaker. See
+        # debug/14_29_speaker_attribution_spike/ for the original S234
+        # spike. 512 entries ≈ 8min of dense conversation, well past any
+        # plausible Whisper lag.
         self._speaking_history: deque[tuple[float, str, str]] = deque(maxlen=512)
         # Local runner's tile id, resolved at observer install time. The
         # JS observer skips this tile, but we also filter at drain time
@@ -715,19 +734,15 @@ class AttachAdapter(MeetingConnector):
         # has remote participants. Fires once per meeting, then suppresses.
         self._speaking_events_seen = 0
         self._speaking_breakage_warned = False
-        # Pre-warm the whisper model in parallel with everything else the
-        # join sequence does (Chrome eviction + launch + CDP attach + lobby
-        # wait). The synchronous warm inside _start_audio_pipeline used to
-        # gate the audio pipeline — and therefore the chat MutationObserver
-        # install — for 3-20 seconds after meeting entry. Moving it here
-        # means the model is usually already loaded by the time
-        # _start_audio_pipeline runs, so listening latency drops to ~1s.
-        self._whisper_warmup_thread = threading.Thread(
-            target=self._warm_whisper,
-            daemon=True,
-            name="AttachAdapter-whisper-warm",
-        )
-        self._whisper_warmup_thread.start()
+        # S244: spawn the whisper_worker subprocess now so its model load
+        # runs in parallel with Chrome launch + lobby wait. The spawn
+        # itself is fire-and-forget (Popen returns in milliseconds); the
+        # worker process loads faster-whisper-large-v3-turbo (~2s warm
+        # cache, up to ~100s on first run with the 1.5GB download) on its
+        # own. Frames pushed before warmup completes buffer in the worker
+        # stdin pipe — no readiness wait needed in main.
+        if sys.platform == "darwin" and _resolve_audio_helper() is not None:
+            self._spawn_audio_worker()
         self._browser_thread = threading.Thread(
             target=self._browser_session,
             args=(meeting_url,),
@@ -1021,21 +1036,6 @@ class AttachAdapter(MeetingConnector):
             self._stop_audio_pipeline()
             self._teardown_playwright()
             self._browser_closed.set()
-
-    def set_caption_callback(self, fn):
-        """Register fn(speaker, text, timestamp) for finalized utterances.
-
-        May be called before OR after join(). The audio pipeline buffers
-        utterances internally and delivers them through whichever
-        callback is registered at the moment the utterance finalizes;
-        late-bind is fine. Pass None to unregister.
-
-        AttachAdapter's "captions" are local Whisper transcriptions of
-        the helper's two PCM streams (system + mic), not Meet's caption
-        DOM. Each call delivers one finalized utterance — no streaming
-        partials. Slip wires this directly into MeetingRecord.
-        """
-        self._caption_callback = fn
 
     def send_chat(self, message):
         """Post a message to chat. Queues the request for the browser thread.
@@ -1338,10 +1338,11 @@ class AttachAdapter(MeetingConnector):
         """Drain the DOM speaking-event queue and update _speaking_participants.
 
         Called from _process_chat_queue on the browser thread every ~200ms.
-        Updates _last_s_speaker with the most-recent named speaker so
-        _audio_utterance_loop can attribute [S] utterances even after the
-        DOM indicator has cleared. Also runs the speaking-observer rescan
-        on its own cadence so late-joining participants get wired up.
+        Updates _last_s_speaker with the most-recent named speaker. The
+        speaking history is also pushed to the whisper_worker subprocess
+        (S244) as [E] events for its in-worker S-leg attribution. Also
+        runs the speaking-observer rescan on its own cadence so
+        late-joining participants get wired up.
         """
         self._maybe_rescan_speaking_observer(page)
         try:
@@ -1392,65 +1393,14 @@ class AttachAdapter(MeetingConnector):
                     self._last_s_speaker = name
                     self._speaking_history.append((ev_t, name, "start"))
                     log.debug(f"AttachAdapter: speaking start — {name!r}")
+                    # S244: mirror to the whisper_worker subprocess so its
+                    # S-leg attribution lookup has the same timeline.
+                    self._send_worker_event({"type": "speaker_start", "name": name, "t": ev_t})
                 else:
                     self._speaking_participants.pop(pid, None)
                     self._speaking_history.append((ev_t, name, "stop"))
                     log.debug(f"AttachAdapter: speaking stop  — {name!r}")
-
-    def _attribute_s_leg(self, chunk_start: float, chunk_end: float, default: str) -> str:
-        """Look up which named participant spoke during [chunk_start, chunk_end].
-
-        Used by the S-leg utterance loop after Whisper finalizes a
-        segment. Walks _speaking_history to reconstruct each speaker's
-        [start, stop] intervals and returns the name with the largest
-        overlap with the chunk window. Falls back to the most-recent
-        speaker who stopped at or before chunk_start, then to default.
-
-        Why this and not "who is speaking now": Whisper waits for
-        silence before committing a segment, typically 300-1000ms after
-        the speaker actually stopped. In back-to-back turns the *next*
-        speaker has usually already grabbed the DOM speaking indicator
-        by the time we attribute, so a snapshot-at-finalize read
-        stamps the previous speaker's words with the new speaker's
-        name. See debug/14_29_speaker_attribution_spike/.
-        """
-        with self._speaking_lock:
-            events = list(self._speaking_history)
-        # Reconstruct intervals from start/stop pairs. Still-open speakers
-        # at the end of history get a sentinel +inf end (they're presumed
-        # to still be speaking — which is fine for overlap math).
-        open_starts: dict[str, float] = {}
-        intervals: list[tuple[float, float, str]] = []
-        for t, name, kind in events:
-            if kind == "start":
-                # If a previous start for this name never saw a stop, close
-                # it at this new start (defensive — shouldn't happen, but
-                # observer dedupe isn't perfect across rescans).
-                if name in open_starts:
-                    intervals.append((open_starts[name], t, name))
-                open_starts[name] = t
-            else:
-                t0 = open_starts.pop(name, None)
-                if t0 is not None:
-                    intervals.append((t0, t, name))
-        for name, t0 in open_starts.items():
-            intervals.append((t0, float("inf"), name))
-
-        best_name = ""
-        best_overlap = 0.0
-        for t0, t1, name in intervals:
-            overlap = max(0.0, min(t1, chunk_end) - max(t0, chunk_start))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_name = name
-        if best_name:
-            return best_name
-        # Fallback: most-recent stop at or before chunk_start.
-        candidates = [(t1, name) for (t0, t1, name) in intervals if t1 <= chunk_start]
-        if candidates:
-            candidates.sort(reverse=True)
-            return candidates[0][1]
-        return default
+                    self._send_worker_event({"type": "speaker_stop", "name": name, "t": ev_t})
 
     def leave(self):
         """Disconnect from CDP. Idempotent. Does NOT close slip Chrome.
@@ -1719,58 +1669,208 @@ class AttachAdapter(MeetingConnector):
     # Audio pipeline (14.20.4)
     # ------------------------------------------------------------------
 
-    def _warm_whisper(self) -> None:
-        """Pre-load faster-whisper-large-v3-turbo ahead of meeting entry.
+    # ------------------------------------------------------------------
+    # whisper_worker subprocess (S244)
+    # ------------------------------------------------------------------
 
-        Fired on a daemon thread at join() start so the cold model load
-        (1-2s warm cache, up to ~100s on first run when ~1.5GB downloads
-        from HuggingFace) runs in parallel with Chrome launch + lobby
-        admission rather than gating the audio pipeline (and therefore
-        the chat observer install) the moment the user admits the bot.
-        Populates self._audio_processors; _start_audio_pipeline joins this
-        thread and reuses whatever it finished loading.
+    def _spawn_audio_worker(self) -> None:
+        """Spawn the whisper_worker subprocess. Idempotent.
 
-        Best-effort: silent on non-mac, missing helper, or import failures
-        — _start_audio_pipeline retries the warm synchronously in those
-        cases (and surfaces the warning then).
+        Worker runs in its own session group (start_new_session=True) so the
+        shutdown safety-net's pgrep -P doesn't see it — the worker survives
+        main's exit and drains its residual audio backlog independently.
+        Verified via debug/14_32_shutdown_drain_spike/spike3_detached_child.py
+        across normal exit / SIGTERM / SIGKILL.
+
+        Stderr → /tmp/operator.log (same destination as the audio helper).
+        Stdin is the audio + event channel. Stdout is /dev/null — the
+        worker writes captions directly to the meeting JSONL.
         """
-        if sys.platform != "darwin":
+        if self._audio_worker_proc is not None:
             return
-        if _resolve_audio_helper() is None:
-            return
-        try:
-            from _1_800_operator.pipeline.audio import AudioProcessor
-        except ImportError:
+        if self._jsonl_path is None:
             return
         try:
-            log.info("AudioProcessor: warming faster-whisper-large-v3-turbo (async, one-time per process)…")
-            self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
-            self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
-        except Exception as e:
-            log.warning(
-                f"AttachAdapter: async whisper warm failed ({e}) — "
-                f"_start_audio_pipeline will retry"
+            with open("/tmp/operator.log", "ab") as stderr_sink:
+                self._audio_worker_proc = subprocess.Popen(
+                    [
+                        sys.executable, "-m",
+                        "_1_800_operator.pipeline.whisper_worker",
+                        "--jsonl", str(self._jsonl_path),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_sink,
+                    start_new_session=True,
+                )
+            self._audio_worker_pid = self._audio_worker_proc.pid
+            log.info(
+                f"AttachAdapter: whisper_worker spawned "
+                f"(pid={self._audio_worker_proc.pid}, jsonl={self._jsonl_path})"
             )
-            self._audio_processors.clear()
+        except OSError as e:
+            log.warning(
+                f"AttachAdapter: failed to spawn whisper_worker ({e}) — "
+                f"falling back to in-process audio"
+            )
+            self._audio_worker_proc = None
+
+    def _send_worker_frame(self, tag: bytes, payload: bytes) -> bool:
+        """Write [tag][len_be][payload] to worker stdin.
+
+        Returns True on success, False if the worker is gone / pipe broken.
+        Thread-safe: stdin writes are serialized via _audio_worker_lock so
+        the reader loop ([S]/[M] frames) and speaker observer ([E] events)
+        don't interleave.
+
+        If the worker has died (proc.poll() returns non-None), attempts
+        one respawn before giving up — captions then resume on the new
+        worker. State that's reachable from main (speaker timeline, mic
+        label) is replayed; in-worker dedupe / partial buffers are lost.
+        """
+        proc = self._audio_worker_proc
+        if proc is None or proc.stdin is None:
+            return False
+        if proc.poll() is not None:
+            self._maybe_respawn_worker(dead_proc=proc)
+            proc = self._audio_worker_proc
+            if proc is None or proc.stdin is None or proc.poll() is not None:
+                return False
+        try:
+            header = tag + struct.pack(">I", len(payload))
+            with self._audio_worker_lock:
+                proc.stdin.write(header)
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError) as e:
+            log.warning(f"AttachAdapter: worker stdin write failed ({e}) — worker may be dead")
+            return False
+
+    def _maybe_respawn_worker(self, dead_proc: "subprocess.Popen") -> None:
+        """Respawn the whisper_worker if it died mid-meeting. Idempotent
+        under concurrent callers — first thread in wins, others see the
+        already-new proc and bail.
+
+        Replays speaker timeline + mic_label so attribution + M-leg
+        labeling work for captions transcribed after respawn. The S-leg
+        bleed-dedupe window (worker-local) is reset; first M-leg captions
+        after respawn may pass through residual S-leg bleed. Acceptable
+        degradation given the alternative is silent caption loss.
+        """
+        with self._audio_worker_respawn_lock:
+            # Another thread may have respawned already.
+            if self._audio_worker_proc is not dead_proc:
+                return
+            old_pid = dead_proc.pid
+            exit_code = dead_proc.returncode
+            log.warning(
+                f"AttachAdapter: whisper_worker (pid={old_pid}) died mid-meeting "
+                f"(exit={exit_code}) — respawning"
+            )
+            self._audio_worker_proc = None
+            self._audio_worker_shutdown_sent = False
+            self._spawn_audio_worker()
+            if not self.has_audio_worker:
+                log.warning("AttachAdapter: respawn failed — captions will be lost")
+                return
+            # Replay mic_label so M-leg captions use the right speaker.
+            try:
+                mic_label = self.get_self_name() or _SPEAKER_USER_FALLBACK
+                self._send_worker_event({"type": "mic_label", "name": mic_label})
+            except Exception as e:
+                log.debug(f"AttachAdapter: respawn mic_label send failed: {e}")
+            # Replay speaker timeline so S-leg attribution survives the
+            # respawn. Snapshot under lock so the live observer can't
+            # mutate while we copy.
+            with self._speaking_lock:
+                history = list(self._speaking_history)
+            for t, name, kind in history:
+                event_type = "speaker_start" if kind == "start" else "speaker_stop"
+                self._send_worker_event({"type": event_type, "name": name, "t": t})
+            log.info(
+                f"AttachAdapter: respawn done (new_pid={self._audio_worker_pid}, "
+                f"replayed {len(history)} speaker events)"
+            )
+
+    def _send_worker_event(self, msg: dict) -> bool:
+        """Send a control event ([E] tag, JSON payload) to the worker."""
+        try:
+            payload = json.dumps(msg).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            log.warning(f"AttachAdapter: bad worker event payload {msg!r}: {e}")
+            return False
+        return self._send_worker_frame(_FRAME_TAG_EVENT, payload)
+
+    @property
+    def has_audio_worker(self) -> bool:
+        """True if the whisper_worker subprocess was spawned successfully.
+
+        Caller checks this to decide whether to call meeting_record.close()
+        themselves (no-worker fallback) or skip it (worker handles seal).
+        """
+        proc = self._audio_worker_proc
+        return proc is not None and proc.stdin is not None
+
+    def update_pending_shutdown_payload(
+        self,
+        attended: "list[str]",
+        currently_present: "list[str]",
+        self_name: str,
+    ) -> None:
+        """Buffer the latest attended/self_name snapshot for the worker shutdown event.
+
+        Called by ChatRunner each polling tick. _stop_audio_pipeline uses
+        this to emit a final shutdown event right before closing worker
+        stdin — covers the page-close race where _shutdown's own
+        send_audio_worker_shutdown call would arrive after EOF.
+        """
+        self._pending_shutdown_payload = {
+            "type": "shutdown",
+            "attended": list(attended or []),
+            "currently_present": list(currently_present or []),
+            "self_name": self_name or "",
+        }
+
+    def send_audio_worker_shutdown(self, attended: list[str], currently_present: list[str], self_name: str) -> bool:
+        """Tell the worker to seal the JSONL with participants_final +
+        meeting_end after it drains. Called once by __main__._shutdown
+        before connector.leave(). Returns True if the event was sent.
+
+        Idempotent — safe to call twice (subsequent calls are no-ops).
+        """
+        if self._audio_worker_shutdown_sent:
+            return True
+        if not self.has_audio_worker:
+            return False
+        ok = self._send_worker_event({
+            "type": "shutdown",
+            "attended": list(attended or []),
+            "currently_present": list(currently_present or []),
+            "self_name": self_name or "",
+        })
+        if ok:
+            self._audio_worker_shutdown_sent = True
+        return ok
 
     def _start_audio_pipeline(self) -> None:
-        """Spawn the Operator audio helper and wire it through two AudioProcessors.
+        """Bring up the Swift audio helper + AEC3, wire both into the
+        whisper_worker subprocess.
 
         Best-effort — any failure here logs a warning and leaves the
-        connector in chat-only mode. The reasons audio might not come up:
+        connector in chat-only mode. Reasons audio might not come up:
           - Linux (helper is Mac-only)
-          - Helper binary not built (install.sh hasn't run, or dev tree
-            without a manual swiftc)
+          - Helper binary not built (install.sh hasn't run)
           - Helper exits early on TCC denial (Screen Recording / Mic) —
-            the ten-second watchdog and exit codes 4/5 surface this; the
-            user is told to run `operator doctor` for the fix copy
+            user is told to run `operator doctor`
+          - The whisper_worker subprocess failed to spawn at join() time
 
-        Layout of the spawned pipeline:
-          helper stdout --> _audio_reader_loop --> processors[tag].feed_audio
-          processors['S']     --> _audio_utterance_loop("other")    --> caption_callback
-          processors['M']     --> _audio_utterance_loop(<self-name>) --> caption_callback
-                                                       (falls back to "user" if the
-                                                        Meet self-tile scrape fails)
+        Layout (S244):
+          helper stdout  --> _audio_reader_loop --> worker stdin ([S] frames)
+          helper stdout  --> _audio_reader_loop --> AEC3 stdin   ([M] frames)
+          AEC3 stdout    --> _aec_to_worker     --> worker stdin ([M] frames)
+        Speaker DOM observer events also stream to worker stdin ([E] frames)
+        for in-worker S-leg attribution.
         """
         if sys.platform != "darwin":
             return
@@ -1781,109 +1881,51 @@ class AttachAdapter(MeetingConnector):
                 "chat-only (no transcript). Run install.sh to build the helper."
             )
             return
-
-        try:
-            from _1_800_operator.pipeline.audio import AudioProcessor
-        except ImportError as e:
-            log.warning(f"AttachAdapter: AudioProcessor import failed ({e}) — chat-only mode")
+        if not self.has_audio_worker:
+            log.warning("AttachAdapter: whisper_worker not available — chat-only mode")
             return
 
-        # Wait for the async warm started in join(). If it succeeded,
-        # self._audio_processors is already populated and we skip the
-        # synchronous warm below. If it failed (or the warm thread was
-        # never started — leave-before-join paths), fall through and warm
-        # here.
-        if self._whisper_warmup_thread is not None:
-            self._whisper_warmup_thread.join(timeout=30)
-
-        if not self._audio_processors:
-            try:
-                log.info("AudioProcessor: warming faster-whisper-large-v3-turbo (one-time per process)…")
-                self._audio_processors[_FRAME_TAG_SYSTEM] = AudioProcessor()
-                self._audio_processors[_FRAME_TAG_MIC] = AudioProcessor()
-            except Exception as e:
-                log.warning(f"AttachAdapter: AudioProcessor warmup failed ({e}) — chat-only mode")
-                self._audio_processors.clear()
-                return
-
-        # Operator may have entered teardown while we were warming the
-        # whisper model (cold load can take ~20s). Spawning the helper
-        # after _leave_event is set would orphan a subprocess that
-        # _stop_audio_pipeline can't see yet — bail before that happens.
+        # Operator may have entered teardown while the worker was
+        # warming up. Spawning the helper after _leave_event is set
+        # would orphan a subprocess _stop_audio_pipeline can't see — bail.
         if self._leave_event.is_set():
             log.info("AttachAdapter: leave requested during audio warmup — skipping helper spawn")
             return
 
-        # Debug WAV dumps: developer-only path. Gated on a hardcoded
-        # constant rather than an env var so end-users can't accidentally
-        # enable it (writing every utterance to disk has obvious privacy
-        # cost). Devs hacking on audio flip _AUDIO_DEBUG_WAV in their
-        # working copy. Destination is under ~/.operator/ with 0o700 perms
-        # — never /tmp — even when enabled.
-        if _AUDIO_DEBUG_WAV:
-            _debug_root = os.path.expanduser("~/.operator/debug/audio")
-            os.makedirs(_debug_root, exist_ok=True, mode=0o700)
-            os.chmod(_debug_root, 0o700)
-            for _tag, _proc in self._audio_processors.items():
-                _tag_str = _tag.decode() if isinstance(_tag, bytes) else str(_tag)
-                _proc.debug_dir = os.path.join(_debug_root, _tag_str)
-                os.makedirs(_proc.debug_dir, exist_ok=True, mode=0o700)
-                os.chmod(_proc.debug_dir, 0o700)
-            log.info(f"AttachAdapter: _AUDIO_DEBUG_WAV → {_debug_root}")
-
         # Helper stderr → /tmp/operator.log (append). Same destination as
-        # operator's own logs so users have one place to look. Health line
-        # ("10s health: [S]=… cb / [M]=… cb"), TCC fatals, and shutdown
-        # totals all land here.
+        # operator's own logs so users have one place to look.
         #
         # Spawned via posix_spawn with `responsibility_spawnattrs_setdisclaim`
-        # (see _disclaimed_spawn.py). Without this, the helper inherits the
-        # parent IDE/terminal's TCC responsibility chain — Cursor's
-        # ToDesktop-wrapped Electron build silently denies SCStream audio
-        # even when the helper itself is granted Screen Recording. Disclaim
-        # makes the helper its own responsible process so TCC keys decisions
-        # against the helper's own code-signature identifier, regardless of
-        # who launched it. Validated against Cursor/Terminal.app spawn paths
-        # in 14.20.4.
+        # so helper TCC identity is its own bundle id, independent of the
+        # parent IDE/terminal's responsibility chain. Without this, Cursor's
+        # ToDesktop Electron build silently denies SCStream audio even when
+        # the helper itself is granted Screen Recording.
         try:
             from _1_800_operator.pipeline._disclaimed_spawn import (
                 spawn_disclaimed, minimal_helper_env,
             )
-            # spawn_disclaimed dup2's our fd into the child; close the parent
-            # handle right after so we don't keep an extra fd to the log
-            # open for the lifetime of the connector.
             with open("/tmp/operator.log", "ab") as stderr_sink:
                 self._audio_helper_proc = spawn_disclaimed(
                     [str(helper)],
-                    # Minimal env — the helper has no auth needs and no
-                    # reason to see the user's shell secrets.
                     env=minimal_helper_env(),
                     stderr_fd=stderr_sink.fileno(),
                 )
         except OSError as e:
             log.warning(f"AttachAdapter: spawning {helper} failed ({e}) — chat-only mode")
-            self._audio_processors.clear()
             return
 
-        # Mark processors capturing BEFORE the utterance threads start so
-        # the loop conditions don't immediately exit.
-        for proc in self._audio_processors.values():
-            proc.capturing = True
-
-        # Bring up the AEC3 cleaner so mic frames flow through it before
-        # reaching the M-leg AudioProcessor. Best-effort: if the binary
-        # isn't installed (step 5 hasn't landed) or fails to spawn, log
-        # and continue without AEC — _audio_reader_loop routes mic frames
-        # directly to m_proc and the M transcript will then include
-        # speaker bleed (no bleed defense in the fallback path).
-        m_proc = self._audio_processors.get(_FRAME_TAG_MIC)
+        # AEC3 cleaner: routes cleaned mic frames to the worker as [M].
+        # If aec3 binary is missing, raw [M] frames are routed straight to
+        # worker by _audio_reader_loop (no bleed defense in that path).
+        def _aec_to_worker(pcm: bytes) -> None:
+            self._send_worker_frame(_FRAME_TAG_MIC, pcm)
         aec_binary = _resolve_aec_binary()
-        if aec_binary is not None and m_proc is not None:
+        if aec_binary is not None:
             try:
                 from _1_800_operator.pipeline.aec_cleaner import AecCleaner
                 self._aec_cleaner = AecCleaner(
                     binary_path=aec_binary,
-                    on_clean_mic=m_proc.feed_audio,
+                    on_clean_mic=_aec_to_worker,
                 )
                 self._aec_cleaner.start()
                 log.info(f"AttachAdapter: AEC cleaner up ({aec_binary})")
@@ -1891,8 +1933,7 @@ class AttachAdapter(MeetingConnector):
                 log.warning(f"AttachAdapter: AEC cleaner start failed ({e}) — no bleed defense")
                 self._aec_cleaner = None
         else:
-            if aec_binary is None:
-                log.info("AttachAdapter: aec3 binary not found — running without bleed defense")
+            log.info("AttachAdapter: aec3 binary not found — running without bleed defense")
 
         reader = threading.Thread(
             target=self._audio_reader_loop,
@@ -1904,28 +1945,15 @@ class AttachAdapter(MeetingConnector):
 
         # Resolve the mic-leg speaker label by scraping the local user's
         # Meet display name from the self tile. Best-effort; falls back
-        # to a generic "user" string when the scrape returns empty (slip
-        # hasn't fully rendered the participant panel yet, Meet DOM
-        # shifted, etc.). Done here rather than at join() because the
-        # self tile reliably exists once we're past meeting-entry and
-        # the audio pipeline is what consumes the value.
+        # to a generic "user" string when the scrape returns empty.
         mic_label = self.get_self_name() or _SPEAKER_USER_FALLBACK
         log.info(f"AttachAdapter: mic-leg speaker label = {mic_label!r}")
-
-        for tag, label in (
-            (_FRAME_TAG_SYSTEM, _SPEAKER_OTHER),
-            (_FRAME_TAG_MIC, mic_label),
-        ):
-            t = threading.Thread(
-                target=self._audio_utterance_loop,
-                args=(tag, label),
-                name=f"AttachAdapter-utterance-{label}",
-                daemon=True,
-            )
-            t.start()
-            self._audio_threads.append(t)
-
-        log.info(f"AttachAdapter: audio pipeline up (helper={helper}, pid={self._audio_helper_proc.pid})")
+        self._send_worker_event({"type": "mic_label", "name": mic_label})
+        log.info(
+            f"AttachAdapter: audio pipeline up "
+            f"(helper={helper}, pid={self._audio_helper_proc.pid}, "
+            f"worker pid={self._audio_worker_pid})"
+        )
 
     def _audio_reader_loop(self) -> None:
         """Parse framed PCM from helper stdout, dispatch to the right processor.
@@ -1960,135 +1988,49 @@ class AttachAdapter(MeetingConnector):
                     log.info("AttachAdapter: audio reader truncated read — helper exited mid-frame")
                     break
                 aec = self._aec_cleaner
+                # S244: frames flow main → whisper_worker via the worker's
+                # stdin. [S] also feeds AEC's render side as the reference
+                # signal for echo cancellation; [M] goes through AEC's
+                # capture side and its on_clean_mic callback re-emits the
+                # cleaned [M] back to the worker. If AEC is down, raw [M]
+                # goes straight to the worker (no bleed defense).
                 if tag == _FRAME_TAG_SYSTEM:
-                    # [S] always feeds the system-audio processor (whisper
-                    # path for remote-participant transcripts). If AEC is
-                    # alive it ALSO feeds the render side so the cleaner
-                    # has the reference signal it needs to cancel bleed.
-                    s_proc = self._audio_processors.get(_FRAME_TAG_SYSTEM)
-                    if s_proc is not None:
-                        s_proc.feed_audio(pcm)
+                    self._send_worker_frame(_FRAME_TAG_SYSTEM, pcm)
                     if aec is not None:
                         aec.feed_render(pcm)
                 elif tag == _FRAME_TAG_MIC:
-                    # [M] goes through AEC when up; otherwise straight to
-                    # the mic-leg processor (pre-AEC fallback). AEC's own
-                    # on_clean_mic callback hands cleaned bytes back to
-                    # m_proc.feed_audio, so the downstream whisper path
-                    # is unchanged in shape.
                     if aec is not None:
                         aec.feed_capture(pcm)
                     else:
-                        m_proc = self._audio_processors.get(_FRAME_TAG_MIC)
-                        if m_proc is not None:
-                            m_proc.feed_audio(pcm)
+                        self._send_worker_frame(_FRAME_TAG_MIC, pcm)
                 else:
                     log.warning(f"AttachAdapter: unknown frame tag {tag!r} — dropping {length}B")
                     continue
         except Exception as e:
             log.warning(f"AttachAdapter: audio reader loop crashed: {e}")
 
-    @staticmethod
-    def _normalize_for_dedupe(text: str) -> str:
-        """Lowercase, strip punctuation, collapse whitespace.
-
-        Makes the SequenceMatcher comparison robust to minor whisper drift
-        like trailing periods, capitalization, doubled spaces — without
-        affecting what's actually delivered to the caption callback.
-        """
-        return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
-
-    def _is_recent_s_caption(self, text: str) -> bool:
-        """True if `text` fuzzy-matches an S-leg caption from the last few seconds."""
-        needle = self._normalize_for_dedupe(text)
-        if not needle:
-            return False
-        now = time.time()
-        window = config.BLEED_DEDUPE_WINDOW_SECONDS
-        threshold = config.BLEED_DEDUPE_SIMILARITY
-        with self._recent_s_captions_lock:
-            # Drop stale entries lazily so the deque doesn't fill with junk.
-            while self._recent_s_captions and now - self._recent_s_captions[0][0] > window:
-                self._recent_s_captions.popleft()
-            candidates = [n for _, n in self._recent_s_captions]
-        for c in candidates:
-            if SequenceMatcher(None, needle, c).ratio() >= threshold:
-                return True
-        return False
-
-    def _record_s_caption(self, text: str) -> None:
-        """Add an S-leg caption to the rolling dedupe buffer."""
-        normalized = self._normalize_for_dedupe(text)
-        if not normalized:
-            return
-        with self._recent_s_captions_lock:
-            self._recent_s_captions.append((time.time(), normalized))
-
-    def _audio_utterance_loop(self, tag: bytes, speaker_label: str) -> None:
-        """Drain finalized utterances from one processor, fire caption callback.
-
-        Loop exits when the processor flips capturing=False (set by
-        _stop_audio_pipeline). Each utterance is delivered exactly once;
-        the callback is captured by reference at call time so a late
-        set_caption_callback also works.
-        """
-        proc = self._audio_processors.get(tag)
-        if proc is None:
-            return
-        while proc.capturing and not self._audio_stop.is_set():
-            try:
-                text, speech_start_time = proc.capture_next_utterance()
-            except Exception as e:
-                log.warning(f"AttachAdapter: utterance loop ({speaker_label}) raised: {e}")
-                continue
-            if not text:
-                continue
-            cb = self._caption_callback
-            if cb is None:
-                log.debug(f"AttachAdapter: utterance dropped (no callback) [{speaker_label}] {text!r}")
-                continue
-            # For the system-audio leg, attribute via the speaking-event
-            # timeline using the chunk's actual speech window — NOT a
-            # snapshot at finalize time. See _attribute_s_leg().
-            effective_label = speaker_label
-            if tag == _FRAME_TAG_SYSTEM and speech_start_time is not None:
-                effective_label = self._attribute_s_leg(
-                    chunk_start=speech_start_time,
-                    chunk_end=time.time(),
-                    default=speaker_label,
-                )
-            # Bleed dedupe: if this is the M leg and the same text just
-            # came through the S leg, drop it as residual speaker bleed.
-            if tag == _FRAME_TAG_MIC and self._is_recent_s_caption(text):
-                log.info(
-                    f"AttachAdapter: dropped M-leg caption (S-leg dedupe) {text!r}"
-                )
-                continue
-            try:
-                cb(effective_label, text, time.time())
-            except Exception as e:
-                log.warning(f"AttachAdapter: caption callback raised: {e}")
-            # Record S-leg captions AFTER the callback so the dedupe lookup
-            # by a near-simultaneous M-leg utterance sees this entry.
-            if tag == _FRAME_TAG_SYSTEM:
-                self._record_s_caption(text)
-
     def _stop_audio_pipeline(self) -> None:
         """Tear down the audio pipeline. Idempotent.
 
-        Order matters: flip capturing=False so the utterance loops exit
-        their next tick, set the stop event so the reader breaks out,
-        then close helper stdin (which the helper watches for EOF and
-        exits on). SIGTERM + a short wait is the fallback.
+        Order matters: set the stop event so the reader breaks out, close
+        helper stdin (helper watches for EOF and exits on it), drain AEC
+        cleaner, join the reader thread, then send the buffered shutdown
+        event to the worker and close its stdin.
+
+        S244 — worker subprocess: receives EOF on its stdin AFTER helper
+        + AEC + reader have drained. The worker then transcribes its
+        residual buffer, writes participants_final + meeting_end, and
+        exits at its own pace (out of our process). We do NOT wait for
+        the worker — that's the whole point of the subprocess-decoupled
+        drain. The shutdown safety-net reaper excludes the worker pid so
+        it isn't SIGKILL'd before it drains.
         """
         if (
             self._audio_helper_proc is None
-            and not self._audio_processors
             and self._aec_cleaner is None
+            and self._audio_worker_proc is None
         ):
             return
-        for proc in self._audio_processors.values():
-            proc.capturing = False
         self._audio_stop.set()
         proc_handle = self._audio_helper_proc
         if proc_handle is not None:
@@ -2111,12 +2053,9 @@ class AttachAdapter(MeetingConnector):
             except Exception as e:
                 log.debug(f"AttachAdapter: helper wait raised: {e}")
             self._audio_helper_proc = None
-        # Helper is gone (or being killed) — the reader loop will EOF on
-        # its next read. Stop the AEC cleaner only AFTER that path is
-        # quiet so we don't drop frames the reader was still forwarding.
-        # Any cleaned frames emitted during the EOF drain are pushed into
-        # m_proc.feed_audio (no-ops past this point since capturing is
-        # already False and the M utterance loop has exited).
+        # Helper is gone — the reader loop will EOF on its next read.
+        # Stop the AEC cleaner only AFTER the reader path is quiet so we
+        # don't drop frames it was still forwarding.
         if self._aec_cleaner is not None:
             try:
                 self._aec_cleaner.stop()
@@ -2126,5 +2065,36 @@ class AttachAdapter(MeetingConnector):
         for t in self._audio_threads:
             t.join(timeout=1.5)
         self._audio_threads.clear()
-        self._audio_processors.clear()
+        # Send the latest known attended/self_name snapshot to the worker
+        # as a shutdown event RIGHT BEFORE closing its stdin. This covers
+        # the page-close race: when the browser thread runs
+        # _stop_audio_pipeline autonomously (user closed Meet tab),
+        # __main__._shutdown's own send_audio_worker_shutdown call would
+        # arrive after EOF and the seal would land with empty attended.
+        # Buffered payload comes from ChatRunner._refresh_roster_file via
+        # update_pending_shutdown_payload, so it's always within one poll
+        # tick of fresh.
+        worker_proc = self._audio_worker_proc
+        if worker_proc is not None and self._pending_shutdown_payload is not None:
+            try:
+                self._send_worker_event(self._pending_shutdown_payload)
+            except Exception as e:
+                log.debug(f"AttachAdapter: shutdown event flush raised: {e}")
+        # Close the worker's stdin AFTER helper + AEC + reader have all
+        # drained. The worker sees EOF, transcribes residual audio, writes
+        # participants_final + meeting_end, exits. We do NOT wait.
+        if worker_proc is not None:
+            try:
+                if worker_proc.stdin is not None:
+                    worker_proc.stdin.close()
+            except (BrokenPipeError, OSError) as e:
+                log.debug(f"AttachAdapter: closing worker stdin raised: {e}")
+            log.info(
+                f"AttachAdapter: whisper_worker (pid={worker_proc.pid}) handed off — "
+                f"draining residual audio + sealing JSONL out-of-process"
+            )
+            # Clear the handle so subsequent ops can't accidentally write
+            # to a closed pipe. The Popen object stays alive (the OS owns
+            # the child process); GC of self drops our last reference.
+            self._audio_worker_proc = None
         log.info("AttachAdapter: audio pipeline torn down")

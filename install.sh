@@ -226,19 +226,23 @@ if command -v claude >/dev/null 2>&1; then
   ALLOWLIST_RESULT="$(python3 - <<'PY' 2>&1
 import json, os, sys
 path = os.path.expanduser("~/.claude/settings.json")
-# Entries needed for operator plugin skills to work in the desktop
-# app without silent-fail. Bash(operator:*) covers slip/status/hangup/
-# doctor/recap. The two claude plugin entries cover /operator:update.
-# mcp__transcript__* covers all bundled transcript MCP tools so inner-
-# claude never hits a permission prompt mid-meeting.
+# Entries needed for operator plugin skills + bundled MCP to work in
+# the desktop app without silent-fail or permission prompts mid-meeting:
+#   Bash(operator:*)                       slip/status/hangup/doctor/recap
+#   Bash(claude plugin marketplace update) /operator:update
+#   Bash(claude plugin update operator)    /operator:update
+#   mcp__operator-meeting-record__*        bundled meeting-record MCP
+#     (renamed from mcp__transcript__* in S238 — we also prune the dead
+#     entry below for users upgrading from older installs)
 # (Avoid apostrophes in this heredoc body — bash command-substitution
 # parses quotes inside heredoc bodies and an unbalanced "'" breaks it.)
 entries = [
     "Bash(operator:*)",
     "Bash(claude plugin marketplace update:*)",
     "Bash(claude plugin update operator:*)",
-    "mcp__transcript__*",
+    "mcp__operator-meeting-record__*",
 ]
+DEAD_ENTRIES = {"mcp__transcript__*", "mcp__transcript__list_meeting_record"}
 try:
     with open(path) as f:
         cfg = json.load(f)
@@ -254,24 +258,35 @@ if not isinstance(perms, dict):
 allow = perms.setdefault("allow", [])
 if not isinstance(allow, list):
     print("skip:allow-not-a-list"); sys.exit(0)
+# Prune old transcript MCP entries from prior installs (server was
+# renamed to operator-meeting-record in S238).
+pruned = [e for e in allow if e in DEAD_ENTRIES]
+allow[:] = [e for e in allow if e not in DEAD_ENTRIES]
 added = []
 for e in entries:
     if e not in allow:
         allow.append(e)
         added.append(e)
-if not added:
+if not added and not pruned:
     print("present"); sys.exit(0)
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
-print(f"added:{','.join(added)}")
+parts = []
+if added:
+    parts.append(f"added:{','.join(added)}")
+if pruned:
+    parts.append(f"pruned:{','.join(pruned)}")
+print(";".join(parts))
 PY
 )" || ALLOWLIST_RESULT="skip:python-failed"
   case "${ALLOWLIST_RESULT}" in
-    added:*) info "Added to ~/.claude/settings.json permissions.allow: ${ALLOWLIST_RESULT#added:}" ;;
+    added:*|pruned:*|added:*\;pruned:*)
+      info "Updated ~/.claude/settings.json permissions.allow: ${ALLOWLIST_RESULT}"
+      ;;
     present) info "operator allowlist entries already present in ~/.claude/settings.json — leaving untouched." ;;
-    skip:*)  warn "Could not update ~/.claude/settings.json (${ALLOWLIST_RESULT#skip:}) — desktop-app users may need to add Bash(operator:*) + Bash(claude plugin marketplace update:*) + Bash(claude plugin update operator:*) to permissions.allow manually." ;;
+    skip:*)  warn "Could not update ~/.claude/settings.json (${ALLOWLIST_RESULT#skip:}) — desktop-app users may need to add Bash(operator:*) + Bash(claude plugin marketplace update:*) + Bash(claude plugin update operator:*) + mcp__operator-meeting-record__* to permissions.allow manually." ;;
     *)       warn "Unexpected allowlist result: ${ALLOWLIST_RESULT}" ;;
   esac
   echo

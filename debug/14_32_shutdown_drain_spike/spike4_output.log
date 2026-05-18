@@ -1,0 +1,24 @@
+Using 3 sample WAVs (longest first)
+Worker JSONL: /var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/tmpgbwew823_worker_test.jsonl
+Spawning worker: /Users/jojo/.local/share/uv/tools/1-800-operator/bin/python -m _1_800_operator.pipeline.whisper_worker --jsonl /var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/tmpgbwew823_worker_test.jsonl --mic-label Jojo
+Waiting 8s for whisper warmup...
+Closing worker stdin, waiting for drain...
+Worker exited rc=0 in 10.41s post-stdin-close
+  worker stderr: 2026-05-18 12:04:03,499 INFO whisper_worker — whisper_worker starting (jsonl=/var/folders/pk/4zh_x4cd37s4pn7kmn8py4yh0000gn/T/tmpgbwew823_worker_test.jsonl, pid=39532)
+  worker stderr: 2026-05-18 12:04:11,865 INFO whisper_worker — whisper_worker: utterance loops up
+  worker stderr: 2026-05-18 12:04:23,888 INFO whisper_worker — whisper_worker: shutdown event received
+  worker stderr: 2026-05-18 12:04:23,888 INFO whisper_worker — whisper_worker: stdin EOF
+  worker stderr: 2026-05-18 12:04:23,888 INFO whisper_worker — whisper_worker: draining residual utterances...
+  worker stderr: 2026-05-18 12:04:30,502 INFO whisper_worker — whisper_worker[S]: utterance loop exited
+  worker stderr: 2026-05-18 12:04:34,156 INFO whisper_worker — whisper_worker[M]: utterance loop exited
+  worker stderr: 2026-05-18 12:04:34,157 INFO whisper_worker — TIMING whisper_worker_drain elapsed_s=10.268
+  worker stderr: 2026-05-18 12:04:34,157 INFO whisper_worker — whisper_worker: sealed (participants_final=yes, meeting_end written)
+  worker stderr: 2026-05-18 12:04:34,157 INFO whisper_worker — whisper_worker exiting cleanly
+
+=== JSONL contents (4 lines) ===
+  [caption] Alice      Just going through the Mattel tickets from this morning, then we're going to kic
+  [caption] Jojo       customer, that was kind of where we were going with this. But then at the same t
+  [participants_final] {"timestamp": 1779131074.157147, "currently_present": [], "attended": ["Alice", "Bob"], "self_name": "Jojo"}
+  [meeting_end] {"timestamp": 1779131074.157147}
+
+PASS — worker E2E works

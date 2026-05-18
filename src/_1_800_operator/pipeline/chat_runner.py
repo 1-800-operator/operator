@@ -867,6 +867,19 @@ class ChatRunner:
             os.replace(tmp, path)
         except OSError as e:
             log.warning(f"ChatRunner: could not write roster {path}: {e}")
+        # S244: push the same snapshot to the connector so the whisper_worker
+        # can seal with rich attended/self_name even when the page-close
+        # path beats _shutdown to closing worker stdin.
+        update_fn = getattr(self._connector, "update_pending_shutdown_payload", None)
+        if callable(update_fn):
+            try:
+                update_fn(
+                    attended=sorted(self._attended_participants),
+                    currently_present=currently_present,
+                    self_name=self._last_self_name,
+                )
+            except Exception as e:
+                log.debug(f"ChatRunner: update_pending_shutdown_payload raised: {e}")
 
     def _flush_continuation_if_ready(self):
         """Dispatch the buffered continuation if the debounce window

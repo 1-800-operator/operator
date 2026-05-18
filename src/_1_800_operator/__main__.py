@@ -69,11 +69,20 @@ def _detached_popen_init(self, *args, **kwargs):
 subprocess.Popen.__init__ = _detached_popen_init
 
 
-def _kill_orphaned_children():
-    """Last-resort cleanup: kill any child processes that survived graceful shutdown."""
+def _kill_orphaned_children(exclude_pids: "set[int] | None" = None):
+    """Last-resort cleanup: kill any child processes that survived graceful shutdown.
+
+    `exclude_pids` is a set of PIDs to skip — used by S244 to keep the
+    whisper_worker alive past main's exit so it can drain residual audio
+    and seal the JSONL. The worker is a child by ppid (start_new_session
+    only changed pgroup/session), so without an explicit exclusion the
+    reaper SIGKILLs it 75ms after handoff and trailing captions get lost.
+    """
     import signal as _sig
     import subprocess as _sp
     import time as _time
+
+    exclude = set(exclude_pids or ())
 
     pid = os.getpid()
     try:
@@ -86,11 +95,14 @@ def _kill_orphaned_children():
         return
 
     child_pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+    child_pids = [p for p in child_pids if p not in exclude]
     if not child_pids:
         return
 
     import logging
     log = logging.getLogger("operator")
+    if exclude:
+        log.info(f"Safety net: excluded from reap (whisper_worker etc.): {sorted(exclude)}")
 
     labeled = []
     for cpid in child_pids:
@@ -1193,17 +1205,12 @@ def _run_slip(name, rest, *, mode="slip"):
     except OSError as e:
         log.warning(f"could not write current-meeting marker: {e}")
 
-    connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
-
-    # Wire whisper utterances → meeting record. Direct-write: each
-    # callback delivers ONE finalized utterance, not a streaming partial.
-    def _on_utterance(speaker: str, text: str, timestamp: float) -> None:
-        try:
-            meeting_record.append(speaker, text, kind="caption", timestamp=timestamp)
-        except Exception as exc:
-            log.warning(f"slip: append caption failed: {exc}")
-
-    connector.set_caption_callback(_on_utterance)
+    # S244: pass jsonl_path so AttachAdapter spawns the whisper_worker
+    # subprocess. Captions land in the JSONL directly via the worker.
+    connector = AttachAdapter(
+        reply_prefix=claude_bridge.REPLY_PREFIX_SLIP,
+        jsonl_path=meeting_record.path,
+    )
 
     ui.say("Launching slip Chrome…")
     try:
@@ -1280,6 +1287,35 @@ def _run_slip(name, rest, *, mode="slip"):
         _release_slip_lock()
         _t_fast = _time.monotonic()
 
+        # S244: if the whisper_worker subprocess is alive, hand it the
+        # attended-participant snapshot + self_name BEFORE Phase 1 closes
+        # its stdin. The worker writes participants_final + meeting_end as
+        # its final act, so it needs these values to bake in. Snapshot
+        # taken pre-Phase-1 may miss late joiners (uncommon at meeting
+        # end); the alternative (sequence runner.stop → send → leave)
+        # would re-serialise what we deliberately parallelised.
+        attended = sorted(getattr(runner, "_attended_participants", set()))
+        self_name = getattr(runner, "_last_self_name", "") or ""
+        # S244 — worker is the SOLE seal owner whenever it was ever
+        # spawned. The "was it ever spawned" check (via _audio_worker_pid,
+        # which is set at spawn and never cleared) is correct even on the
+        # page-closed-mid-meeting path where the browser thread closes
+        # worker stdin before _shutdown runs — the worker still writes
+        # the seal on its own EOF, with whatever shutdown payload it got
+        # (or empty if the page-close race lost the event). Without this
+        # check, main writes seal AND worker writes seal → duplicate
+        # meeting_end lines.
+        worker_handles_seal = getattr(connector, "_audio_worker_pid", None) is not None
+        if worker_handles_seal:
+            try:
+                connector.send_audio_worker_shutdown(
+                    attended=attended,
+                    currently_present=[],
+                    self_name=self_name,
+                )
+            except Exception as e:
+                log.warning(f"_shutdown: send_audio_worker_shutdown raised: {e}")
+
         # Phase 1: parallel teardown of inner subprocs + browser/audio.
         _t_runner_end = [_t_fast]
         _t_leave_end = [_t_fast]
@@ -1312,13 +1348,18 @@ def _run_slip(name, rest, *, mode="slip"):
             log.warning("_shutdown: connector.leave branch did not complete in 30s — abandoning to reaper")
         _t_phase1_end = _time.monotonic()
 
-        # Phase 2: bake participants_final + meeting_end into JSONL.
-        try:
-            attended = sorted(getattr(runner, "_attended_participants", set()))
-            self_name = getattr(runner, "_last_self_name", "") or ""
-            meeting_record.close(attended=attended, self_name=self_name)
-        except Exception as e:
-            log.warning(f"MeetingRecord.close() failed: {e}")
+        # Phase 2: bake participants_final + meeting_end into JSONL —
+        # unless the whisper_worker already owns the seal (S244).
+        if worker_handles_seal:
+            log.info("_shutdown: seal deferred to whisper_worker (drains independently)")
+        else:
+            try:
+                # Re-read in case attended changed during Phase 1 runner.stop.
+                attended = sorted(getattr(runner, "_attended_participants", set()))
+                self_name = getattr(runner, "_last_self_name", "") or ""
+                meeting_record.close(attended=attended, self_name=self_name)
+            except Exception as e:
+                log.warning(f"MeetingRecord.close() failed: {e}")
         try:
             roster = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
             if roster.exists():
@@ -1327,8 +1368,13 @@ def _run_slip(name, rest, *, mode="slip"):
             pass
         _t_record = _time.monotonic()
 
-        # Phase 3: safety-net reap.
-        _kill_orphaned_children()
+        # Phase 3: safety-net reap. Exclude the whisper_worker — it
+        # legitimately outlives main to drain residual audio + seal the
+        # JSONL (S244). _audio_worker_pid is set at spawn time and never
+        # cleared, so it survives the connector teardown above.
+        _worker_pid = getattr(connector, "_audio_worker_pid", None)
+        _exclude = {_worker_pid} if _worker_pid else set()
+        _kill_orphaned_children(exclude_pids=_exclude)
         _t_done = _time.monotonic()
         log.info(
             f"TIMING shutdown mode=slip "
@@ -1429,15 +1475,12 @@ def _run_wiretap(url):
 
     # The reply prefix is unused in wiretap (send_chat never fires) but
     # AttachAdapter requires the constructor arg.
-    connector = AttachAdapter(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
-
-    def _on_utterance(speaker: str, text: str, timestamp: float) -> None:
-        try:
-            meeting_record.append(speaker, text, kind="caption", timestamp=timestamp)
-        except Exception as exc:
-            log.warning(f"wiretap: append caption failed: {exc}")
-
-    connector.set_caption_callback(_on_utterance)
+    # S244: jsonl_path enables the whisper_worker subprocess for
+    # shutdown-decoupled caption drain.
+    connector = AttachAdapter(
+        reply_prefix=claude_bridge.REPLY_PREFIX_SLIP,
+        jsonl_path=meeting_record.path,
+    )
 
     ui.say("Launching slip Chrome for wiretap…")
     try:
@@ -1482,6 +1525,23 @@ def _run_wiretap(url):
         _release_slip_lock()
         _t_fast = _time.monotonic()
 
+        # S244: hand the whisper_worker its seal payload before Phase 1
+        # closes its stdin. See slip _shutdown for the rationale.
+        attended = sorted(getattr(runner, "_attended_participants", set()))
+        self_name = getattr(runner, "_last_self_name", "") or ""
+        # See slip _shutdown for the rationale on _audio_worker_pid as
+        # the seal-ownership discriminator (S244).
+        worker_handles_seal = getattr(connector, "_audio_worker_pid", None) is not None
+        if worker_handles_seal:
+            try:
+                connector.send_audio_worker_shutdown(
+                    attended=attended,
+                    currently_present=[],
+                    self_name=self_name,
+                )
+            except Exception as e:
+                log.warning(f"_shutdown: send_audio_worker_shutdown raised: {e}")
+
         _t_runner_end = [_t_fast]
         _t_leave_end = [_t_fast]
 
@@ -1513,12 +1573,15 @@ def _run_wiretap(url):
             log.warning("_shutdown: connector.leave branch did not complete in 30s — abandoning to reaper")
         _t_phase1_end = _time.monotonic()
 
-        try:
-            attended = sorted(getattr(runner, "_attended_participants", set()))
-            self_name = getattr(runner, "_last_self_name", "") or ""
-            meeting_record.close(attended=attended, self_name=self_name)
-        except Exception as e:
-            log.warning(f"MeetingRecord.close() failed: {e}")
+        if worker_handles_seal:
+            log.info("_shutdown: seal deferred to whisper_worker (drains independently)")
+        else:
+            try:
+                attended = sorted(getattr(runner, "_attended_participants", set()))
+                self_name = getattr(runner, "_last_self_name", "") or ""
+                meeting_record.close(attended=attended, self_name=self_name)
+            except Exception as e:
+                log.warning(f"MeetingRecord.close() failed: {e}")
         try:
             roster = Path(config.CURRENT_MEETING_PARTICIPANTS_PATH)
             if roster.exists():
@@ -1526,7 +1589,11 @@ def _run_wiretap(url):
         except OSError:
             pass
         _t_record = _time.monotonic()
-        _kill_orphaned_children()
+        # Exclude the whisper_worker from the reap (S244) — it outlives
+        # main to drain residual audio + seal the JSONL.
+        _worker_pid = getattr(connector, "_audio_worker_pid", None)
+        _exclude = {_worker_pid} if _worker_pid else set()
+        _kill_orphaned_children(exclude_pids=_exclude)
         _t_done = _time.monotonic()
         log.info(
             f"TIMING shutdown mode=wiretap "

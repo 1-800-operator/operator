@@ -1,0 +1,8 @@
+Spike 3: detached child survival across parent-exit scenarios
+
+  (a) parent normal exit: PASS — child completed 25 ticks then DONE
+  (b) parent SIGTERM   : PASS — child completed 25 ticks then DONE
+  (c) parent SIGKILL   : PASS — child completed 25 ticks then DONE
+
+Result: 3/3 scenarios passed
+PASS — detached child survives parent exit on macOS

@@ -215,6 +215,26 @@ class AudioProcessor:
                     log.info("AudioProcessor: utterance_done (max_duration)")
                     break
 
+        # S244: capturing=False (shutdown) exits the while loop without the
+        # last 0.5s window of audio ever reaching utterance_audio. Drain one
+        # more time so the trailing-utterance bytes that arrived between the
+        # last tick and the flag flip get transcribed instead of dropped on
+        # the floor. Belt to the worker drain's suspenders: the worker would
+        # see EOF and exit cleanly, but without this drain the last word of
+        # whatever was being said gets clipped.
+        if not self.capturing:
+            residual = self.drain_audio_buffer()
+            if residual:
+                rms = float(np.sqrt(np.mean(np.frombuffer(residual, dtype=np.float32) ** 2)))
+                # Append if we were already mid-utterance, OR if the residual
+                # itself contains speech (someone started talking right as
+                # shutdown fired).
+                if speech_detected or rms >= UTTERANCE_SILENCE_RMS:
+                    if not speech_detected:
+                        speech_start_time = time.time()
+                    utterance_audio += residual
+                    log.info(f"AudioProcessor: shutdown_drain captured {len(residual)}B (rms={rms:.4f})")
+
         if not utterance_audio:
             return "", None
 
