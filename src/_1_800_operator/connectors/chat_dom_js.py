@@ -138,24 +138,30 @@ GET_PARTICIPANT_NAMES_JS = """() => {
 
 
 # Return the operator-runner's Meet display name from the slip Chrome.
-# Identifies the LOCAL tile by negative-space: every REMOTE tile has a
-# "Pin <name> to your main screen" button; the local tile does NOT
-# (you can't pin yourself). We pick the unique tile with no descendant
-# button whose aria-label starts with "Pin ".
+# Identifies the LOCAL tile by the presence of CAMERA CONTROLS — specifically
+# the "Reframe" or "Backgrounds and effects" buttons. These only render on
+# your own tile because they only apply to your own video stream. Validated
+# in 2-, 3-, and 4-person meetings:
+#   local tile  → has "Reframe" + "Backgrounds and effects" + "More options"
+#   remote tile → has "Pin", "You can't unmute someone else", "More options"
 #
-# Prior predicates (presence of button[data-idom-class], or the first
-# tile in DOM order with a non-empty name span) silently mis-identified
-# remote tiles as local in multi-person meetings, attributing the
-# runner's mic captures to whichever remote participant Meet rendered
-# first. The slip Chrome's Google account also differs from the meeting
-# identity (operator's slip profile is signed in to a separate test
-# account), so the only reliable source is the in-meeting tile.
+# Prior predicate "no 'Pin <name>' button" silently mis-identified in
+# 2-person calls because Meet hides the Pin button entirely in 1-on-1s (no
+# use case for pinning when there's only one other person), so both tiles
+# matched and the picker returned the first in DOM order — typically the
+# remote. The camera-controls predicate works for both 1-on-1 (where remote
+# tiles render no buttons at all) and 3+ person (where remote tiles render
+# Pin/unmute/More-options but never camera controls).
+#
+# Localization caveat: "Reframe" and "Backgrounds and effects" are English
+# aria-labels; non-English locales would silently break. Today the slip
+# Chrome's UI language is whatever Meet renders for that Google account.
 #
 # Returns "" on failure — caller falls back to a generic label.
 GET_SELF_NAME_JS = """() => {
     const tiles = document.querySelectorAll('[data-requested-participant-id]');
     for (const tile of tiles) {
-        if (tile.querySelector('button[aria-label^="Pin "]')) continue;
+        if (!tile.querySelector('button[aria-label="Reframe"], button[aria-label="Backgrounds and effects"]')) continue;
         const span = tile.querySelector('span.notranslate');
         if (span) {
             const name = (span.textContent || '').trim();
@@ -168,12 +174,12 @@ GET_SELF_NAME_JS = """() => {
 
 # Install a MutationObserver on every REMOTE participant tile that fires
 # when the speaking-indicator class (BlxGDf) appears or disappears on any
-# descendant element. The local tile is identified by the same negative-
-# space predicate as GET_SELF_NAME_JS (the unique tile with NO "Pin <name>"
-# button) and deliberately skipped — slip Chrome's system-audio output
-# never contains the runner's own voice (Meet doesn't echo your mic back
-# to your speakers), so a "speaking" local tile would be mic activity and
-# misattribute remote [S] audio to the runner.
+# descendant element. The local tile is identified by the same predicate
+# as GET_SELF_NAME_JS (presence of "Reframe" / "Backgrounds and effects"
+# camera-control buttons) and deliberately skipped — slip Chrome's
+# system-audio output never contains the runner's own voice (Meet doesn't
+# echo your mic back to your speakers), so a "speaking" local tile would
+# be mic activity and misattribute remote [S] audio to the runner.
 #
 # Idempotent at the per-tile level: re-running the install attaches
 # observers to NEW tiles (late joiners) without disconnecting existing
@@ -212,7 +218,7 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
 
     var localPid = '';
     for (var i = 0; i < tiles.length; i++) {
-        if (tiles[i].querySelector('button[aria-label^="Pin "]')) continue;
+        if (!tiles[i].querySelector('button[aria-label="Reframe"], button[aria-label="Backgrounds and effects"]')) continue;
         var sp = tiles[i].querySelector('span.notranslate');
         if (sp && (sp.textContent || '').trim()) {
             localPid = tiles[i].getAttribute('data-requested-participant-id') || '';
