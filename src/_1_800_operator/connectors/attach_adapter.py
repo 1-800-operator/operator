@@ -194,6 +194,54 @@ def _resolve_audio_helper() -> Path | None:
     return None
 
 
+def _chrome_user_data_dir_on_cdp_port() -> str | None:
+    """Return the --user-data-dir of the Chrome process listening on
+    CDP_PORT, or None if we can't determine it.
+
+    Used by _browser_session's reuse path to verify the Chrome on 9222
+    is OUR slip Chrome before attaching. The Origin-nonce check (security
+    C-1) catches foreign Chromes with default Origin lockdown — they
+    refuse the WebSocket upgrade. The residual is a foreign Chrome
+    launched with --remote-allow-origins=* (a developer's Puppeteer dev
+    session, another LLM browser tool), which accepts our Origin header
+    and would let us silently attach + open the meeting URL in the wrong
+    profile (different Google identity, no slip cookies). Verifying the
+    process's --user-data-dir matches SLIP_PROFILE_DIR closes that.
+
+    Best-effort: returns None on lsof/ps failure or if --user-data-dir
+    isn't found in argv. Caller treats None as "foreign / unknown" and
+    evicts.
+    """
+    try:
+        r = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{CDP_PORT}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+    except Exception:
+        return None
+    for pid in pids:
+        try:
+            ps_r = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            )
+            command = ps_r.stdout.strip()
+        except Exception:
+            continue
+        # We launch Chrome with --user-data-dir=<path> (equals form, see
+        # _launch_slip_chrome). A foreign Chrome that launched with
+        # space-separated form (--user-data-dir <path>) won't match here
+        # — caller treats unknown as foreign and evicts, which is
+        # exactly what we want.
+        for token in command.split():
+            if token.startswith("--user-data-dir="):
+                return token[len("--user-data-dir="):]
+    return None
+
+
 def _pid_still_owns_port(pid: int, port: int) -> bool:
     """True iff `pid` still has a listening TCP socket on `port`.
 
@@ -691,10 +739,34 @@ class AttachAdapter(MeetingConnector):
             if _cdp_endpoint_alive():
                 pc = _cdp_page_count()
                 if pc > 0:
-                    log.info(
-                        f"AttachAdapter: reusing existing slip Chrome ({pc} tab(s))"
+                    # Verify the Chrome on 9222 is OUR slip Chrome. The
+                    # Origin-nonce check (security C-1) handles foreign
+                    # Chromes with default Origin lockdown; checking
+                    # --user-data-dir closes the residual where a foreign
+                    # Chrome launched with --remote-allow-origins=* would
+                    # accept our Origin header and let us silently attach
+                    # in the wrong profile.
+                    owner_uds = _chrome_user_data_dir_on_cdp_port()
+                    is_slip = (
+                        owner_uds is not None
+                        and os.path.realpath(owner_uds)
+                            == os.path.realpath(SLIP_PROFILE_DIR)
                     )
-                    launch_needed = False
+                    if is_slip:
+                        log.info(
+                            f"AttachAdapter: reusing existing slip Chrome "
+                            f"({pc} tab(s))"
+                        )
+                        launch_needed = False
+                    else:
+                        log.warning(
+                            f"AttachAdapter: Chrome on port {CDP_PORT} has "
+                            f"user-data-dir={owner_uds!r} (expected "
+                            f"{SLIP_PROFILE_DIR!s}) — foreign Chrome, "
+                            "evicting + relaunching"
+                        )
+                        _evict_other_chrome_on_cdp_port()
+                        time.sleep(0.5)
                 else:
                     log.info(
                         f"AttachAdapter: existing Chrome has {pc} tabs "

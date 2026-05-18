@@ -616,17 +616,33 @@ def _run_hangup():
         print("not in a meeting")
         return 0
 
-    # Brief wait so the slip process can run its shutdown handler
-    # (connector.leave waits up to 10s for the browser thread). We poll
-    # only for ~3s — long enough to confirm exit on the happy path, not
-    # so long that the plugin skill feels stuck.
+    # Poll on the slip lockfile being released, not on the daemon's pid
+    # exiting. The daemon's _shutdown releases the lock early (~500ms
+    # after SIGTERM — intentional design so /operator:slip can
+    # immediately retry without hitting the singleton guard). The
+    # remaining 5-12s of background teardown (PTY drain,
+    # connector.leave, audio helper exit) doesn't affect the room's
+    # view of the bot — chat panel is detached, claude is no longer
+    # responding. So "hung up" is truthful the moment the lock is free.
+    # Per-resource defenses (H-16 user-data-dir check on CDP reuse,
+    # H-25 sealed JSONL on close) cover any shared-resource overlap a
+    # follow-up /operator:slip would otherwise race on.
     deadline = _time.monotonic() + 3.0
     while _time.monotonic() < deadline:
+        if not _SLIP_LOCK_PATH.exists():
+            break
+        # Belt-and-suspenders: if the daemon died before releasing the
+        # lock (crashed mid-_shutdown, or never reached it), pid exit
+        # is the secondary signal — release the lock ourselves and exit.
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            try:
+                _SLIP_LOCK_PATH.unlink()
+            except OSError:
+                pass
             break
-        _time.sleep(0.2)
+        _time.sleep(0.1)
     print("hung up (1 session)")
     return 0
 

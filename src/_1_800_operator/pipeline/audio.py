@@ -199,11 +199,13 @@ class AudioProcessor:
                         silence_count += 1
                         if silence_count == 1:
                             silence_start_time = time.time()
-            else:
-                if speech_detected:
-                    silence_count += 1
-                    if silence_count == 1:
-                        silence_start_time = time.time()
+            # An empty drain means the helper produced no frames this tick
+            # (transient backpressure — TCC renegotiation, CPU pressure,
+            # whisper inference feeding back to read scheduling). It is NOT
+            # silence — bumping silence_count here would finalize mid-word
+            # utterances under any system load. Leave silence_count untouched
+            # so the countdown effectively pauses during starvation. The
+            # max-duration guard below still bounds the wait.
 
             if speech_detected:
                 if silence_count >= UTTERANCE_SILENCE_THRESHOLD:

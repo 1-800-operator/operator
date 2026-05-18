@@ -364,6 +364,45 @@ def test_close_in_memory_mode_is_noop():
     print("  close: in-memory mode is a no-op: OK")
 
 
+def test_append_after_close_is_dropped_silently():
+    """H-25: between meeting_record.close() and connector.leave() in the
+    shutdown sequence, the audio caption thread is still alive and can
+    fire _on_utterance, which calls append() on the already-closed
+    record. Pre-fix this wrote the late caption AFTER the meeting_end
+    marker — corrupting the seal that find_meetings / list_meetings rely
+    on to bound a session.
+
+    Post-fix append() checks _closed and silently returns (the in-memory
+    entry dict is still returned for caller compatibility, but nothing is
+    written to disk and nothing is added to _chat_tail).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="abc", root=Path(tmp), meta={})
+        rec.append(sender="alice", text="hello before close")
+        rec.close(attended=["alice"])
+        # Snapshot what's on disk after the seal.
+        kinds_before = [e.get("kind") for e in read_lines(rec.path)]
+        assert kinds_before[-1] == "meeting_end", kinds_before
+
+        # Now simulate a late caption finalizing post-close.
+        rec.append(sender="alice", text="late caption after close",
+                   kind="caption")
+        rec.append(sender="bob", text="late chat after close")
+
+        # Disk state must be unchanged — no entries past meeting_end.
+        kinds_after = [e.get("kind") for e in read_lines(rec.path)]
+        assert kinds_after == kinds_before, (
+            f"append after close should not write to disk; "
+            f"before={kinds_before} after={kinds_after}"
+        )
+        # _chat_tail must not have grown either.
+        assert all(
+            "late chat after close" not in (e.get("text") or "")
+            for e in rec._chat_tail
+        ), "post-close chat should not enter _chat_tail"
+    print("  append: post-close calls are dropped silently (seal preserved): OK")
+
+
 # ---------------------------------------------------------------------------
 # Run all
 # ---------------------------------------------------------------------------
@@ -383,6 +422,7 @@ if __name__ == "__main__":
         test_close_is_idempotent,
         test_close_without_attended_skips_participants_final,
         test_close_in_memory_mode_is_noop,
+        test_append_after_close_is_dropped_silently,
     ]
     failures = []
     for t in tests:

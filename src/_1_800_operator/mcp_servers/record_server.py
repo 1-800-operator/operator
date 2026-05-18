@@ -83,6 +83,7 @@ ENV_PATH = "OPERATOR_MEETING_RECORD_PATH"
 MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
 PARTICIPANTS_FILE = Path.home() / ".operator" / ".current_meeting_participants.json"
 HISTORY_DIR = Path.home() / ".operator" / "history"
+SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
 
 # Per-tool response ceiling. A typical 1-hour meeting with ~500 caption
 # events renders to ~50KB; 80KB fits most meetings in one call, which is
@@ -143,6 +144,31 @@ def _is_safe_record_path(path: Path) -> bool:
     return True
 
 
+def _slip_owner_is_alive() -> bool:
+    """True iff ~/.operator/slip.pid points at a live process.
+
+    Cheap pid-liveness signal (signal 0 probe). Used as a freshness gate
+    on the marker-file fallback: if no operator process owns the lock,
+    the marker is from a crashed prior session and the MCP should not
+    serve its contents as 'the live meeting'.
+
+    Accepts PID-recycle ambiguity (a dead operator pid reassigned to an
+    unrelated same-uid process would read as alive). This matches the
+    documented Audit 1 tradeoff that PID-recycle spoofing is too
+    far-fetched to engineer against.
+    """
+    try:
+        pid_text = SLIP_LOCK.read_text(encoding="utf-8").strip()
+        pid = int(pid_text)
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def _resolve_record_path() -> Path | None:
     """Return the active meeting JSONL path, or None if unwired.
 
@@ -150,12 +176,17 @@ def _resolve_record_path() -> Path | None:
       1. OPERATOR_MEETING_RECORD_PATH env var (primary). Operator sets
          this before spawning inner-claude; the MCP subprocess inherits
          it atomically and a same-uid actor cannot race-overwrite it
-         after spawn.
+         after spawn. Inner-claude exits when operator exits, so the env
+         var is intrinsically fresh — no liveness check needed.
       2. ~/.operator/.current_meeting marker file (fallback). Kept for
          static MCP registrations that miss the env var (e.g. a claude
          session the user opened outside any operator run). Less safe —
          any same-uid process can overwrite the file mid-meeting —
-         so the result is validated.
+         so the result is validated. The marker also outlives a crashed
+         operator (SIGKILL/OOM/panic don't run _shutdown), so we gate it
+         on slip.pid liveness: no live operator → treat marker as stale
+         and return None rather than serve a prior meeting's transcripts
+         as 'the live meeting'.
 
     Both sources are run through _is_safe_record_path before being
     returned, so an unvalidated path can never reach `path.open()`.
@@ -165,7 +196,7 @@ def _resolve_record_path() -> Path | None:
         path = Path(env_val)
         if _is_safe_record_path(path):
             return path
-    if MARKER_FILE.exists():
+    if MARKER_FILE.exists() and _slip_owner_is_alive():
         try:
             marker = MARKER_FILE.read_text(encoding="utf-8").strip()
         except OSError:

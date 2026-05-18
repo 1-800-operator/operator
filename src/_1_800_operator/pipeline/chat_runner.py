@@ -893,8 +893,13 @@ class ChatRunner:
             # str(e) into chat (it can carry response payloads / tokens
             # / upstream secrets — the full detail lives in operator.log
             # via the log.error above, and the snapshot below is what
-            # doctor reads). Say "unavailable" exactly once per meeting;
-            # subsequent failures stay log-only.
+            # doctor reads). Say "unavailable" exactly once per *failure
+            # episode*; subsequent failures within the same episode stay
+            # log-only. A successful turn (below) clears the announce
+            # flag so a future regression (transient recovers, then
+            # breaks again) is re-announced rather than silently dropped
+            # — H-18 made provider retry on every mention, so meetings
+            # genuinely do cycle through broken→working→broken now.
             _write_last_failure(self._record, self._provider, e)
             if self._claude_unavailable_announced:
                 self._emit_turn_done(failed=True)
@@ -904,6 +909,9 @@ class ChatRunner:
                 "claude is unavailable — run /operator:doctor to see what's wrong"
             )
             return
+        # Successful turn — clear the announce flag so the next failure
+        # episode (if any) re-announces, rather than being silent.
+        self._claude_unavailable_announced = False
         self._dispatch_result(result)
 
     def _dispatch_result(self, result):
@@ -1202,6 +1210,11 @@ class ChatRunner:
             self._purge_held_sends(reason="safety timeout (hook self-denied)")
             self._permreq_active = None
             self._permreq_seen_at_post = set()
+            # The permreq question's "— OK?" tripped _last_reply_had_question
+            # and this path consumes the resolution without routing through
+            # _process_messages, so reset the flag here to avoid leaving the
+            # indefinite continuation window open past the timeout.
+            self._last_reply_had_question = False
             self._post_next_permreq()
             return
 
@@ -1338,6 +1351,14 @@ class ChatRunner:
 
         self._permreq_active = None
         self._permreq_seen_at_post = set()
+        # The permreq question's "— OK?" tripped _last_reply_had_question
+        # when _post_next_permreq sent it via _send(kind="chat"). The answer
+        # was consumed by _check_permreq_chat_for_answer (above) without
+        # going through _process_messages, so the flag never got cleared
+        # there. Clear it here at resolution — once the permreq is answered,
+        # subsequent casual chat shouldn't be force-routed to claude on the
+        # back of an unrelated `?`-driven indefinite continuation window.
+        self._last_reply_had_question = False
         self._post_next_permreq()
 
     def _is_self_sender(self, sender) -> bool:

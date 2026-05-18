@@ -101,9 +101,79 @@ def test_repetition_hallucination_filter():
     print("OK repetition_hallucination_filter")
 
 
+def test_helper_starvation_does_not_finalize_utterance():
+    """H-24: an empty drain means the helper produced no frames this tick
+    (transient backpressure — TCC renegotiation, CPU pressure, whisper
+    inference feeding back to read scheduling). It is NOT real silence.
+    Pre-fix, every empty tick bumped silence_count, so two consecutive
+    starvation ticks (1s) would finalize a mid-utterance — cutting the
+    user off mid-word.
+
+    Scenario: speech burst → 4 ticks of helper starvation (would be 2x
+    SILENCE_THRESHOLD pre-fix, definitely enough to falsely finalize) →
+    more speech → real trailing silence. We assert the captured utterance
+    audio includes BOTH speech bursts (i.e. starvation did NOT cut the
+    utterance after the first burst).
+    """
+    proc = AudioProcessor()
+    proc.capturing = True
+
+    # Replace transcribe with a sniffer that records utterance length
+    # without running whisper (fast + deterministic). The capture loop
+    # calls self.transcribe(np.ndarray) with the assembled PCM.
+    captured_lengths: list[int] = []
+    def fake_transcribe(audio):
+        captured_lengths.append(int(audio.size * audio.itemsize))
+        return ""
+    proc.transcribe = fake_transcribe  # type: ignore[method-assign]
+
+    def feeder():
+        # Burst 1: 1.0s of speech-RMS audio.
+        proc.feed_audio(pcm_bytes(1.0, rms=UTTERANCE_SILENCE_RMS * 4))
+        time.sleep(0.6)
+        # Helper STARVATION: 4 ticks where feed_audio is never called.
+        # drain_audio_buffer will return b"" on each loop iteration.
+        # Pre-fix this would have finalized the utterance after 2 ticks (1s).
+        time.sleep(2.0)
+        # Burst 2: another 1.0s of speech. Pre-fix this would be a new
+        # utterance (because burst 1 was already finalized). Post-fix it
+        # belongs to the same utterance.
+        proc.feed_audio(pcm_bytes(1.0, rms=UTTERANCE_SILENCE_RMS * 4))
+        time.sleep(0.6)
+        # Real trailing silence to finalize cleanly.
+        for _ in range(3):
+            proc.feed_audio(pcm_bytes(0.5, rms=0.0))
+            time.sleep(0.5)
+        proc.capturing = False
+
+    threading.Thread(target=feeder, daemon=True).start()
+    proc.capture_next_utterance()
+
+    # The captured utterance audio length should reflect BOTH bursts plus
+    # trailing silence — i.e. roughly 2x the single-burst byte count, not
+    # one burst's worth. Each burst is 1.0s @ 16kHz Float32 = 64000 bytes.
+    # If starvation prematurely finalized, we'd see ~one burst (~64KB);
+    # post-fix we should see closer to ~two bursts + trailing silence.
+    assert len(captured_lengths) == 1, (
+        f"expected exactly one utterance to be finalized, got "
+        f"{len(captured_lengths)} (starvation may have prematurely cut)"
+    )
+    single_burst_bytes = int(1.0 * SAMPLE_RATE * 4)  # 1s Float32
+    assert captured_lengths[0] >= int(single_burst_bytes * 1.5), (
+        f"utterance audio length {captured_lengths[0]} is closer to one "
+        f"burst ({single_burst_bytes}) than two — starvation finalized "
+        f"prematurely. Expected ≥{int(single_burst_bytes * 1.5)} bytes."
+    )
+    print(
+        f"OK helper_starvation_does_not_finalize_utterance "
+        f"(captured {captured_lengths[0]} bytes — both bursts present)"
+    )
+
+
 if __name__ == "__main__":
     print("Loading faster-whisper-large-v3-turbo (first run downloads ~1.5GB)…")
     test_silence_only_returns_empty()
     test_speech_burst_finalizes_on_silence()
     test_repetition_hallucination_filter()
+    test_helper_starvation_does_not_finalize_utterance()
     print("\nAll audio tests passed.")

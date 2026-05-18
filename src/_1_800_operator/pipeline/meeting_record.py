@@ -162,6 +162,13 @@ class MeetingRecord:
             "kind": kind,
         }
         with self._lock:
+            # After close(), the JSONL is sealed with a meeting_end line and
+            # post-meeting tools (find_meetings, list_meetings) treat it as
+            # the final marker. Any append landing after that — late captions
+            # finalized between close() and connector.leave() stopping the
+            # audio threads — would corrupt the seal. Silently drop instead.
+            if getattr(self, "_closed", False):
+                return entry
             if self.path is None:
                 self._memory.append(entry)
             else:

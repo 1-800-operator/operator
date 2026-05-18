@@ -334,6 +334,54 @@ def test_question_truncation_for_long_inputs():
     print("  long input truncation: keeps chat post legible: OK")
 
 
+def test_permreq_resolution_clears_question_flag():
+    """H-27: the permreq question ends in '— OK?' which trips
+    _last_reply_had_question (the `?`-driven indefinite continuation
+    window flag). Because _check_permreq_chat_for_answer consumes the
+    answer reply directly (without routing through _process_messages,
+    which is what normally clears the flag), the flag would stay True
+    after the permreq resolved. Then any casual chat arriving after the
+    90s time-based continuation window expired would be force-routed to
+    claude on the back of the stale indefinite window.
+
+    Fix: clear the flag in _resolve_permreq AND in the safety-timeout
+    block — the two paths that consume a permreq without going through
+    _process_messages.
+    """
+    # --- real answer path: flag must be cleared on classifier verdict
+    classifier = FakeClassifier(verdict=False)
+    runner = make_runner(classifier=classifier)
+    req, _ = make_req()
+    runner._on_permission_request(req)
+    # _send was called by _post_next_permreq for the question, which
+    # ends in "— OK?", so the flag should now be True.
+    assert runner._last_reply_had_question is True, (
+        "precondition: posting the permreq question should set the flag"
+    )
+    runner._connector.chat_messages = [
+        {"id": "msg-1", "sender": "alice", "text": "nope"}
+    ]
+    runner._check_permreq_chat_for_answer()
+    assert runner._permreq_active is None
+    assert runner._last_reply_had_question is False, (
+        "_resolve_permreq must clear _last_reply_had_question — otherwise "
+        "the indefinite continuation window survives the resolved permreq"
+    )
+
+    # --- safety timeout path: flag must be cleared on hook self-deny
+    runner2 = make_runner(classifier=FakeClassifier(verdict=True))
+    runner2._permreq_safety_timeout_s = 0.0  # fire immediately
+    req2, _ = make_req(request_id="req-2")
+    runner2._on_permission_request(req2)
+    assert runner2._last_reply_had_question is True
+    runner2._check_permreq_chat_for_answer()  # safety timeout trips at top
+    assert runner2._permreq_active is None
+    assert runner2._last_reply_had_question is False, (
+        "safety-timeout path must clear _last_reply_had_question too"
+    )
+    print("  H-27: permreq resolution clears _last_reply_had_question: OK")
+
+
 # ---- main ------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -351,6 +399,7 @@ if __name__ == "__main__":
         test_pre_existing_chat_does_not_count_as_answer,
         test_send_failure_resolves_with_deny,
         test_question_truncation_for_long_inputs,
+        test_permreq_resolution_clears_question_flag,
     ]
     failures = 0
     for fn in tests:

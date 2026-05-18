@@ -71,6 +71,7 @@ because the interactive TUI doesn't emit a system_init event we can
 read — the equivalent guard is doctor's preflight (`claude auth
 status --json`) and a SessionStart-hook anomaly check later.
 """
+import collections
 import fcntl
 import json
 import logging
@@ -110,6 +111,15 @@ _BRACKET_CLOSE_DELAY = 0.2
 # pin to. Cosmetic only; events come out via hooks regardless.
 _PTY_ROWS = 40
 _PTY_COLS = 120
+
+# PTY drain-buffer cap. _drain_pty_thread captures the TUI bytes for
+# diagnostic tail on failure (_pty_tail returns the last 2KB). Cap by
+# chunk count rather than total bytes since os.read(master_fd, 4096)
+# bounds each chunk at 4096 — so 64 chunks ≤ 256 KB, generous overhead
+# above the 2KB tail window. Pre-H-19 the buffer was an unbounded
+# list[bytes] that grew at MB/min during chatty turns; a long meeting
+# accumulated hundreds of MB of TUI repaint bytes with no surfacing.
+_PTY_DUMP_MAX_CHUNKS = 64
 
 # Boot ceiling — ONE hard ceiling across the whole boot: spawn →
 # ready.flag (SessionStart hook) → briefing (turn 0) consumed. A healthy
@@ -221,6 +231,11 @@ def _drain_pty_thread(master_fd, dump_buf, stop_event):
     we capture the tail purely so a crashed-claude failure has something
     to surface in the error message. The reader runs until stop_event
     fires or the PTY closes (read() hits EOF or raises OSError).
+
+    `dump_buf` is a bounded deque (maxlen=_PTY_DUMP_MAX_CHUNKS) so the
+    oldest chunks are auto-evicted as new ones append — bounds RSS over
+    long meetings without per-tick bookkeeping. `_pty_tail` only ever
+    reads the most recent bytes, so eviction of stale prefix is fine.
     """
     while not stop_event.is_set():
         try:
@@ -286,7 +301,9 @@ class ClaudeCLIProvider(LLMProvider):
         self._master_fd: int | None = None
         self._pty_reader_stop = threading.Event()
         self._pty_reader_thread: threading.Thread | None = None
-        self._pty_dump: list[bytes] = []
+        self._pty_dump: collections.deque[bytes] = collections.deque(
+            maxlen=_PTY_DUMP_MAX_CHUNKS
+        )
 
         self._spawn_lock = threading.Lock()
         self._spawn_in_progress = False
@@ -551,7 +568,7 @@ class ClaudeCLIProvider(LLMProvider):
         self._proc = proc
         self._master_fd = master_fd
         self._pty_reader_stop = threading.Event()
-        self._pty_dump = []
+        self._pty_dump = collections.deque(maxlen=_PTY_DUMP_MAX_CHUNKS)
         self._pty_reader_thread = threading.Thread(
             target=_drain_pty_thread,
             args=(master_fd, self._pty_dump, self._pty_reader_stop),
@@ -1089,41 +1106,42 @@ class ClaudeCLIProvider(LLMProvider):
         return texts
 
     @staticmethod
-    def _assistant_texts_split(events):
-        """Return (texts_to_post, denied_texts) extracted from transcript
-        events, in chronological order.
+    def _extract_with_attribution(events):
+        """Granular extractor used by _poll_transcript for cross-poll
+        deny tracking. Returns:
 
-        Transcript event shape: {"type": "assistant", "message":
-        {"content": [{"type": "text", "text": ...}, {"type": "tool_use",
-        ...}]}}. `content` is also tolerated as a bare string. text and
-        tool_use blocks may also appear in SEPARATE assistant messages —
-        observed live: the text and the tool_use it precedes commonly
-        land as two adjacent assistant events with their own timestamps
-        (e.g. line 45: text "Making that change now.", line 46: tool_use
-        Edit).
+          - texts_immediate: list[str] — text that finished a segment
+            without being attached to a tool_use (followed by user_prompt
+            OR end-of-events). Safe to post immediately.
+          - texts_attributed: list[(text, tool_use_id)] — text that was
+            attributed to a tool_use IN THIS SLICE. Caller buffers
+            these until the matching tool_result is observed (deny →
+            drop, allow → release). The buffer is the cross-poll race
+            fix: pre-fix, text was posted in the poll that consumed
+            the tool_use, and the deny that landed in a later poll
+            (after the chat round-trip — possibly several seconds)
+            arrived too late to suppress.
+          - denied_tool_use_ids: set[str] — tool_use_ids whose
+            tool_result this slice carries operator's deny signature.
+            Caller unions into a cumulative set.
+          - seen_tool_use_ids: set[str] — tool_use_ids whose tool_result
+            (deny OR allow) this slice contains. Superset of
+            denied_tool_use_ids. Caller uses this to know when it's
+            safe to release a buffered text: text whose tuid is in
+            seen-AND-NOT-denied → release; text whose tuid is in
+            seen-AND-denied → drop; text whose tuid is NOT seen yet →
+            keep waiting.
 
-        Pre-tool-narration deny filter (S238): Claude Code defers writing
-        an assistant message containing a tool_use to disk while a
-        PreToolUse hook is blocking. When the hook eventually returns
-        deny, the entire turn — pre-tool text, tool_use, deny tool_result,
-        post-deny text — flushes to the transcript at once. Without
-        filtering, the pump would ship the pre-tool narration ("Making
-        that change now!") right after the user said no — contradictory.
-
-        Algorithm: walk events in order. Accumulate assistant text blocks
-        in `pending` until we hit a tool_use; then attribute `pending` to
-        that tool_use_id and drain. If the tool_use is in the denied set
-        (its tool_result starts with operator's deny signature), the
-        drained texts go to `denied_texts`; otherwise they go to
-        `texts_to_post`. A new user PROMPT (not a tool_result) also
-        drains `pending` to `texts_to_post`, since a fresh turn starting
-        with no tool_use attribution means the pending texts weren't
-        pre-tool narration. Anything still pending at end-of-events ships
-        as a regular reply (post-deny response from claude lands here).
+        The walk-events-and-attribute logic is shared with
+        `_assistant_texts_split` (which aggregates this output for
+        backwards-compat callers).
         """
         DENY_SIG = "The user did not approve this action."
 
-        # Pass 1: discover denied tool_use_ids from deny-signed tool_results.
+        # Pass 1: discover all tool_results in this slice — both seen
+        # tool_use_ids (tool ran or was denied — verdict is in) and the
+        # subset that carries the deny signature.
+        seen_tool_use_ids: set[str] = set()
         denied_tool_use_ids: set[str] = set()
         for ev in events:
             if not isinstance(ev, dict) or ev.get("type") != "user":
@@ -1140,6 +1158,7 @@ class ClaudeCLIProvider(LLMProvider):
                 tool_use_id = block.get("tool_use_id")
                 if not isinstance(tool_use_id, str):
                     continue
+                seen_tool_use_ids.add(tool_use_id)
                 result_content = block.get("content")
                 text = ""
                 if isinstance(result_content, str):
@@ -1151,10 +1170,8 @@ class ClaudeCLIProvider(LLMProvider):
                 if text.startswith(DENY_SIG):
                     denied_tool_use_ids.add(tool_use_id)
 
-        # Pass 2: walk events in order, attributing pending text blocks to
-        # subsequent tool_uses (same message OR a later one).
-        texts: list[str] = []
-        denied_texts: list[str] = []
+        texts_immediate: list[str] = []
+        texts_attributed: list[tuple[str, str]] = []
         pending: list[str] = []
 
         def _is_user_prompt(ev) -> bool:
@@ -1176,9 +1193,9 @@ class ClaudeCLIProvider(LLMProvider):
 
         for ev in events:
             if _is_user_prompt(ev):
-                # New turn segment: anything pending wasn't attached to a
-                # tool — ship as a regular reply.
-                texts.extend(pending)
+                # New turn segment: pending text wasn't attached to a
+                # tool — safe to post now.
+                texts_immediate.extend(pending)
                 pending = []
                 continue
             if not isinstance(ev, dict) or ev.get("type") != "assistant":
@@ -1203,18 +1220,68 @@ class ClaudeCLIProvider(LLMProvider):
                         pending.append(t)
                 elif btype == "tool_use":
                     tuid = block.get("id")
-                    target = (
-                        denied_texts
-                        if isinstance(tuid, str) and tuid in denied_tool_use_ids
-                        else texts
-                    )
-                    target.extend(pending)
+                    if isinstance(tuid, str):
+                        # Pre-tool narration: needs deny-check. Caller
+                        # holds these for one poll and re-checks against
+                        # cumulative denied before posting.
+                        for t in pending:
+                            texts_attributed.append((t, tuid))
+                    else:
+                        # No tool_use_id (shouldn't happen, but defensive):
+                        # treat as immediate.
+                        texts_immediate.extend(pending)
                     pending = []
 
         # End-of-events: anything still pending wasn't followed by a tool
-        # (typical post-deny response from claude). Ship as a regular reply.
-        texts.extend(pending)
+        # (typical post-deny response from claude). Safe to post now.
+        texts_immediate.extend(pending)
 
+        return (
+            texts_immediate,
+            texts_attributed,
+            denied_tool_use_ids,
+            seen_tool_use_ids,
+        )
+
+    @staticmethod
+    def _assistant_texts_split(events):
+        """Return (texts_to_post, denied_texts) extracted from transcript
+        events, in chronological order. Backwards-compat aggregator over
+        `_extract_with_attribution` — used when caller doesn't carry
+        cross-poll state (tests, the Stop-payload backstop, etc.).
+
+        Transcript event shape: {"type": "assistant", "message":
+        {"content": [{"type": "text", "text": ...}, {"type": "tool_use",
+        ...}]}}. `content` is also tolerated as a bare string. text and
+        tool_use blocks may also appear in SEPARATE assistant messages —
+        observed live: the text and the tool_use it precedes commonly
+        land as two adjacent assistant events with their own timestamps
+        (e.g. line 45: text "Making that change now.", line 46: tool_use
+        Edit).
+
+        Pre-tool-narration deny filter (S238): Claude Code defers writing
+        an assistant message containing a tool_use to disk while a
+        PreToolUse hook is blocking. When the hook eventually returns
+        deny, the entire turn — pre-tool text, tool_use, deny tool_result,
+        post-deny text — flushes to the transcript at once. Without
+        filtering, the pump would ship the pre-tool narration ("Making
+        that change now!") right after the user said no — contradictory.
+
+        This aggregator assumes ALL related events are in `events` (no
+        cross-batch race). For the per-poll path that DOES race, use
+        `_extract_with_attribution` directly and carry the deny set
+        across polls — see _poll_transcript in _run_turn.
+        """
+        immediate, attributed, denied_tuids, _seen_tuids = (
+            ClaudeCLIProvider._extract_with_attribution(events)
+        )
+        texts = list(immediate)
+        denied_texts: list[str] = []
+        for text, tuid in attributed:
+            if tuid in denied_tuids:
+                denied_texts.append(text)
+            else:
+                texts.append(text)
         return texts, denied_texts
 
     @staticmethod
@@ -1330,11 +1397,17 @@ class ClaudeCLIProvider(LLMProvider):
         in the nested try/except — no counter. The first attempt fails →
         terminate the (now-dead-or-wedged) inner-claude → one fresh
         attempt → if that also fails, latch `_unavailable` and raise.
-        A successful turn never latches. Recovery from a latched meeting
-        is /operator:hangup + rejoin, not accumulating retries.
+
+        H-18 recovery: clear `_unavailable` on entry so each new turn
+        (each new @claude mention from ChatRunner) gets a fresh per-
+        incident retry. The latch is then just "the most-recent turn
+        failed catastrophically" — diagnostically useful but no longer
+        a permanent gate that requires /operator:hangup + rejoin. A
+        persistent failure mode re-flips the latch on every attempt;
+        a transient one (slow MCP, brief disk hiccup, flaky config
+        refresh) recovers on the next mention.
         """
-        if self._unavailable:
-            raise ClaudeCLIProtocolError("claude is unavailable")
+        self._unavailable = False
         try:
             return self._attempt_turn(messages, on_paragraph)
         except ClaudeCLIProtocolError as first_exc:
@@ -1427,20 +1500,86 @@ class ClaudeCLIProvider(LLMProvider):
         last_block_ts = [None]   # monotonic time operator last saw an assistant block
         foreign_hook = [False]   # a foreign Stop hook redirected this turn
 
+        # H-20 cross-poll deny tracking. The pre-tool-narration deny
+        # filter (S238) only worked when the assistant text+tool_use AND
+        # the deny tool_result all landed in the same poll's event slice.
+        # On a write-beat split (tool_use in poll N, tool_result in a
+        # later poll — possibly many polls later, since deny waits for
+        # the chat round-trip), the text was posted in N before the
+        # deny was known.
+        #
+        # Fix: text attributed to a tool_use is buffered until the
+        # MATCHING tool_result is observed in a later slice. Three
+        # outcomes per buffered item:
+        #   - tuid in cumulative_denied → drop (deny verdict)
+        #   - tuid in cumulative_seen AND NOT in denied → release (allow)
+        #   - tuid not yet in cumulative_seen → keep waiting
+        # End-of-turn (after Stop + final drain): release everything
+        # still pending — the post-Stop drain is the last chance to see
+        # tool_results, so anything unresolved by then has no verdict
+        # coming. Latency cost: pre-tool narration arrives after the
+        # tool's result lands rather than before — but always after
+        # operator (and the room) know whether the tool was denied.
+        cumulative_seen_tuids: set[str] = set()
+        cumulative_denied_tuids: set[str] = set()
+        pending_attribution: list[tuple[str, str]] = []
+
+        def _post_block(text: str):
+            posted.append(text)
+            last_block_ts[0] = time.monotonic()
+            if on_paragraph is not None:
+                flush_paragraphs(text, on_paragraph, force_final=True)
+
+        def _release_resolved_pending():
+            """Walk pending_attribution. Items whose tuid is resolved
+            (in cumulative_seen) get a verdict: denied → drop,
+            otherwise → release. Items whose tuid is still pending
+            stay in the buffer for the next poll."""
+            still_pending: list[tuple[str, str]] = []
+            for text, tuid in pending_attribution:
+                if tuid not in cumulative_seen_tuids:
+                    still_pending.append((text, tuid))
+                    continue
+                if tuid in cumulative_denied_tuids:
+                    denied.add(text)
+                else:
+                    _post_block(text)
+            pending_attribution[:] = still_pending
+
         def _poll_transcript():
             tx_offset[0], tx_buf[0], events = self._read_transcript_lines(
                 tx_offset[0], tx_buf[0]
             )
-            blocks, denied_blocks = self._assistant_texts_split(events)
-            for block in blocks:
-                posted.append(block)
-                last_block_ts[0] = time.monotonic()
-                if on_paragraph is not None:
-                    flush_paragraphs(block, on_paragraph, force_final=True)
-            for block in denied_blocks:
-                # Record so the Stop-hook backstop doesn't re-inject a
-                # pre-tool narration that we just filtered out.
-                denied.add(block)
+            immediate, attributed, slice_denied, slice_seen = (
+                self._extract_with_attribution(events)
+            )
+            cumulative_seen_tuids.update(slice_seen)
+            cumulative_denied_tuids.update(slice_denied)
+
+            # Re-evaluate the prior buffer against the now-updated
+            # cumulative seen/denied state. Resolved items get a verdict;
+            # unresolved items stay buffered for the next poll.
+            if pending_attribution:
+                _release_resolved_pending()
+
+            # Immediate-safe text (text NOT attributed to a tool_use)
+            # posts now.
+            for block in immediate:
+                _post_block(block)
+
+            # New attributed text from this slice: if the tool_use_id is
+            # already in the cumulative seen set (tool_result landed in
+            # the same slice), evaluate now. Otherwise buffer for the
+            # next poll to resolve.
+            for text, tuid in attributed:
+                if tuid in cumulative_seen_tuids:
+                    if tuid in cumulative_denied_tuids:
+                        denied.add(text)
+                    else:
+                        _post_block(text)
+                else:
+                    pending_attribution.append((text, tuid))
+
             if not foreign_hook[0] and self._has_foreign_hook_feedback(events):
                 foreign_hook[0] = True
 
@@ -1484,6 +1623,19 @@ class ClaudeCLIProvider(LLMProvider):
         # after the Stop hook fires — settle, then drain once more.
         time.sleep(_TRANSCRIPT_FINAL_DRAIN_SETTLE)
         _poll_transcript()
+
+        # H-20 end-of-turn: any text whose tool_result was never
+        # observed (tool didn't finish before Stop fired — unusual but
+        # possible) gets released as a final fallback. Stop is the
+        # last-chance signal: no more events are coming, so unresolved
+        # items have no verdict to wait on. Better to ship the
+        # narration than silently swallow it.
+        for text, tuid in pending_attribution:
+            if tuid in cumulative_denied_tuids:
+                denied.add(text)
+            else:
+                _post_block(text)
+        pending_attribution.clear()
 
         sid = self._extract_session_id(reply)
         if sid and not self._captured_session_id:

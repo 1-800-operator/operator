@@ -27,6 +27,7 @@ Run:
     source venv/bin/activate
     python tests/test_claude_cli_provider.py
 """
+import collections
 import json
 import os
 import shutil
@@ -41,6 +42,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from _1_800_operator.pipeline.providers.claude_cli import (
     ClaudeCLIProvider,
     ClaudeCLIProtocolError,
+    _PTY_DUMP_MAX_CHUNKS,
+    _drain_pty_thread,
 )
 from _1_800_operator.pipeline.providers.base import ProviderResponse
 
@@ -182,6 +185,68 @@ def test_construction_creates_session_dir():
 
 
 # --- lifecycle stubs --------------------------------------------------
+
+
+def test_pty_dump_is_bounded_deque():
+    """H-19: _pty_dump grew without bound (list[bytes] with no trim)
+    over the meeting's life. Claude's TUI repaints constantly — chunks
+    accumulated at MB/min during active turns. A multi-hour meeting
+    eventually swapped or OOM'd. Fix: store as collections.deque with
+    maxlen=_PTY_DUMP_MAX_CHUNKS, so the oldest chunks auto-evict as
+    new ones append. The diagnostic tail (_pty_tail) only ever reads
+    the last 2 KB, so prefix-eviction is harmless.
+
+    This test drives _drain_pty_thread directly against a real pipe,
+    writing far more chunks than the cap. The deque length must stay
+    at maxlen, and the final contents must be the *most recent* chunks
+    (not the original prefix).
+    """
+    r, w = os.pipe()
+    try:
+        stop = threading.Event()
+        dump = collections.deque(maxlen=_PTY_DUMP_MAX_CHUNKS)
+        reader = threading.Thread(
+            target=_drain_pty_thread, args=(r, dump, stop), daemon=True
+        )
+        reader.start()
+
+        # _drain_pty_thread reads with os.read(fd, 4096) which coalesces
+        # close-together pipe writes into one chunk. To force separate
+        # deque entries, write 4 KB blobs and pace the writes so the
+        # reader consumes each one before the next arrives. Write 5× the
+        # cap so eviction is unambiguous.
+        n_writes = _PTY_DUMP_MAX_CHUNKS * 5
+        for i in range(n_writes):
+            label = f"chunk_{i:05d}_".encode()
+            os.write(w, label + b"x" * (4096 - len(label)))
+            time.sleep(0.005)
+        # Give the reader thread time to drain the last batch.
+        time.sleep(0.3)
+
+        # Bound holds.
+        assert len(dump) <= _PTY_DUMP_MAX_CHUNKS, (
+            f"deque should be capped at {_PTY_DUMP_MAX_CHUNKS}, "
+            f"got {len(dump)}"
+        )
+        # The retained chunks are the most recent ones (prefix evicted).
+        joined = b"".join(dump)
+        assert b"chunk_00000_" not in joined, (
+            "earliest chunk should have been evicted"
+        )
+        assert f"chunk_{n_writes - 1:05d}_".encode() in joined, (
+            "most-recent chunk should be retained"
+        )
+    finally:
+        stop.set()
+        try:
+            os.close(w)
+        except OSError:
+            pass
+        try:
+            os.close(r)
+        except OSError:
+            pass
+    print("  H-19: _pty_dump bounded at maxlen, retains most-recent: OK")
 
 
 def test_idempotent_stop():
@@ -526,6 +591,114 @@ def test_extract_helpers_tolerate_both_shapes():
 # --- transcript tailing ----------------------------------------------
 
 
+def test_extract_with_attribution_splits_immediate_vs_attributed():
+    """H-20: the granular extractor returns text attributed to a
+    tool_use SEPARATELY from text safe to post immediately. Caller
+    (_poll_transcript) buffers the attributed list for one poll to
+    catch cross-poll deny races.
+
+    Three cases per call:
+      - immediate: text followed by user_prompt OR end-of-events
+      - attributed: text followed by a tool_use (pre-tool narration)
+      - denied_tool_use_ids: tool_use_ids whose tool_result this slice
+        contains the deny signature
+    """
+    # Helper: build an assistant event with text + tool_use blocks in
+    # one message, with an explicit tool_use id.
+    def _tool_use_with_id(tool_use_id, name="Bash", text_before=None):
+        content = []
+        if text_before is not None:
+            content.append({"type": "text", "text": text_before})
+        content.append({
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": name,
+            "input": {},
+        })
+        return {"type": "assistant", "message": {"content": content}}
+
+    # Case A: text → tool_use → tool_result_deny (full batch in one slice)
+    events_full = [
+        _assistant_event("about to run rm"),
+        _tool_use_with_id("tu-0"),
+        _user_event([{
+            "type": "tool_result",
+            "tool_use_id": "tu-0",
+            "content": "The user did not approve this action. They wrote...",
+        }]),
+    ]
+    immediate, attributed, denied, seen = (
+        ClaudeCLIProvider._extract_with_attribution(events_full)
+    )
+    assert immediate == []
+    assert attributed == [("about to run rm", "tu-0")], attributed
+    assert denied == {"tu-0"}, denied
+    assert seen == {"tu-0"}, seen
+
+    # Case B: text → tool_use only (NO tool_result yet — the cross-poll
+    # case where deny lands later). attributed is the candidate caller
+    # buffers; seen is empty because no tool_result landed in this slice.
+    events_split_a = [
+        _assistant_event("calling the tool"),
+        _tool_use_with_id("tu-0"),
+    ]
+    immediate, attributed, denied, seen = (
+        ClaudeCLIProvider._extract_with_attribution(events_split_a)
+    )
+    assert immediate == []
+    assert attributed == [("calling the tool", "tu-0")]
+    assert denied == set()
+    assert seen == set(), "no tool_result in slice → no seen tuids"
+
+    # Case C: tool_result_deny only (later poll's slice). seen + denied
+    # tell caller: tuid is resolved, verdict = deny → drop the buffer.
+    events_split_b = [
+        _user_event([{
+            "type": "tool_result",
+            "tool_use_id": "tu-0",
+            "content": "The user did not approve this action. They wrote: 'nope'",
+        }]),
+    ]
+    immediate, attributed, denied, seen = (
+        ClaudeCLIProvider._extract_with_attribution(events_split_b)
+    )
+    assert immediate == []
+    assert attributed == []
+    assert denied == {"tu-0"}
+    assert seen == {"tu-0"}
+
+    # Case C': tool_result_allow only (later poll). seen contains the
+    # tuid, denied does NOT — verdict = allow → release the buffer.
+    events_allow = [
+        _user_event([{
+            "type": "tool_result",
+            "tool_use_id": "tu-0",
+            "content": "command output here",
+        }]),
+    ]
+    immediate, attributed, denied, seen = (
+        ClaudeCLIProvider._extract_with_attribution(events_allow)
+    )
+    assert denied == set()
+    assert seen == {"tu-0"}, "allow result still counts as 'seen'"
+
+    # Case D: text followed by user_prompt → immediate (post-deny
+    # response, no tool involved).
+    events_post_deny = [
+        _assistant_event("ok I won't run it then"),
+        _user_event("then what should you do?"),
+    ]
+    immediate, attributed, denied, seen = (
+        ClaudeCLIProvider._extract_with_attribution(events_post_deny)
+    )
+    assert immediate == ["ok I won't run it then"]
+    assert attributed == []
+    assert denied == set()
+    assert seen == set()
+
+    print("  _extract_with_attribution: immediate/attributed/seen/denied correct")
+
+
 def test_assistant_texts_filters_blocks():
     """_assistant_texts pulls assistant text blocks in order, skips
     tool_use blocks and non-assistant events, tolerates bare-string
@@ -733,6 +906,160 @@ def test_full_turn_foreign_hook_notice():
     print("  full turn surfaces foreign-hook notice OK")
 
 
+def test_cross_poll_deny_suppresses_pre_tool_narration():
+    """H-20: when the assistant's pre-tool text + the tool_use land in
+    one poll's slice and the deny tool_result lands in the NEXT poll's
+    slice (write-beat split), pre-fix the pre-tool narration was posted
+    to chat in the first poll BEFORE the deny was visible — and the
+    second poll's deny scan retroactively filtered nothing.
+
+    Post-fix: text attributed to a tool_use is buffered for one poll
+    cycle. The next poll sees the deny in the cumulative set and drops
+    the buffered text instead of releasing it. The room never sees
+    'about to run rm' for a tool the user vetoed.
+
+    Test setup: a background thread appends the deny tool_result to the
+    transcript ~50ms after the initial send (well within one
+    _REPLIES_POLL_SECONDS=0.15 tick, so it lands in the SAME poll batch
+    that already consumed the tool_use — modelling the realistic race
+    where a single Claude Code write straddles a poll read). The
+    post-fix buffer holds the text for one poll, sees the cumulative
+    denied set populated by the next poll, and drops the buffered text.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        provider._proc = _FakeProc(alive=True)
+        tpath = Path(tmp) / "transcript.jsonl"
+        provider._transcript_path = tpath
+        tpath.touch()
+        provider._boot_done.set()
+
+        paragraphs = []
+
+        TOOL_USE_ID = "tu-deny-race"
+        pre_tool_text = "about to run rm -rf /"
+
+        def _fake_send(msg):
+            # First batch: pre-tool text + tool_use only. NO deny yet.
+            first_events = [
+                _assistant_event(pre_tool_text),
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{
+                            "type": "tool_use",
+                            "id": TOOL_USE_ID,
+                            "name": "Bash",
+                            "input": {"command": "rm -rf /"},
+                        }],
+                    },
+                },
+            ]
+            with open(tpath, "a", encoding="utf-8") as f:
+                for ev in first_events:
+                    f.write(json.dumps(ev) + "\n")
+
+            # Background thread: sleep one poll cycle (so poll 1
+            # consumes only the first batch — the cross-poll race), then
+            # write the deny tool_result + post-deny text + Stop. Poll 2
+            # sees the deny and the post-deny text together, populates
+            # cumulative_denied with the tool_use_id, and the buffered
+            # text from poll 1 is dropped on re-check.
+            def _late_writes():
+                # _REPLIES_POLL_SECONDS = 0.15 — wait long enough for
+                # poll 1 to fire and consume the first batch, but not so
+                # long that the test wastes time. ~250ms straddles the
+                # split cleanly.
+                time.sleep(0.25)
+                deny_event = _user_event([{
+                    "type": "tool_result",
+                    "tool_use_id": TOOL_USE_ID,
+                    "content": "The user did not approve this action. They wrote: 'nope'",
+                }])
+                post_deny_event = _assistant_event("ok I won't run it")
+                with open(tpath, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(deny_event) + "\n")
+                    f.write(json.dumps(post_deny_event) + "\n")
+                _write_jsonl(
+                    provider._replies_path,
+                    [_stop_row("ok I won't run it", transcript_path=str(tpath))],
+                )
+
+            threading.Thread(target=_late_writes, daemon=True).start()
+
+        provider._send_message = _fake_send
+
+        resp = provider.complete_streaming(
+            system=None,
+            messages=[{"role": "user", "content": "rm everything"}],
+            model=None, max_tokens=None,
+            on_paragraph=lambda p: paragraphs.append(p),
+        )
+        # The pre-tool text MUST NOT appear in the paragraph stream —
+        # that's the room-visible chat. Pre-fix it would have been the
+        # first paragraph posted (in the poll that consumed the first
+        # batch).
+        assert pre_tool_text not in paragraphs, (
+            f"H-20 regression: pre-tool narration leaked despite deny; "
+            f"paragraphs={paragraphs}"
+        )
+        # The post-deny text DOES land — it's claude's response to the
+        # tool denial, which the user should see.
+        assert "ok I won't run it" in paragraphs, (
+            f"post-deny text should reach chat; got: {paragraphs}"
+        )
+        # And the final aggregated response carries the post-deny text,
+        # not the pre-tool narration.
+        assert pre_tool_text not in resp.text, resp.text
+    print(
+        "  H-20: cross-poll deny suppresses pre-tool narration "
+        f"(paragraphs={paragraphs}) OK"
+    )
+
+
+def test_run_turn_clears_unavailable_on_entry():
+    """H-18: pre-fix, a single transient failure latched _unavailable=True
+    permanently, and every subsequent _run_turn raised 'claude is
+    unavailable' immediately — bricking the meeting until
+    /operator:hangup + rejoin. The underlying issue (a slow MCP boot,
+    a brief disk hiccup) often would have recovered on attempt #3.
+
+    Post-fix: _run_turn clears _unavailable on entry, so each new turn
+    (= each new @claude mention from ChatRunner) gets a fresh
+    per-incident retry. A persistent failure re-flips the latch; a
+    transient one recovers.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = _new_provider(tmp)
+        # Pre-condition: previous turn catastrophically failed and
+        # latched _unavailable.
+        provider._unavailable = True
+        provider._last_failure_phase = "boot"
+
+        # Set up a healthy subsequent turn that should NOT short-circuit
+        # on the latch. Drive it through the normal _drive_turn path —
+        # a working proc + a real transcript event.
+        provider._proc = _FakeProc(alive=True)
+        provider._transcript_path = Path(tmp) / "transcript.jsonl"
+        provider._transcript_path.touch()
+
+        resp = _drive_turn(
+            provider,
+            user_text="try again",
+            transcript_events=[_assistant_event("recovered")],
+            stop_text="recovered",
+        )
+        assert resp.text == "recovered", (
+            "post-fix _run_turn should clear _unavailable and re-attempt; "
+            f"got resp.text={resp.text!r}"
+        )
+        # After a successful turn, the latch stays cleared.
+        assert provider._unavailable is False, (
+            "successful turn should leave _unavailable cleared"
+        )
+    print("  _run_turn clears _unavailable on entry → transient failure recovers OK")
+
+
 def test_run_turn_respawns_after_crash():
     """If the prior subprocess died, _run_turn tears it down and respawns
     via pre_warm before running the turn — a crashed inner-claude on turn
@@ -833,6 +1160,7 @@ def main():
         test_build_cmd_resume_session_id,
         test_build_provider_returns_claude_cli,
         test_construction_creates_session_dir,
+        test_pty_dump_is_bounded_deque,
         test_idempotent_stop,
         test_warmup_is_noop,
         test_run_turn_rejects_bad_messages,
@@ -846,12 +1174,15 @@ def main():
         test_wait_for_next_reply_bails_on_stopping,
         test_wait_for_next_reply_raises_on_dead_proc,
         test_extract_helpers_tolerate_both_shapes,
+        test_extract_with_attribution_splits_immediate_vs_attributed,
         test_assistant_texts_filters_blocks,
         test_read_transcript_lines_seek_and_buffer,
         test_has_foreign_hook_feedback,
         test_full_turn_streams_transcript_paragraphs,
         test_full_turn_stop_text_backstop,
         test_full_turn_foreign_hook_notice,
+        test_cross_poll_deny_suppresses_pre_tool_narration,
+        test_run_turn_clears_unavailable_on_entry,
         test_run_turn_respawns_after_crash,
         test_run_turn_waits_for_boot,
     ]

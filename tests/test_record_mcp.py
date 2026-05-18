@@ -515,8 +515,27 @@ def test_env_var_wins_over_marker_file():
     print("✓ env var wins over marker file (H-6 priority order)")
 
 
+def _fake_live_slip_lock() -> Path:
+    """Write a slip.pid that points at THIS test process (always live).
+
+    Returns the path so the caller can monkey-patch
+    record_server.SLIP_LOCK + unlink at teardown. H-21's freshness gate
+    treats the marker as stale if slip.pid points at a dead pid, so
+    tests that exercise the marker-fallback path need a live-looking
+    slip.pid to pass.
+    """
+    fd, p = tempfile.mkstemp(prefix="op_slip_lock_")
+    os.close(fd)
+    Path(p).write_text(str(os.getpid()), encoding="utf-8")
+    return Path(p)
+
+
 def test_marker_fallback_when_env_unset():
-    """No env var → marker file is consulted (legacy compatibility)."""
+    """No env var → marker file is consulted (legacy compatibility).
+
+    Post-H-21: marker fallback also requires slip.pid to point at a
+    live process. The test fakes that with the current pid.
+    """
     now = time.time()
     marker_target = _write_fixture([
         {"kind": "session_start", "timestamp": now - 60},
@@ -526,7 +545,9 @@ def test_marker_fallback_when_env_unset():
     os.close(fd)
     with open(marker_path, "w") as f:
         f.write(marker_target)
+    slip_lock = _fake_live_slip_lock()
     record_server.MARKER_FILE = Path(marker_path)
+    record_server.SLIP_LOCK = slip_lock
     os.environ.pop(record_server.ENV_PATH, None)
     record_server.HISTORY_DIR = Path(marker_target).resolve().parent
     _set_now(now)
@@ -534,8 +555,84 @@ def test_marker_fallback_when_env_unset():
     assert "marker worked" in out, out
     os.unlink(marker_target)
     os.unlink(marker_path)
+    slip_lock.unlink()
     record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
-    print("✓ env var unset → marker file fallback works")
+    record_server.SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
+    print("✓ env var unset → marker file fallback works (with live slip.pid)")
+
+
+def test_marker_stale_after_crash_is_rejected():
+    """H-21: if operator crashed without _shutdown, the marker file
+    persists pointing at the prior meeting's JSONL. Pre-fix, the next
+    bare claude session that called list_captions / search_captions
+    would silently return content from the prior meeting and label it
+    'the live meeting' — looks like fresh recall but is actually stale
+    state served confidently. Erodes trust the same way hallucination
+    does.
+
+    Post-fix: the marker-fallback path requires slip.pid to point at a
+    live process. No live operator → marker is treated as stale, MCP
+    returns the unwired empty-state.
+
+    Two stale-marker scenarios covered:
+      (a) slip.pid missing entirely (clean shutdown that forgot, or a
+          fresh install before operator's first run)
+      (b) slip.pid present but pid is dead (crash / SIGKILL / OOM)
+    """
+    now = time.time()
+    marker_target = _write_fixture([
+        {"kind": "session_start", "timestamp": now - 3600},
+        {"kind": "caption", "sender": "Alice", "text": "yesterday's standup", "timestamp": now - 1800},
+    ])
+    fd, marker_path = tempfile.mkstemp()
+    os.close(fd)
+    Path(marker_path).write_text(marker_target, encoding="utf-8")
+    record_server.MARKER_FILE = Path(marker_path)
+    os.environ.pop(record_server.ENV_PATH, None)
+    record_server.HISTORY_DIR = Path(marker_target).resolve().parent
+    _set_now(now)
+
+    # (a) No slip.pid at all → stale.
+    no_lock = Path(tempfile.gettempdir()) / "_test_no_slip_lock"
+    if no_lock.exists():
+        no_lock.unlink()
+    record_server.SLIP_LOCK = no_lock
+    out = record_server.list_captions()
+    assert "yesterday's standup" not in out, (
+        "missing slip.pid should treat marker as stale; "
+        f"got: {out!r}"
+    )
+
+    # (b) slip.pid present but pid is dead → stale.
+    # Pick a pid that's almost certainly not in use: a giant number
+    # outside the typical OS range. os.kill(pid, 0) returns
+    # ProcessLookupError.
+    dead_lock = _fake_live_slip_lock()
+    dead_lock.write_text("9999999", encoding="utf-8")
+    record_server.SLIP_LOCK = dead_lock
+    out = record_server.list_captions()
+    assert "yesterday's standup" not in out, (
+        "dead pid in slip.pid should treat marker as stale; "
+        f"got: {out!r}"
+    )
+
+    # Sanity: with a live slip.pid (this process), the marker IS trusted.
+    live_lock = _fake_live_slip_lock()
+    record_server.SLIP_LOCK = live_lock
+    out = record_server.list_captions()
+    assert "yesterday's standup" in out, (
+        "live slip.pid should let marker through; "
+        f"got: {out!r}"
+    )
+
+    # Cleanup.
+    os.unlink(marker_target)
+    os.unlink(marker_path)
+    dead_lock.unlink()
+    live_lock.unlink()
+    record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
+    record_server.SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
+    print("✓ H-21: stale marker (no slip.pid OR dead pid) rejected; live pid accepted")
 
 
 def test_poisoned_path_rejected_by_safety_filter():
@@ -741,6 +838,7 @@ if __name__ == "__main__":
     test_missing_timestamp_does_not_crash()
     test_env_var_wins_over_marker_file()
     test_marker_fallback_when_env_unset()
+    test_marker_stale_after_crash_is_rejected()
     test_poisoned_path_rejected_by_safety_filter()
     test_format_includes_clock_and_speaker()
     # find_meetings
