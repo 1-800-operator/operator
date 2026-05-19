@@ -492,16 +492,3 @@ echo
 printf '  Open Claude Code and send it into a meeting:\n'
 printf '    \033[1;95m/operator:dial\033[0m \033[2m<meet-url>\033[0m\n'
 printf '    \033[2m(the operator plugin is already enabled — your meeting brain inherits this Claude Code session)\033[0m\n'
-echo
-printf '  Or attach directly from a terminal (no session bridge):\n'
-printf '    %s\033[1;95moperator dial claude\033[0m \033[2m<meet-url>\033[0m\n' "${PATH_PREFIX}"
-echo
-info "Operator drives the Claude Code CLI for its LLM brain. If you haven't already:"
-info "  Install:  https://claude.ai/code"
-info "  Sign in:  claude login"
-echo
-info "Flags + power-user setup:"
-info "  --yolo                 Skip per-tool permission prompts on any mode."
-info "  ~/.claude/settings.json   Operator inherits your Claude Code allow-list —"
-info "                            tools you've already trusted there auto-approve"
-info "                            in operator too (no extra wiring)."
