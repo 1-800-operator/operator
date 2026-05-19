@@ -200,11 +200,13 @@ Eliminates the #1 launch-day failure mode. `install.sh` end-to-end is currently 
 - [ ] Run `curl -fsSL <url>/install | sh` exactly as a user would; time it
 - [ ] Log every prompt, every error, every "did that work?" moment
 - [ ] Verify `uv tool install` resolves against the public repo
-- [ ] Verify `playwright install chromium` completes (~170 MB)
+- [x] ~~Verify `playwright install chromium` completes (~170 MB)~~ — **obsolete S246**: bundled Chromium dropped in 14.22.5 (slip CDP-attaches to real Chrome.app)
 - [ ] Verify `~/.operator/.env` is seeded with mode 0600 and never overwrites existing
 - [ ] Verify Chrome.app cask nudge fires only on macOS without Chrome installed
-- [ ] Verify PATH check + "next: `operator setup`" hint appears
-- [ ] Run `operator setup` and `operator dial pm` end-to-end on the fresh machine
+- [x] ~~Verify PATH check + "next: `operator setup`" hint appears~~ — **obsolete S246**: `operator setup` wizard deleted in 14.19.7
+- [x] ~~Run `operator setup` and `operator dial pm` end-to-end on the fresh machine~~ — **obsolete S246**: `setup` and `dial` subcommands deleted in 14.19.7 (chat-first pivot)
+- [ ] Run `operator doctor` end-to-end on the fresh machine — all checks green, MCP registered, audio-helper TCC granted
+- [ ] Run `/operator:slip <meet-url>` end-to-end on the fresh machine — bot joins, `@claude` reaches inner-claude, reply lands in chat
 
 ## Pass 2 — Embarrassment audit (live-meeting failure paths)
 
@@ -212,16 +214,16 @@ Eliminates the #1 launch-day failure mode. `install.sh` end-to-end is currently 
 
 Trace what the bot does when things go wrong in front of a stranger. For each: read the relevant code path, document current behavior, decide accept / fix / note-as-known-issue.
 
-- [ ] Anthropic API down mid-turn — bot says something useful or sits silent?
+- [x] ~~Anthropic API down mid-turn — bot says something useful or sits silent?~~ — **obsolete S246**: operator no longer calls Anthropic directly (`feedback_no_direct_llm_api`); inner-claude owns API calls and surfaces its own error path via PTY stdout
 - [ ] MCP server crashes mid-tool-call — graceful chat message?
-- [ ] Chrome killed mid-meeting — clean exit, rejoin, or zombie?
-- [ ] User types `@operator` then nothing — does it reply to a blank prompt?
+- [x] Chrome killed mid-meeting — clean exit, rejoin, or zombie? **Resolved S246**: tab-close path live-validated (page closed → AttachAdapter exits cleanly, worker takes over sealing in ~333ms). Chrome eviction (0-tabs zombie) validated via wgp wiretap launch (180ms evict + relaunch + clean attach)
+- [ ] User types `@claude` then nothing (just the trigger, no message) — does it reply to a blank prompt? *(refreshed S246: trigger renamed from `@operator`)*
 - [ ] Tool result returns 200KB of JSON (Phase 9.11 mitigation — verify still holds)
-- [ ] Confirmation prompt while user is mid-sentence — does it lose the rest?
-- [ ] Two `@operator` messages 200ms apart — race condition?
-- [ ] Bot's own message accidentally re-triggers itself
+- [x] ~~Confirmation prompt while user is mid-sentence — does it lose the rest?~~ — **obsolete S246**: voice-era confirmation flow; chat mode uses permreq (PreToolUse hook with `— OK?` chat message), no audio interleaving
+- [ ] Two `@claude` messages 200ms apart — race condition? *(refreshed S246; partially covered by S234 debounce + S238 permreq-response post-question seen-set)*
+- [ ] Bot's own message accidentally re-triggers itself *(should be impossible per S232 self-sender filter — re-verify)*
 - [ ] Bot disconnected from network for 30s mid-meeting — recovery behavior
-- [ ] User dismisses confirmation, then asks something else — state cleanup correct?
+- [x] ~~User dismisses confirmation, then asks something else — state cleanup correct?~~ — **obsolete S246**: voice-era flow; permreq state cleanup covered by S242 H-20 (denied-tool announcement leak fix) + H-27 (permreq `?` clears `_last_reply_had_question`)
 
 ## Pass 3 — Secrets & data egress audit
 
@@ -229,14 +231,55 @@ Trace what the bot does when things go wrong in front of a stranger. For each: r
 
 What we write to disk, and what we put into Google Meet chat. Mostly mechanical grep work.
 
-- [ ] Grep every disk-write site (`~/.operator/debug/`, `/tmp/operator.log`, `~/.operator/history/*.jsonl`)
-- [ ] Confirm no API keys, no full tool-args containing tokens, no full chat history with user PII land in logs
-- [ ] Grep every place we send text to Google Meet chat — could a tool result leak a secret? (e.g. `cat .env` via misbehaving MCP)
-- [ ] Confirm `~/.operator/.env` file mode is 0600
-- [ ] Confirm `.env` is never copied into debug dumps
-- [ ] Confirm `auth_state.json` and `browser_profile/` are never copied into debug dumps
-- [ ] Audit `session.save_debug` — what fields land in `~/.operator/debug/`?
-- [ ] Verify no secrets get echoed in `say "..."` TTS hooks (if any)
+- [x] Grep every disk-write site (`~/.operator/debug/`, `/tmp/operator.log`, `~/.operator/history/*.jsonl`) — see S246 findings below
+- [x] Confirm no API keys, no full tool-args containing tokens, no full chat history with user PII land in logs — see S246 findings below
+- [x] Grep every place we send text to Google Meet chat — could a tool result leak a secret? (e.g. `cat .env` via misbehaving MCP) — see S246 findings below
+- [x] Confirm `~/.operator/.env` file mode is 0600 — verified: `install.sh:118` chmod 600, `os.umask(0o077)` at `__main__.py:560` enforces for any new file
+- [x] Confirm `.env` is never copied into debug dumps — verified: `save_debug` writes only screenshot + DOM, never reads `.env`
+- [x] Confirm `~/.operator/slip_profile/` (slip Chrome user-data-dir with Google session cookies) is never copied into debug dumps — verified: not referenced by `save_debug`; dir at 0700
+- [x] Audit `session.save_debug` — what fields land in `~/.operator/debug/`? — see S246 findings below
+- [x] ~~Verify no secrets get echoed in `say "..."` TTS hooks (if any)~~ — **obsolete S246**: TTS path was voice-era; no `say`/TTS in chat-first runtime
+
+### S246 secrets-sweep findings
+
+**No must-fix-before-launch issues.** Three local-only-logging notes worth surfacing in user docs.
+
+**✅ API keys / cloud creds — fully isolated:**
+- `ANTHROPIC_API_KEY` stripped from inner-claude PTY spawn (`claude_cli.py:530`) and classifier sidecar (`classifier.py:230`). Inner-claude uses subscription auth via `claude login`, not API key.
+- Audio helper + TCC probe + doctor spawns use `minimal_helper_env()` (`_disclaimed_spawn.py:131`) — 9-var allowlist (PATH/HOME/USER/LOGNAME/LANG/LC_ALL/LC_CTYPE/TMPDIR/SHELL). Explicit-deny list (in docstring): `ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, every `*_TOKEN`/`*_SECRET`.
+
+**✅ File modes — all sensitive paths owner-only:**
+- `.env`: 0600. install.sh seeds at 0600, never overwrites.
+- `~/.operator/history/<slug>.jsonl`: dir 0700, files 0600 (`meeting_record.py:11-12`).
+- `~/.operator/slip_profile/`: 0700.
+- `~/.operator/debug/`: 0700; screenshots + HTML dumps 0600 (`session.py:93,100`).
+- `~/.operator/cdp_origin`: 0600 (file IS the secret that gates CDP access).
+- `/tmp/operator.log`: 0600 (per `os.umask(0o077)`).
+
+**ℹ Local-only logging surface — leaks chat content into `/tmp/operator.log`:**
+- `attach_adapter.py:1223` — `log.info(f"AttachAdapter: chat sent: {full_message!r}")` logs every outgoing chat body verbatim. Includes claude's replies (which contain tool-result summaries) and operator's permreq questions.
+- `llm.py:71` — `log.debug(f"LLM message: {message}")` logs every `@claude` prompt body verbatim. Currently visible because logging is DEBUG-level (`__main__.py:1027`).
+- `claude_cli.py:638,652` — on inner-claude crash, `_pty_tail` dumps the last 2KB of PTY output to `operator.log` (could include tool results with sensitive content if claude died mid-stream).
+- All file modes 0600, owner-only. **Not a blocker, but document for users:** a support log shared without sanitization could leak meeting chat content + pasted secrets.
+
+**ℹ `save_debug` dumps (`~/.operator/debug/*.{png,html}`):**
+- Triggered on failure paths (Chrome attach failed, pre-camera-toggle, etc.).
+- Screenshot is `full_page=True` — captures the whole Meet UI including chat panel if open.
+- HTML is `page.content()` — full DOM serialization (chat messages included).
+- Files chmod 0600, dir 0700 — local-only.
+- **Not a blocker, but document:** `~/.operator/debug/` may contain Meet screenshots/DOM; users should review before sharing.
+
+**ℹ Chat-content egress to Google Meet — inner-claude's discretion:**
+- Operator forwards claude's responses verbatim via `send_chat`. If a user asks `@claude show me ~/.env` and claude reads + echoes it, that secret lands in meeting chat.
+- This is an inner-claude behavior question, not an operator-mechanism issue. Operator has no content filter.
+- Mitigation by mode:
+  - `/operator:slip` (default) + `/operator:slip-strict`: PreToolUse permreq pops before Read/Bash/Write → user explicitly approves each access.
+  - `/operator:slip-yolo`: no permreq, tools run unattended. User opts in; SKILL.md should warn.
+
+**Release-doc additions (recommended, not blocking):**
+1. "/tmp/operator.log contains your meeting chat content verbatim — sanitize before sharing for support."
+2. "Files in ~/.operator/debug/ may contain Meet screenshots/DOM at failure time."
+3. "slip-yolo runs all tools unattended; don't use in meetings where you don't fully trust claude with arbitrary tool access."
 
 ## Pass 4 — Dead code / phantom features pass (SUPERSEDED in S199 refresh)
 
