@@ -34,6 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # webrtc-audio-processing-sys's build.rs uses meson + ninja to
+      # compile its C++ deps. GitHub macOS runners ship neither. brew
+      # is preinstalled. pkg-config is needed for the wrapper layer.
+      - name: Install build deps (meson, ninja, pkg-config)
+        run: brew install meson ninja pkg-config
+
       - name: Ensure Rust target installed
         run: rustup target add ${{ matrix.target }}
 
