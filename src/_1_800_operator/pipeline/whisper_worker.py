@@ -100,6 +100,21 @@ class WhisperWorker:
             self.s_proc.debug_dir = os.path.join(base, "S")
             self.m_proc.debug_dir = os.path.join(base, "M")
             log.info(f"whisper_worker: audio debug dumps enabled → {base}")
+        # Debug: dump continuous raw PCM for both legs (replay corpus —
+        # lets us iterate on VAD / attribution offline without needing
+        # another meeting). Off by default; OPERATOR_AUDIO_RAW_DUMP=1 to
+        # enable. Files land alongside the speaker-snapshot JSONL under
+        # ~/.operator/debug/raw_<slug>/{S,M}.f32 plus a meta.json sidecar
+        # with the wall-clock anchor needed to align audio against the
+        # snapshot timeline.
+        self._raw_dump_base: str | None = None
+        if os.environ.get("OPERATOR_AUDIO_RAW_DUMP") == "1":
+            self._raw_dump_base = os.path.expanduser(
+                f"~/.operator/debug/raw_{self.jsonl_path.stem}"
+            )
+            self.s_proc.raw_dump_path = os.path.join(self._raw_dump_base, "S.f32")
+            self.m_proc.raw_dump_path = os.path.join(self._raw_dump_base, "M.f32")
+            log.info(f"whisper_worker: raw audio dump enabled → {self._raw_dump_base}")
         # Both legs need capturing=True before their utterance threads start
         # or they exit on the first iteration.
         self.s_proc.capturing = True
@@ -295,6 +310,43 @@ class WhisperWorker:
             t.join()  # No timeout — drain MUST complete (this is the whole point).
         drain_s = time.perf_counter() - t0
         log.info(f"TIMING whisper_worker_drain elapsed_s={drain_s:.3f}")
+
+        # Finalize raw audio dump (OPERATOR_AUDIO_RAW_DUMP=1). Close both
+        # leg files + write a meta.json sidecar with the wall-clock anchor
+        # and byte counts needed for offline replay.
+        if self._raw_dump_base is not None:
+            self.s_proc.close_raw_dump()
+            self.m_proc.close_raw_dump()
+            meta = {
+                "version": 1,
+                "slug": self.jsonl_path.stem,
+                "meeting_jsonl_path": str(self.jsonl_path),
+                "sample_rate": 16000,
+                "dtype": "float32",
+                "channels": 1,
+                "byte_order": "little",
+                "S": {
+                    "path": "S.f32",
+                    "byte_count": self.s_proc._raw_dump_byte_count,
+                    "first_byte_wall_clock": self.s_proc._raw_dump_first_t,
+                },
+                "M": {
+                    "path": "M.f32",
+                    "byte_count": self.m_proc._raw_dump_byte_count,
+                    "first_byte_wall_clock": self.m_proc._raw_dump_first_t,
+                },
+            }
+            try:
+                meta_path = os.path.join(self._raw_dump_base, "meta.json")
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+                log.info(
+                    f"whisper_worker: raw dump finalized "
+                    f"(S={self.s_proc._raw_dump_byte_count}B, "
+                    f"M={self.m_proc._raw_dump_byte_count}B) → {meta_path}"
+                )
+            except OSError as e:
+                log.warning(f"whisper_worker: raw dump meta write failed: {e}")
 
         # Write the seal lines. Use the shutdown payload if main sent one;
         # fall back to empty lists if main exited without sending shutdown

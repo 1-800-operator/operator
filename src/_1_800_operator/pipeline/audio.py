@@ -220,6 +220,16 @@ class AudioProcessor:
         # Set to a directory path to enable per-utterance WAV dumps (debug).
         self.debug_dir: str | None = None
         self._debug_seq = 0
+        # Set to a file path to enable continuous raw-PCM capture for the
+        # whole meeting (replay corpus — see whisper_worker OPERATOR_AUDIO_RAW_DUMP).
+        # Format on disk: float32 LE, 16kHz mono, header-less. Lazy-opened on
+        # the first feed_audio() call so we capture the wall-clock of the
+        # first byte for downstream alignment against the speaker-snapshot
+        # JSONL. Closed by close_raw_dump() at worker shutdown.
+        self.raw_dump_path: str | None = None
+        self._raw_dump_fh = None
+        self._raw_dump_first_t: float | None = None
+        self._raw_dump_byte_count: int = 0
         # Asymmetric-VAD pending state: when a silero-detected silence
         # closes an utterance but the closing chunk still has RMS-fire
         # (likely an unvoiced word onset like "Three" that silero
@@ -234,6 +244,26 @@ class AudioProcessor:
         """Append raw PCM bytes to the buffer. Called from the helper-reader thread."""
         with self._audio_lock:
             self._audio_buffer += chunk
+        if self.raw_dump_path is not None:
+            try:
+                if self._raw_dump_fh is None:
+                    os.makedirs(os.path.dirname(self.raw_dump_path), exist_ok=True)
+                    self._raw_dump_fh = open(self.raw_dump_path, "ab")
+                    self._raw_dump_first_t = time.time()
+                self._raw_dump_fh.write(chunk)
+                self._raw_dump_byte_count += len(chunk)
+            except OSError as e:
+                log.warning(f"AudioProcessor: {self._tagp}raw dump write failed: {e}")
+                self.raw_dump_path = None  # disable further attempts
+
+    def close_raw_dump(self) -> None:
+        """Close the raw-PCM dump file if open. Idempotent."""
+        if self._raw_dump_fh is not None:
+            try:
+                self._raw_dump_fh.close()
+            except OSError as e:
+                log.warning(f"AudioProcessor: {self._tagp}raw dump close failed: {e}")
+            self._raw_dump_fh = None
 
     def drain_audio_buffer(self) -> bytes:
         with self._audio_lock:
