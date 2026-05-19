@@ -39,7 +39,7 @@ Operator is a local tool. The substance of this matters for security:
   flows through. No account, no API key issued by us, no telemetry, no
   remote storage.
 - **Your data stays on your machine.** Meeting chat, captions, transcripts,
-  and the dedicated slip Chrome profile all live under `~/.operator/` (file
+  and the dedicated dial Chrome profile all live under `~/.operator/` (file
   mode `600` / dir mode `700`) and `/tmp/operator.log`. None of it ever
   leaves your machine via anything operator does.
 - **The LLM calls are yours.** Operator drives your existing `claude` CLI
@@ -129,7 +129,7 @@ Concretely, we want to hear about:
   operator's own control flow.
 - File-permission regressions on `~/.operator/` artifacts — the `umask` /
   `chmod` hardening failing to make new files `0o600` / `0o700`.
-- The slip singleton lock being bypassable in a way that stacks multiple
+- The dial singleton lock being bypassable in a way that stacks multiple
   operators on one meeting.
 - Anything in `docs/security.md` that is simply *wrong* — a protection the
   doc claims that does not actually hold.

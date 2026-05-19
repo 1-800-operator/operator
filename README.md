@@ -14,7 +14,7 @@ no API key of its own — Operator drives the `claude` CLI you already have.
 
 ## Requirements
 
-- **macOS** (slip mode is macOS-only for now).
+- **macOS** (dial mode is macOS-only for now).
 - **Google Chrome** installed (Operator drives a real Chrome window for Meet).
 - **Claude Code CLI** installed and logged in (`claude login`). Operator uses
   it as the meeting's brain, on your existing Claude subscription.
@@ -56,8 +56,8 @@ operator doctor
 **From Claude Code (recommended).** In any Claude Code session, run:
 
 ```
-/operator:slip <meet-url>            # default: every tool runs unprompted
-/operator:slip-guarded <meet-url>    # ask the meeting before each uncategorised tool
+/operator:dial <meet-url>            # default: every tool runs unprompted
+/operator:dial-guarded <meet-url>    # ask the meeting before each uncategorised tool
 ```
 
 Either bridges your *current* Claude Code session into the meeting — the
@@ -70,8 +70,8 @@ safety" below for the tradeoff. Other slash commands:
 session:
 
 ```bash
-operator slip claude <meet-url>           # join a meeting (yolo on)
-operator slip-guarded claude <meet-url>   # join with permission asks bridged to chat
+operator dial claude <meet-url>           # join a meeting (yolo on)
+operator dial-guarded claude <meet-url>   # join with permission asks bridged to chat
 operator status                           # is Operator in a meeting?
 operator hangup                           # leave the meeting
 operator doctor                           # diagnostic check
@@ -80,13 +80,13 @@ operator doctor                           # diagnostic check
 A fresh Claude Code session is born on the first `@claude` mention. Pass
 `--resume-session <id>` to bridge a specific session instead.
 
-The first time you run slip mode, a dedicated Chrome window opens — sign into
+The first time you run dial mode, a dedicated Chrome window opens — sign into
 Google in it once, and the session persists for future meetings. This window
 is Operator-owned and separate from your everyday Chrome.
 
 ## How it works
 
-1. Operator opens a dedicated "slip" Chrome window, joins the meeting URL,
+1. Operator opens a dedicated "dial" Chrome window, joins the meeting URL,
    and opens the chat panel.
 2. It watches chat for messages containing `@claude`. Operator is
    "speak when spoken to" — it only acts on the trigger phrase. Once you
@@ -107,7 +107,7 @@ is Operator-owned and separate from your everyday Chrome.
 Operator ships **two modes**. Pick the one that matches the level of
 control you want over the meeting brain's tool use.
 
-### Default: `/operator:slip` (yolo on)
+### Default: `/operator:dial` (yolo on)
 
 The Claude subprocess is spawned with `--dangerously-skip-permissions`.
 The meeting flow needs tools to run without per-call approval prompts
@@ -131,7 +131,7 @@ account; curate which MCP servers are registered for that account;
 use Google Meet's "host manages chat" control; and only `@claude` it
 toward things you'd run yourself. Or use the alternative mode below.
 
-### Alternative: `/operator:slip-guarded` (yolo off)
+### Alternative: `/operator:dial-guarded` (yolo off)
 
 Same product, but the Claude subprocess is spawned with normal Claude
 Code permission rules instead. Tools the user has pre-allowed in
@@ -166,7 +166,7 @@ before running either mode.
 
 ### macOS permissions you'll see
 
-The first time you run `/operator:slip` on a fresh machine, expect three
+The first time you run `/operator:dial` on a fresh machine, expect three
 macOS prompts. All are one-time, per-bundle, click-Allow-and-done:
 
 - **Screen Recording + Microphone** for `operator-audio-capture.app` —
@@ -174,11 +174,11 @@ macOS prompts. All are one-time, per-bundle, click-Allow-and-done:
   participants' system audio). `install.sh` warms these up at install
   time so you grant them once, upfront.
 - **"<app> would like to access data from other apps"** for whichever
-  app you ran `/operator:slip` *from* (Claude Code Desktop, Cursor,
+  app you ran `/operator:dial` *from* (Claude Code Desktop, Cursor,
   Terminal, etc.) — this is macOS's App Management permission, asked
-  because operator launches the dedicated slip Chrome window via
+  because operator launches the dedicated dial Chrome window via
   `open -na "Google Chrome"`. Per-parent: you'll see it once for each
-  app you ever run `/operator:slip` from.
+  app you ever run `/operator:dial` from.
 
 ## Privacy & logs
 
@@ -229,7 +229,7 @@ nothing sensitive is born inside a checkout. The files that hold secrets or
 logged-in Google session state and must stay local:
 
 - `~/.operator/.env` — any API keys / tokens you put there.
-- `~/.operator/slip_profile/` — the dedicated Chrome profile (Google session
+- `~/.operator/dial_profile/` — the dedicated Chrome profile (Google session
   cookies). **Use a dedicated Google account for the bot, not your personal
   one.**
 

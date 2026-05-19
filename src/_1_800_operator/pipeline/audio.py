@@ -1,5 +1,5 @@
 """
-AudioProcessor — utterance detection + Whisper STT for slip mode.
+AudioProcessor — utterance detection + Whisper STT for dial mode.
 
 The connector (AttachAdapter) feeds raw Float32 16kHz mono PCM bytes from
 the Operator audio helper into feed_audio(); this module handles
@@ -19,10 +19,10 @@ M leg = mic) on separate threads. We share a single module-level
 WhisperModel and serialise transcribe calls under a lock. 1.5GB model
 shared across both legs (vs ~3GB if each leg held its own).
 
-Other slip-only simplifications carried from voice-preserved:pipeline/audio.py:
+Other dial-only simplifications carried from voice-preserved:pipeline/audio.py:
   - mlx-whisper-only branch removed (this module is the new sole backend)
-  - no is_speaking echo guard (slip is chat-only, the bot never speaks audio)
-  - no is_prompt / no_speech_timeout (slip listens continuously)
+  - no is_speaking echo guard (dial is chat-only, the bot never speaks audio)
+  - no is_prompt / no_speech_timeout (dial listens continuously)
 """
 from __future__ import annotations
 

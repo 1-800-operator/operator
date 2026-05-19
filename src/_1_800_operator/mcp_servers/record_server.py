@@ -83,7 +83,7 @@ ENV_PATH = "OPERATOR_MEETING_RECORD_PATH"
 MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
 PARTICIPANTS_FILE = Path.home() / ".operator" / ".current_meeting_participants.json"
 HISTORY_DIR = Path.home() / ".operator" / "history"
-SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
+DIAL_LOCK = Path.home() / ".operator" / "dial.pid"
 
 # Per-tool response ceiling. A typical 1-hour meeting with ~500 caption
 # events renders to ~50KB; 80KB fits most meetings in one call, which is
@@ -144,8 +144,8 @@ def _is_safe_record_path(path: Path) -> bool:
     return True
 
 
-def _slip_owner_is_alive() -> bool:
-    """True iff ~/.operator/slip.pid points at a live process.
+def _dial_owner_is_alive() -> bool:
+    """True iff ~/.operator/dial.pid points at a live process.
 
     Cheap pid-liveness signal (signal 0 probe). Used as a freshness gate
     on the marker-file fallback: if no operator process owns the lock,
@@ -158,7 +158,7 @@ def _slip_owner_is_alive() -> bool:
     far-fetched to engineer against.
     """
     try:
-        pid_text = SLIP_LOCK.read_text(encoding="utf-8").strip()
+        pid_text = DIAL_LOCK.read_text(encoding="utf-8").strip()
         pid = int(pid_text)
     except (OSError, ValueError):
         return False
@@ -184,7 +184,7 @@ def _resolve_record_path() -> Path | None:
          any same-uid process can overwrite the file mid-meeting —
          so the result is validated. The marker also outlives a crashed
          operator (SIGKILL/OOM/panic don't run _shutdown), so we gate it
-         on slip.pid liveness: no live operator → treat marker as stale
+         on dial.pid liveness: no live operator → treat marker as stale
          and return None rather than serve a prior meeting's transcripts
          as 'the live meeting'.
 
@@ -196,7 +196,7 @@ def _resolve_record_path() -> Path | None:
         path = Path(env_val)
         if _is_safe_record_path(path):
             return path
-    if MARKER_FILE.exists() and _slip_owner_is_alive():
+    if MARKER_FILE.exists() and _dial_owner_is_alive():
         try:
             marker = MARKER_FILE.read_text(encoding="utf-8").strip()
         except OSError:

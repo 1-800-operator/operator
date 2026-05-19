@@ -49,14 +49,14 @@ def test_returns_user_data_dir_when_chrome_present():
         "ps": (
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
             "--remote-debugging-port=9222 "
-            "--user-data-dir=/Users/jojo/.operator/slip_profile "
+            "--user-data-dir=/Users/jojo/.operator/dial_profile "
             "--remote-allow-origins=http://operator-abc.local"
         ),
     })
     original = _patch_run(fake)
     try:
         result = attach_adapter._chrome_user_data_dir_on_cdp_port()
-        assert result == "/Users/jojo/.operator/slip_profile", result
+        assert result == "/Users/jojo/.operator/dial_profile", result
         print("✓ returns parsed --user-data-dir when present")
     finally:
         attach_adapter.subprocess.run = original
@@ -77,7 +77,7 @@ def test_returns_none_when_lsof_finds_nothing():
 def test_returns_none_when_ps_lacks_user_data_dir_flag():
     """Foreign Chrome launched without --user-data-dir → None → caller
     treats as foreign and evicts. Matches H-16's intent: anything we
-    can't positively verify as the slip profile is treated as foreign."""
+    can't positively verify as the dial profile is treated as foreign."""
     fake = _fake_run({
         "lsof": "12345\n",
         "ps": (
@@ -132,10 +132,10 @@ def test_returns_none_when_ps_raises():
 
 def test_realpath_comparison_handles_symlinks():
     """The reuse-decision compares via os.path.realpath so a profile dir
-    symlinked into ~/.operator/slip_profile is recognised as the same
+    symlinked into ~/.operator/dial_profile is recognised as the same
     path. This test pins the comparison logic mirrored from
     _browser_session by exercising it directly."""
-    expected = attach_adapter.SLIP_PROFILE_DIR
+    expected = attach_adapter.DIAL_PROFILE_DIR
     # Same path → match.
     assert os.path.realpath(expected) == os.path.realpath(expected)
     # Different path → no match (the H-16 reject case).

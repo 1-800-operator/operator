@@ -480,7 +480,7 @@ class ClaudeCLIProvider(LLMProvider):
             )
         # Spawn permission mode is the only operator-controlled
         # difference between yolo-on (default — every tool runs without
-        # asking) and yolo-off (`/operator:slip-guarded`, runs with
+        # asking) and yolo-off (`/operator:dial-guarded`, runs with
         # Claude Code's normal permission rules and the operator-plugin
         # PermissionRequest hook bridges each ask to meeting chat).
         #

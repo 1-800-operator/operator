@@ -12,7 +12,7 @@
 #   5. Downloads Playwright's Chromium runtime (~170 MB).
 #   6. Seeds ~/.operator/.env with commented API-key placeholders.
 #   7. On macOS, checks for Google Chrome and prints an install nudge if missing.
-#   8. On macOS, compiles the Operator audio helper (slip-mode dual-stream).
+#   8. On macOS, compiles the Operator audio helper (dial-mode dual-stream).
 #   9. Prints sendoff with the next-step command (auto-prefixed with
 #      `source ~/.local/bin/env` if uv's tool dir wasn't already on PATH).
 #
@@ -110,7 +110,7 @@ if [ ! -f "${ENV_PATH}" ]; then
   bold "Seeding ${ENV_PATH} with API-key placeholders..."
   cat > "${ENV_PATH}" <<'ENV_EOF'
 # Operator API keys — uncomment + fill in the ones you need.
-# Loaded by every `operator slip` invocation.
+# Loaded by every `operator dial` invocation.
 #
 # GitHub (for the bundled GitHub MCP — read-only ops on issues, PRs, repos):
 # GITHUB_TOKEN=ghp_...
@@ -173,11 +173,11 @@ fi
 
 # -- 7.5. Install operator plugin (user-scope slash commands) ---------------
 
-# The plugin ships /operator:slip, /operator:status, /operator:hangup,
+# The plugin ships /operator:dial, /operator:status, /operator:hangup,
 # /operator:doctor — the user-facing surface that lets you type slash
 # commands into a Claude Code session. Without it, the operator CLI works
 # but there's no way to bridge a live Claude Code session ID into a
-# meeting (the slip skill body does the ${CLAUDE_SESSION_ID} substitution
+# meeting (the dial skill body does the ${CLAUDE_SESSION_ID} substitution
 # at dispatch time, which is the load-bearing handoff between Claude Code
 # and the operator subprocess).
 #
@@ -212,10 +212,10 @@ fi
 # skills don't surface an approval dialog when the command isn't pre-
 # allowlisted — the Bash call silent-fails and the model goes quiet.
 # Terminal CLI users see a prompt; desktop-app users see nothing. Since the
-# desktop app is most users' default surface, /operator:slip and the other
+# desktop app is most users' default surface, /operator:dial and the other
 # operator skills won't work out of the box without this allowlist entry.
 #
-# One entry covers every current operator skill (slip, status, hangup,
+# One entry covers every current operator skill (dial, status, hangup,
 # doctor, recap) because operator self-daemonizes — there's no nohup wrapper
 # in the skill bodies. Merge-in (preserves existing user entries), idempotent
 # (skip if already present), soft-skip if claude isn't on PATH or the file
@@ -228,7 +228,7 @@ import json, os, sys
 path = os.path.expanduser("~/.claude/settings.json")
 # Entries needed for operator plugin skills + bundled MCP to work in
 # the desktop app without silent-fail or permission prompts mid-meeting:
-#   Bash(operator:*)                       slip/status/hangup/doctor/recap
+#   Bash(operator:*)                       dial/status/hangup/doctor/recap
 #   Bash(claude plugin marketplace update) /operator:update
 #   Bash(claude plugin update operator)    /operator:update
 #   mcp__operator-meeting-record__*        bundled meeting-record MCP
@@ -294,7 +294,7 @@ fi
 
 # -- 8. macOS audio helper (Operator.app) -----------------------------------
 
-# Slip mode's dual-stream audio capture (mic + system) is delivered by a
+# Dial mode's dual-stream audio capture (mic + system) is delivered by a
 # Swift helper that needs Apple-Dev signing + notarization to be allowed by
 # macOS TCC for SCStream callbacks. There are two paths:
 #
@@ -310,10 +310,10 @@ fi
 #       run `scripts/build_signed_helper.sh` from a checkout (requires the
 #       team's Developer-ID cert).
 #
-# Linux skips silently — slip is mac-only.
+# Linux skips silently — dial is mac-only.
 
 if [ "${OS}" = "macos" ]; then
-  bold "Installing Operator audio helper (slip-mode dual-stream)..."
+  bold "Installing Operator audio helper (dial-mode dual-stream)..."
   TOOL_DIR="$(uv tool dir)/1-800-operator"
   PY_IN_TOOL="${TOOL_DIR}/bin/python"
   BIN_DIR="${HOME}/.operator/bin"
@@ -355,14 +355,14 @@ if [ "${OS}" = "macos" ]; then
 
 
       # TCC warmup. The helper bundle carries its own TCC identity
-      # (com.1-800-operator.audio-capture). When the slip flow exec's the
+      # (com.1-800-operator.audio-capture). When the dial flow exec's the
       # inner binary as a subprocess of operator (which is itself a child
       # of the user's terminal/IDE), macOS's responsible-process
       # attribution can land on the wrong app and silently deny without
       # ever surfacing the dialog. Invoking via `open -W -a` here forces
       # Launch Services to attribute the prompt to the helper bundle
       # itself, so the user sees the dialogs once at install time and
-      # grants them cleanly — instead of hitting a broken-by-default slip
+      # grants them cleanly — instead of hitting a broken-by-default dial
       # on first use. See debug spike 2026-05-15 for the attribution
       # validation (mic granted cleanly; screen recording hit Apple's
       # post-deny cooldown only because the test env was over-cycled).
@@ -373,7 +373,7 @@ if [ "${OS}" = "macos" ]; then
         info "Audio permissions already granted (Screen Recording + Microphone)"
       else
         bold "macOS will now request Screen Recording and Microphone permissions"
-        info "  These are required for slip mode to capture meeting audio."
+        info "  These are required for dial mode to capture meeting audio."
         info "  Click Allow on each dialog as it appears. (Take a few seconds — the"
         info "  helper will exit on its own once the prompts are dismissed.)"
         # `-W` waits for the launched app to exit. The helper requests
@@ -388,7 +388,7 @@ if [ "${OS}" = "macos" ]; then
           info "✓ Audio permissions granted (Screen Recording + Microphone)"
         else
           warn "Audio permissions not fully granted yet (probe: ${PROBE_AFTER})."
-          warn "Slip mode will run, but captions may be silent until you grant access."
+          warn "Dial mode will run, but captions may be silent until you grant access."
           warn "  Fix: System Settings → Privacy & Security → Screen Recording (and Microphone)"
           warn "       → '+' → ${INSTALLED_APP} → enable"
           warn "       Then re-run install.sh or 'operator doctor' to re-check."
@@ -408,10 +408,10 @@ if [ "${OS}" = "macos" ]; then
         warn "from a checkout (requires the team's Developer-ID cert) or wait for the next"
         warn "release wheel which will ship a notarized helper."
       else
-        err "swiftc failed — slip will run chat-only."
+        err "swiftc failed — dial will run chat-only."
       fi
     else
-      warn "No prebuilt helper in wheel and swiftc not found — slip will run chat-only."
+      warn "No prebuilt helper in wheel and swiftc not found — dial will run chat-only."
       warn "Install Xcode Command Line Tools (xcode-select --install) and re-run,"
       warn "or wait for the next release wheel which ships a prebuilt helper."
     fi
@@ -421,13 +421,13 @@ fi
 
 # -- 8.5. AEC3 speaker-bleed cleaner (Rust binary) ---------------------------
 
-# Slip mode runs a long-lived Rust binary that AEC3-cancels speaker bleed from
+# Dial mode runs a long-lived Rust binary that AEC3-cancels speaker bleed from
 # the mic stream before it reaches whisper. Without it, transcripts of the
 # user's mic include the remote audio playing through the user's speakers
 # (when the user is on built-in speakers; headphone users are unaffected).
 #
 # Build-from-source for now: needs `cargo` on PATH. Soft-skip if missing —
-# slip still runs, just without the bleed defense. A future release will
+# dial still runs, just without the bleed defense. A future release will
 # ship a prebuilt binary in the wheel (parallel to the Swift helper's
 # signed-.app path) so cargo isn't required at install time.
 
@@ -442,7 +442,7 @@ if [ "${OS}" = "macos" ]; then
     err "Could not find tool venv python at ${PY_IN_TOOL} — skipping aec3 build."
   elif ! command -v cargo >/dev/null 2>&1; then
     warn "cargo not found — skipping aec3 build."
-    warn "Slip will run without the speaker-bleed cleaner (mic transcripts may include"
+    warn "Dial will run without the speaker-bleed cleaner (mic transcripts may include"
     warn "remote audio playing through your speakers; headphone users are unaffected)."
     warn "To enable AEC: install Rust (https://rustup.rs/) and re-run install.sh."
   else
@@ -459,7 +459,7 @@ if [ "${OS}" = "macos" ]; then
         chmod +x "${BIN_DIR}/aec3"
         info "Installed aec3: ${BIN_DIR}/aec3"
       else
-        err "cargo build failed — slip will run without the speaker-bleed cleaner."
+        err "cargo build failed — dial will run without the speaker-bleed cleaner."
       fi
     fi
   fi
@@ -486,11 +486,11 @@ printf '  Verify your install:\n'
 printf '    %s\033[1;95moperator doctor\033[0m\n' "${PATH_PREFIX}"
 echo
 printf '  Open Claude Code and send it into a meeting:\n'
-printf '    \033[1;95m/operator:slip\033[0m \033[2m<meet-url>\033[0m\n'
+printf '    \033[1;95m/operator:dial\033[0m \033[2m<meet-url>\033[0m\n'
 printf '    \033[2m(the operator plugin is already enabled — your meeting brain inherits this Claude Code session)\033[0m\n'
 echo
 printf '  Or attach directly from a terminal (no session bridge):\n'
-printf '    %s\033[1;95moperator slip claude\033[0m \033[2m<meet-url>\033[0m\n' "${PATH_PREFIX}"
+printf '    %s\033[1;95moperator dial claude\033[0m \033[2m<meet-url>\033[0m\n' "${PATH_PREFIX}"
 echo
 info "Operator drives the Claude Code CLI for its LLM brain. If you haven't already:"
 info "  Install:  https://claude.ai/code"

@@ -31,7 +31,7 @@ history, and a CDP-attached Chrome that holds their Google session.
   for: unfiltered passthrough into the LLM, places where a participant
   could spoof an instruction that gets executed as a tool call, the
   `@claude` trigger being abuseable for unintended dispatch.
-- **OAuth / session handling** — the slip Chrome profile carries the
+- **OAuth / session handling** — the dial Chrome profile carries the
   user's Google session cookies indefinitely. Profile dir perms,
   exposure on shared hosts, what gets written to disk, whether anything
   leaks the cookie store via logs or debug dumps.
@@ -142,7 +142,7 @@ history.
   files, anything in tests/fixtures that looks like a real key.
 - Git history (`git log -p`): same scan, but historical — if a key
   was ever committed and later removed, it's still in history.
-- Slip profile / cookie material — confirm `~/.operator/` paths
+- Dial profile / cookie material — confirm `~/.operator/` paths
   are git-ignored and nothing's snuck in.
 - Build artifacts / signed helper — confirm we don't ship Apple
   signing material in the repo.
@@ -159,8 +159,8 @@ Eight components. Pick one per session.
 
 | # | Component | Files |
 |---|---|---|
-| 1 | **CLI entry & lifecycle** | `src/_1_800_operator/__main__.py`, `src/_1_800_operator/config.py`, `slip.pid` handling, shutdown teardown |
-| 2 | **Slip Chrome connector** | `src/_1_800_operator/connectors/attach_adapter.py`, `connectors/session.py`, `connectors/chat_dom_js.py`, `connectors/base.py` |
+| 1 | **CLI entry & lifecycle** | `src/_1_800_operator/__main__.py`, `src/_1_800_operator/config.py`, `dial.pid` handling, shutdown teardown |
+| 2 | **Dial Chrome connector** | `src/_1_800_operator/connectors/attach_adapter.py`, `connectors/session.py`, `connectors/chat_dom_js.py`, `connectors/base.py` |
 | 3 | **Chat runner & trigger logic** | `src/_1_800_operator/pipeline/chat_runner.py`, `pipeline/classifier.py`, `pipeline/confirmation.py` |
 | 4 | **LLM provider & PTY** | `src/_1_800_operator/pipeline/llm.py`, `pipeline/providers/claude_cli.py`, `pipeline/providers/base.py`, `pipeline/_disclaimed_spawn.py`, `bridges/claude.py` |
 | 5 | **Audio pipeline** | `src/_1_800_operator/pipeline/audio.py`, `pipeline/aec_cleaner.py`, `pipeline/transcript.py`, `src/_1_800_operator/swift/` (Swift helper interface only — Swift code itself audited as part of the install component) |
@@ -219,7 +219,7 @@ component).
 | Component | A1 sec | A2 edge | A3 nums | A4 hooks | A5 secrets |
 |---|:---:|:---:|:---:|:---:|:---:|
 | 1. CLI entry & lifecycle       | ☐ | ☐ | ☐ | ☐ | ☐ |
-| 2. Slip Chrome connector       | ☐ | ☐ | ☐ | ☐ | ☐ |
+| 2. Dial Chrome connector       | ☐ | ☐ | ☐ | ☐ | ☐ |
 | 3. Chat runner & trigger logic | ☐ | ☐ | ☐ | ☐ | ☐ |
 | 4. LLM provider & PTY          | ☐ | ☐ | ☐ | ☐ | ☐ |
 | 5. Audio pipeline              | ☐ | ☐ | ☐ | — | ☐ |

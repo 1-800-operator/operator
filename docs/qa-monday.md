@@ -14,7 +14,7 @@ to **operator-audio-capture.app** (not to Terminal/IDE). Click
 Allow on both.
 - Re-run `./install.sh`: prints "Audio permissions already granted"
 and doesn't re-prompt.
-- (If perms drift mid-life) running `/operator:slip` re-warms TCC  
+- (If perms drift mid-life) running `/operator:dial` re-warms TCC  
 via the preflight before "operator: joining…" — synchronous,  
 ~10s on first run.
 

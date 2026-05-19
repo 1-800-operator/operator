@@ -1,7 +1,7 @@
 class MeetingConnector:
     """Abstract meeting-platform interface — what ChatRunner needs from a connector.
 
-    Implemented by AttachAdapter (slip mode — CDP-attach to dedicated slip
+    Implemented by AttachAdapter (dial mode — CDP-attach to dedicated dial
     Chrome). ChatRunner is platform-agnostic and consumes only this
     surface; everything Meet-specific lives in the adapter and
     `connectors/chat_dom_js.py`. The abstraction is preserved as a seam

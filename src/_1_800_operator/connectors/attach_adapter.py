@@ -1,8 +1,8 @@
 """
-CDP-attach connector for `operator slip` mode.
+CDP-attach connector for `operator dial` mode.
 
-Slip launches a SEPARATE Chrome window under operator's own profile dir
-(~/.operator/slip_profile/), opens the meeting URL there, and CDP-attaches
+Dial launches a SEPARATE Chrome window under operator's own profile dir
+(~/.operator/dial_profile/), opens the meeting URL there, and CDP-attaches
 to it. The user's main Chrome is NEVER touched — original tabs / browsing
 session / current meetings stay intact.
 
@@ -16,30 +16,30 @@ unbypassable by design). Using a fresh profile dir sidesteps the
 restriction entirely.
 
 The user-perceived UX:
-    - Slip Chrome is a dedicated meeting window — different from main
+    - Dial Chrome is a dedicated meeting window — different from main
       browser. User signs into Google in this profile once (operator's
-      own first-run flow); cookies persist across slip sessions.
+      own first-run flow); cookies persist across dial sessions.
     - Meeting joins as the user (same Google identity), so the room
       sees one participant entry "User Name". claude posts chat with
       a marker prefix so user vs. claude is distinguishable.
-    - User must run slip BEFORE joining the meeting in main Chrome —
+    - User must run dial BEFORE joining the meeting in main Chrome —
       otherwise the same identity is in the meeting twice. JIT
       preflights / friendly notices handle this.
 
 Lifecycle:
-    1. Probe CDP — if slip Chrome is still running with ≥1 tab, reuse
+    1. Probe CDP — if dial Chrome is still running with ≥1 tab, reuse
        it (preserves the user's other tabs). If Chrome is in the macOS
        menu-bar-only state (0 tabs), Playwright re-attach would fail
        on Browser.setDownloadBehavior, so evict + relaunch.
-    2. Otherwise launch Chrome with --user-data-dir=SLIP_PROFILE_DIR,
+    2. Otherwise launch Chrome with --user-data-dir=DIAL_PROFILE_DIR,
        --remote-debugging-port=9222, and the meeting URL via `open -na`
     3. Wait for CDP endpoint
     4. `playwright.chromium.connect_over_cdp("http://localhost:9222")`
     5. Find or open the Meet tab (strict room-code match) — opens a
-       new tab in the existing slip Chrome window on the reuse path
+       new tab in the existing dial Chrome window on the reuse path
     6. Wait for the user to click 'Join now' (indefinite poll)
     7. Hand back to ChatRunner
-    8. On leave(): disconnect CDP only — slip Chrome stays running so
+    8. On leave(): disconnect CDP only — dial Chrome stays running so
        the user can stay in the meeting after claude detaches and
        keep working in any other tabs they opened.
 """
@@ -84,23 +84,23 @@ log = logging.getLogger(__name__)
 CDP_PORT = 9222
 CDP_URL = f"http://localhost:{CDP_PORT}"
 CHROME_BINARY_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-# Operator-owned slip profile — never touches the user's main Chrome.
-# Stays signed in across slip sessions (cookies / Google session
+# Operator-owned dial profile — never touches the user's main Chrome.
+# Stays signed in across dial sessions (cookies / Google session
 # persist on disk like any Chrome profile dir). First-run sign-in is
-# handled by _run_slip in __main__.py.
-SLIP_PROFILE_DIR = os.path.expanduser("~/.operator/slip_profile")
+# handled by _run_dial in __main__.py.
+DIAL_PROFILE_DIR = os.path.expanduser("~/.operator/dial_profile")
 # Per-Chrome-instance nonce that gates which Origin header Chrome accepts
 # on CDP WebSocket upgrades. Written when Chrome is freshly launched, read
-# when reusing a running slip Chrome (S239 reuse path). Lives inside the
-# slip profile dir so it's tied to that Chrome instance's lifetime.
+# when reusing a running dial Chrome (S239 reuse path). Lives inside the
+# dial profile dir so it's tied to that Chrome instance's lifetime.
 #
 # SECURITY: this replaces the previous --remote-allow-origins=* (which
 # accepted ANY Origin, letting any webpage the user visited mount a
-# cross-origin attack against the slip Chrome holding their Google
+# cross-origin attack against the dial Chrome holding their Google
 # session). With a 128-bit random nonce, a webpage can't guess the
 # expected Origin. Residual: a same-uid local process can read this file;
 # accepted, since same-uid attackers already have broad capability.
-CDP_ORIGIN_FILE = os.path.join(SLIP_PROFILE_DIR, ".cdp_origin")
+CDP_ORIGIN_FILE = os.path.join(DIAL_PROFILE_DIR, ".cdp_origin")
 
 # Developer-only audio-debug toggle. When True, every utterance gets
 # written as a WAV under ~/.operator/debug/audio/. Devs flip this in their
@@ -127,7 +127,7 @@ _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "Operator
 
 # AEC3 cleaner binary (S225 spike → step 5 will land a proper install). Same
 # resolution pattern as the audio helper: production install wins over the
-# in-tree dev build. None means AEC is unavailable — slip falls back to
+# in-tree dev build. None means AEC is unavailable — dial falls back to
 # feeding raw mic frames straight to the M-leg AudioProcessor (transcripts
 # will then include speaker bleed when system audio plays through speakers;
 # users on headphones are unaffected).
@@ -172,10 +172,10 @@ _RESPAWN_BREAKER_THRESHOLD = 3
 _RESPAWN_BREAKER_WINDOW_S = 10.0
 
 
-class SlipAttachError(RuntimeError):
-    """Raised when the slip-mode attach lifecycle fails fatally.
+class DialAttachError(RuntimeError):
+    """Raised when the dial-mode attach lifecycle fails fatally.
 
-    Caught by _run_slip and presented to the user as a clean stderr
+    Caught by _run_dial and presented to the user as a clean stderr
     message with a fix hint, not a stack trace.
     """
 
@@ -195,7 +195,7 @@ def _resolve_audio_helper() -> Path | None:
     Production install (~/.operator/bin/) wins over in-tree dev build
     when both exist. None means audio capture is unavailable; AttachAdapter
     skips spawning and runs in chat-only mode (warning logged, no crash —
-    audio is an enhancement, not a hard requirement for slip).
+    audio is an enhancement, not a hard requirement for dial).
     """
     if _AUDIO_HELPER_INSTALLED.exists() and os.access(_AUDIO_HELPER_INSTALLED, os.X_OK):
         return _AUDIO_HELPER_INSTALLED
@@ -209,14 +209,14 @@ def _chrome_user_data_dir_on_cdp_port() -> str | None:
     CDP_PORT, or None if we can't determine it.
 
     Used by _browser_session's reuse path to verify the Chrome on 9222
-    is OUR slip Chrome before attaching. The Origin-nonce check (security
+    is OUR dial Chrome before attaching. The Origin-nonce check (security
     C-1) catches foreign Chromes with default Origin lockdown — they
     refuse the WebSocket upgrade. The residual is a foreign Chrome
     launched with --remote-allow-origins=* (a developer's Puppeteer dev
     session, another LLM browser tool), which accepts our Origin header
     and would let us silently attach + open the meeting URL in the wrong
-    profile (different Google identity, no slip cookies). Verifying the
-    process's --user-data-dir matches SLIP_PROFILE_DIR closes that.
+    profile (different Google identity, no dial cookies). Verifying the
+    process's --user-data-dir matches DIAL_PROFILE_DIR closes that.
 
     Best-effort: returns None on lsof/ps failure or if --user-data-dir
     isn't found in argv. Caller treats None as "foreign / unknown" and
@@ -242,7 +242,7 @@ def _chrome_user_data_dir_on_cdp_port() -> str | None:
         except Exception:
             continue
         # We launch Chrome with --user-data-dir=<path> (equals form, see
-        # _launch_slip_chrome). A foreign Chrome that launched with
+        # _launch_dial_chrome). A foreign Chrome that launched with
         # space-separated form (--user-data-dir <path>) won't match here
         # — caller treats unknown as foreign and evicts, which is
         # exactly what we want.
@@ -278,8 +278,8 @@ def _pid_still_owns_port(pid: int, port: int) -> bool:
 def _evict_other_chrome_on_cdp_port() -> bool:
     """Kill any Chrome process holding CDP_PORT.
 
-    slip always launches a fresh Chrome on --remote-debugging-port=9222,
-    so anything already on that port must go: a leftover slip Chrome
+    dial always launches a fresh Chrome on --remote-debugging-port=9222,
+    so anything already on that port must go: a leftover dial Chrome
     from a previous operator session, a debugger Chrome the user
     started for another tool, a stale spike — doesn't matter. We
     silently SIGTERM whichever Chrome it is rather than asking the
@@ -311,7 +311,7 @@ def _evict_other_chrome_on_cdp_port() -> bool:
             # the kernel can recycle it to an unrelated same-uid process.
             # Without this check, a same-uid attacker spawning short-lived
             # workers could race us into SIGKILLing arbitrary processes
-            # of their choosing on every operator slip.
+            # of their choosing on every operator dial.
             if not _pid_still_owns_port(pid, CDP_PORT):
                 log.warning(
                     f"AttachAdapter: pid {pid} no longer holds port "
@@ -325,7 +325,7 @@ def _evict_other_chrome_on_cdp_port() -> bool:
             )
             command = ps_r.stdout.strip()
             if "Google Chrome" not in command:
-                # Whatever's on 9222 isn't Chrome — leave it alone, slip
+                # Whatever's on 9222 isn't Chrome — leave it alone, dial
                 # will fail downstream with a clearer launch error.
                 log.warning(
                     f"AttachAdapter: pid {pid} on port {CDP_PORT} is not "
@@ -334,7 +334,7 @@ def _evict_other_chrome_on_cdp_port() -> bool:
                 continue
             log.info(f"AttachAdapter: evicting Chrome on port {CDP_PORT} pid={pid}")
             os.kill(pid, 15)  # SIGTERM
-            # Slip Chrome dies in ~100ms on SIGTERM (empirically measured
+            # Dial Chrome dies in ~100ms on SIGTERM (empirically measured
             # in debug/eviction_spike). 500ms is 5× headroom; if it
             # doesn't die in that, escalate to SIGKILL. Modern Chrome
             # cleanly reclaims its own stale SingletonLock on next
@@ -362,7 +362,7 @@ def _evict_other_chrome_on_cdp_port() -> bool:
                     log.warning(
                         f"AttachAdapter: Chrome pid={pid} didn't exit on "
                         f"SIGTERM in 500ms — SIGKILL'd. May have left stale "
-                        f"state in {SLIP_PROFILE_DIR}; Chrome usually "
+                        f"state in {DIAL_PROFILE_DIR}; Chrome usually "
                         f"recovers on next launch."
                     )
                     evicted_any = True
@@ -379,7 +379,7 @@ def _evict_other_chrome_on_cdp_port() -> bool:
 def _cdp_endpoint_alive(timeout: float = 1.0) -> bool:
     """Check if CDP debug endpoint is already accepting connections.
 
-    Used by _browser_session to decide between reuse (existing slip
+    Used by _browser_session to decide between reuse (existing dial
     Chrome with ≥1 tab — open a new meeting tab in it), evict + launch
     (existing Chrome in zero-context state — re-attach would fail with
     Browser.setDownloadBehavior, see _cdp_page_count), or plain launch
@@ -406,7 +406,7 @@ def _cdp_page_count(timeout: float = 1.0) -> int:
     which Chrome refuses in zero-context state with "Browser context
     management is not supported" — verified in
     debug/14_30_cdp_reattach_spike. If page count > 0, re-attach works
-    and we can reuse the existing slip Chrome (preserving any user tabs);
+    and we can reuse the existing dial Chrome (preserving any user tabs);
     if it's 0, we must evict + relaunch to escape the trap.
 
     Returns -1 on probe failure so callers can treat it as
@@ -430,7 +430,7 @@ def _new_cdp_origin() -> str:
 
     The string is opaque to humans — its only job is to be unguessable
     by a webpage trying to mount a cross-origin CDP attack against the
-    slip Chrome holding the user's Google session.
+    dial Chrome holding the user's Google session.
     """
     return f"http://operator-{secrets.token_hex(16)}.local"
 
@@ -438,7 +438,7 @@ def _new_cdp_origin() -> str:
 def _write_cdp_origin(origin: str) -> None:
     """Persist a freshly-generated origin for later reuse by sibling
     operator processes that attach to the same Chrome instance."""
-    os.makedirs(SLIP_PROFILE_DIR, exist_ok=True, mode=0o700)
+    os.makedirs(DIAL_PROFILE_DIR, exist_ok=True, mode=0o700)
     # Owner-only — the file IS the secret that gates CDP access.
     fd = os.open(
         CDP_ORIGIN_FILE,
@@ -455,7 +455,7 @@ def _write_cdp_origin(origin: str) -> None:
 
 
 def _read_cdp_origin() -> str | None:
-    """Read the persisted origin for the currently-running slip Chrome,
+    """Read the persisted origin for the currently-running dial Chrome,
     or None if it doesn't exist / is unreadable. Caller decides whether
     to fall back to generating a new one."""
     try:
@@ -471,12 +471,12 @@ def _read_cdp_origin() -> str | None:
         return None
 
 
-def _launch_slip_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
-    """Spawn slip's dedicated Chrome window with debug port + meeting URL.
+def _launch_dial_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
+    """Spawn dial's dedicated Chrome window with debug port + meeting URL.
 
     Uses `open -na 'Google Chrome' --args ...` (macOS-canonical pattern;
     `-n` forces a new instance, `--args` propagates flags reliably).
-    The user-data-dir is operator-owned (SLIP_PROFILE_DIR), separate
+    The user-data-dir is operator-owned (DIAL_PROFILE_DIR), separate
     from the user's main Chrome profile — sidesteps Chrome's silent
     debug-port disable for the default profile.
 
@@ -489,37 +489,37 @@ def _launch_slip_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
     after dispatching. The actual Chrome process is owned by
     LaunchServices.
 
-    First-run behavior: if SLIP_PROFILE_DIR doesn't exist yet, Chrome
+    First-run behavior: if DIAL_PROFILE_DIR doesn't exist yet, Chrome
     creates it on launch. The user lands on the meeting URL, will see
-    Google's sign-in prompt (slip profile has no cookies yet), can
+    Google's sign-in prompt (dial profile has no cookies yet), can
     sign in once, and the profile persists for future runs.
     """
     if not os.path.exists(CHROME_BINARY_MACOS):
-        raise SlipAttachError(
+        raise DialAttachError(
             f"Could not find Google Chrome at {CHROME_BINARY_MACOS!r}. "
             "Install Chrome from https://www.google.com/chrome/ and re-run."
         )
     # mode= on makedirs only fires at creation; chmod is the belt for the
-    # case where the dir already exists with looser perms. The slip profile
+    # case where the dir already exists with looser perms. The dial profile
     # holds Google session cookies — owner-only matters on shared hosts.
-    os.makedirs(SLIP_PROFILE_DIR, exist_ok=True, mode=0o700)
-    os.chmod(SLIP_PROFILE_DIR, 0o700)
+    os.makedirs(DIAL_PROFILE_DIR, exist_ok=True, mode=0o700)
+    os.chmod(DIAL_PROFILE_DIR, 0o700)
     args = [
         "open", "-na", "Google Chrome", "--args",
         f"--remote-debugging-port={CDP_PORT}",
         # Chrome 111+ requires --remote-allow-origins to permit CDP
         # WebSocket upgrades. Previously this was `*` — that lets every
         # webpage the user visits mount a cross-origin attack against
-        # the slip Chrome's Google session cookies. We now pin to a
+        # the dial Chrome's Google session cookies. We now pin to a
         # per-launch random Origin URL; Playwright sends the matching
         # Origin header when it connects.
         f"--remote-allow-origins={cdp_origin}",
-        f"--user-data-dir={SLIP_PROFILE_DIR}",
-        # Silence first-run / default-browser nags so slip Chrome lands
+        f"--user-data-dir={DIAL_PROFILE_DIR}",
+        # Silence first-run / default-browser nags so dial Chrome lands
         # the user directly on the meeting URL.
         "--no-first-run",
         "--no-default-browser-check",
-        # Pin Meet UI language to en-US regardless of the slip Chrome's
+        # Pin Meet UI language to en-US regardless of the dial Chrome's
         # Google account locale. Many of operator's DOM selectors match
         # against English aria-labels ("Leave call", "Chat with everyone",
         # "Send a message", "Reframe", "Backgrounds and effects" — the
@@ -529,7 +529,7 @@ def _launch_slip_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
         "--lang=en-US",
         meeting_url,
     ]
-    log.info(f"AttachAdapter: launching slip Chrome via: {' '.join(args)}")
+    log.info(f"AttachAdapter: launching dial Chrome via: {' '.join(args)}")
     return subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -542,7 +542,7 @@ def _wait_for_cdp_ready(timeout_seconds: int = CDP_READY_TIMEOUT_SECONDS) -> Non
     """Block until the CDP endpoint accepts a TCP connection.
 
     Chrome publishes the debugging port shortly after process launch.
-    Polling at 100ms beats a fixed sleep. Raises SlipAttachError on
+    Polling at 100ms beats a fixed sleep. Raises DialAttachError on
     timeout — by which point Chrome has either crashed or is bound up
     on something we can't disambiguate from here.
     """
@@ -558,24 +558,24 @@ def _wait_for_cdp_ready(timeout_seconds: int = CDP_READY_TIMEOUT_SECONDS) -> Non
         except (ConnectionRefusedError, socket.timeout, OSError):
             time.sleep(0.1)
     log.warning(f"AttachAdapter: CDP timeout after {timeout_seconds}s")
-    raise SlipAttachError(
-        "Slip Chrome didn't come up in time. Try running slip again."
+    raise DialAttachError(
+        "Dial Chrome didn't come up in time. Try running dial again."
     )
 
 
 class AttachAdapter(MeetingConnector):
-    """MeetingConnector for slip mode — CDP-attached to slip's dedicated
+    """MeetingConnector for dial mode — CDP-attached to dial's dedicated
     Chrome window.
 
-    Each slip session launches Chrome with --user-data-dir=SLIP_PROFILE_DIR
+    Each dial session launches Chrome with --user-data-dir=DIAL_PROFILE_DIR
     and CDP-attaches via Playwright. The user's main Chrome is never
-    touched. Re-running slip while a slip Chrome is still alive (the
+    touched. Re-running dial while a dial Chrome is still alive (the
     user just hit Ctrl+C and is firing it back up) reuses the existing
     Chrome via the CDP probe — no second window, no relaunch.
 
-    First-run: SLIP_PROFILE_DIR is created on launch; Chrome lands the
+    First-run: DIAL_PROFILE_DIR is created on launch; Chrome lands the
     user on the meeting URL with no Google session. They sign in once,
-    cookies persist, and subsequent slip runs skip the sign-in.
+    cookies persist, and subsequent dial runs skip the sign-in.
     """
 
     def __init__(self, reply_prefix: str = "", jsonl_path: "str | Path | None" = None):
@@ -656,11 +656,11 @@ class AttachAdapter(MeetingConnector):
         self._audio_stop = threading.Event()
         self._aec_cleaner: "object | None" = None
         # Latency anchors for the TIMING listening_ready line:
-        #   _slip_start_at    — set at join() entry (≈ when operator slip fired)
+        #   _dial_start_at    — set at join() entry (≈ when operator dial fired)
         #   _meeting_entry_at — set when the in-call DOM appears (≈ when
         #                       participants see operator in the meeting)
         # Both monotonic clocks; the deltas land on the observer-install log.
-        self._slip_start_at: float | None = None
+        self._dial_start_at: float | None = None
         self._meeting_entry_at: float | None = None
         # Speaking-indicator state. Browser thread drains the DOM speaking
         # queue every _process_chat_queue cycle and updates these.
@@ -705,7 +705,7 @@ class AttachAdapter(MeetingConnector):
         Fire-and-forget: returns once the thread is started; failures
         and successes both surface via `self.join_status` (callers wait
         on `join_status.ready`). The previous design ran Playwright on
-        the calling thread and raised SlipAttachError synchronously,
+        the calling thread and raised DialAttachError synchronously,
         which meant any off-thread caller hit greenlet errors.
 
         Synchronous validation is kept on the calling thread because
@@ -718,20 +718,20 @@ class AttachAdapter(MeetingConnector):
 
         if sys.platform != "darwin":
             js.signal_failure("linux_unsupported")
-            raise SlipAttachError(
-                "slip mode is currently macOS-only. Linux support is "
+            raise DialAttachError(
+                "dial mode is currently macOS-only. Linux support is "
                 "tracked for a follow-up phase."
             )
         if not meeting_url:
             js.signal_failure("missing_url")
-            raise SlipAttachError(
-                "slip mode requires a meeting URL. Run "
-                "`operator slip claude <https://meet.google.com/xxx-xxxx-xxx>`."
+            raise DialAttachError(
+                "dial mode requires a meeting URL. Run "
+                "`operator dial claude <https://meet.google.com/xxx-xxxx-xxx>`."
             )
         if not _is_real_meet_room(meeting_url):
             js.signal_failure("not_meet_room_url")
-            raise SlipAttachError(
-                f"slip mode requires a Google Meet room URL like "
+            raise DialAttachError(
+                f"dial mode requires a Google Meet room URL like "
                 f"`https://meet.google.com/abc-defg-hij`; got {meeting_url!r}."
             )
 
@@ -739,7 +739,7 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive.clear()
         self._browser_closed.clear()
         self._observer_installed = False
-        self._slip_start_at = time.monotonic()
+        self._dial_start_at = time.monotonic()
         self._meeting_entry_at = None
         # Silent-breakage detector for the speaking observer. Meet's
         # obfuscated "speaking" class (currently BlxGDf) rotates roughly
@@ -805,7 +805,7 @@ class AttachAdapter(MeetingConnector):
         """
         js = self.join_status
         # Per-phase stamps for the TIMING browser_join line. Anchored on
-        # entry to this thread, so subtracting `_slip_start_at` would
+        # entry to this thread, so subtracting `_dial_start_at` would
         # include a tiny dispatch lag (join() → thread start, usually <5ms).
         _t_bs_entry = time.monotonic()
         _t_after_cdp_probe = _t_bs_entry
@@ -818,7 +818,7 @@ class AttachAdapter(MeetingConnector):
             # Three-way startup branch (verified by debug/14_30_cdp_reattach_spike):
             #   1. CDP alive AND ≥1 tab in Chrome → reuse. Skip launch;
             #      _find_or_open_meet_page below opens the meeting in a
-            #      new tab inside the existing slip Chrome window. This
+            #      new tab inside the existing dial Chrome window. This
             #      preserves whatever other tabs the user opened during
             #      a previous meeting (looking something up, etc.).
             #   2. CDP alive AND 0 tabs (macOS menu-bar-only state) →
@@ -846,7 +846,7 @@ class AttachAdapter(MeetingConnector):
                 pc = _cdp_page_count()
                 _t_page_count_done = time.monotonic()
                 if pc > 0:
-                    # Verify the Chrome on 9222 is OUR slip Chrome. The
+                    # Verify the Chrome on 9222 is OUR dial Chrome. The
                     # Origin-nonce check (security C-1) handles foreign
                     # Chromes with default Origin lockdown; checking
                     # --user-data-dir closes the residual where a foreign
@@ -855,14 +855,14 @@ class AttachAdapter(MeetingConnector):
                     # in the wrong profile.
                     owner_uds = _chrome_user_data_dir_on_cdp_port()
                     _t_uds_done = time.monotonic()
-                    is_slip = (
+                    is_dial = (
                         owner_uds is not None
                         and os.path.realpath(owner_uds)
-                            == os.path.realpath(SLIP_PROFILE_DIR)
+                            == os.path.realpath(DIAL_PROFILE_DIR)
                     )
-                    if is_slip:
+                    if is_dial:
                         log.info(
-                            f"AttachAdapter: reusing existing slip Chrome "
+                            f"AttachAdapter: reusing existing dial Chrome "
                             f"({pc} tab(s))"
                         )
                         launch_needed = False
@@ -870,14 +870,14 @@ class AttachAdapter(MeetingConnector):
                         log.warning(
                             f"AttachAdapter: Chrome on port {CDP_PORT} has "
                             f"user-data-dir={owner_uds!r} (expected "
-                            f"{SLIP_PROFILE_DIR!s}) — foreign Chrome, "
+                            f"{DIAL_PROFILE_DIR!s}) — foreign Chrome, "
                             "evicting + relaunching"
                         )
                         _evict_other_chrome_on_cdp_port()
                         _evicted = True
                         _t_eviction_done = time.monotonic()
                         # No fixed settle — port is free at Chrome death
-                        # (spike-verified). _launch_slip_chrome + _wait_for_cdp_ready
+                        # (spike-verified). _launch_dial_chrome + _wait_for_cdp_ready
                         # below will see the freed port immediately.
                         _t_settle_done = time.monotonic()
                 else:
@@ -919,12 +919,12 @@ class AttachAdapter(MeetingConnector):
                 # must send it as the Origin header below.
                 cdp_origin = _new_cdp_origin()
                 _write_cdp_origin(cdp_origin)
-                self._chrome_proc = _launch_slip_chrome(
+                self._chrome_proc = _launch_dial_chrome(
                     meeting_url, cdp_origin
                 )
                 try:
                     _wait_for_cdp_ready()
-                except SlipAttachError:
+                except DialAttachError:
                     js.signal_failure("cdp_not_ready")
                     return
             else:
@@ -943,12 +943,12 @@ class AttachAdapter(MeetingConnector):
                     _evict_other_chrome_on_cdp_port()
                     cdp_origin = _new_cdp_origin()
                     _write_cdp_origin(cdp_origin)
-                    self._chrome_proc = _launch_slip_chrome(
+                    self._chrome_proc = _launch_dial_chrome(
                         meeting_url, cdp_origin
                     )
                     try:
                         _wait_for_cdp_ready()
-                    except SlipAttachError:
+                    except DialAttachError:
                         js.signal_failure("cdp_not_ready")
                         return
 
@@ -1086,8 +1086,8 @@ class AttachAdapter(MeetingConnector):
         Returns None immediately when called before the browser thread
         is alive — same fallback shape.
 
-        Slip-mode prefix-strip: prepends self._reply_prefix
-        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) so
+        Dial-mode prefix-strip: prepends self._reply_prefix
+        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_DIAL`) so
         meeting participants can tell the bot's replies apart from the
         user's own messages. Every meeting message goes through here —
         there is no unprefixed send path.
@@ -1208,7 +1208,7 @@ class AttachAdapter(MeetingConnector):
         The message is prefixed with self._reply_prefix (default
         '[🤖 Claude] ') so the room can distinguish claude's words from
         the user's own typing. Prefix lives in
-        `bridges/claude.py:REPLY_PREFIX_SLIP`.
+        `bridges/claude.py:REPLY_PREFIX_DIAL`.
         """
         full_message = (
             f"{self._reply_prefix}{message}" if self._reply_prefix else message
@@ -1239,8 +1239,8 @@ class AttachAdapter(MeetingConnector):
     def _do_read_chat(self, page):
         """Browser-thread implementation. Drains the JS-side chat queue.
 
-        Slip-mode prefix-strip: send_chat prepends self._reply_prefix
-        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_SLIP`) so the
+        Dial-mode prefix-strip: send_chat prepends self._reply_prefix
+        (`[🤖 Claude] ` per `bridges/claude.py:REPLY_PREFIX_DIAL`) so the
         room can distinguish claude's words from the user's typing. The
         DOM observer reads back the prefixed text. ChatRunner's
         _own_messages dedup set stores the UN-prefixed text. Without
@@ -1249,7 +1249,7 @@ class AttachAdapter(MeetingConnector):
         cascade kicks off. Strip the prefix here so the text passed
         upstream matches what was added to _own_messages.
 
-        Slip-only optimistic-ID filter: when the slip-mode user types a
+        Dial-only optimistic-ID filter: when the dial-mode user types a
         message in their own Chrome, Meet renders an optimistic
         placeholder element with a numeric local-timestamp ID
         (e.g. `1778216640038`) before the server confirms. ~5–10 s
@@ -1261,7 +1261,7 @@ class AttachAdapter(MeetingConnector):
         follows under normal Meet delivery; we accept the rare
         canonical-never-arrives case (network drop) as silent message
         loss rather than risk a double turn on every user message.
-        Slip is the only mode that hits this — the bot reads the user's
+        Dial is the only mode that hits this — the bot reads the user's
         own typing path, where Meet's optimistic placeholder fires
         before server confirmation; a separate-participant observer
         wouldn't see the placeholder at all.
@@ -1459,19 +1459,19 @@ class AttachAdapter(MeetingConnector):
                     self._send_worker_event({"type": "speaker_stop", "name": name, "t": ev_t})
 
     def leave(self):
-        """Disconnect from CDP. Idempotent. Does NOT close slip Chrome.
+        """Disconnect from CDP. Idempotent. Does NOT close dial Chrome.
 
         Signals the browser thread to exit and waits briefly for clean
         teardown. Audio pipeline shutdown + Playwright teardown happen
         inside the browser thread's finally block so all Playwright
         calls stay on the thread that owns them.
 
-        Slip Chrome stays alive on purpose: the user may have opened
+        Dial Chrome stays alive on purpose: the user may have opened
         their own tabs in it during the meeting (looking something up
         for the conversation), and `/operator:hangup` is meant to boot
         claude from the meeting — not end the meeting for the user. If
         the user closed the meeting tab manually, the other tabs they
-        had open keep working. The next `operator slip` will reuse the
+        had open keep working. The next `operator dial` will reuse the
         same Chrome window (open the new meeting URL as a new tab) as
         long as at least one tab is still alive — see _browser_session
         for the reuse / zero-context branching.
@@ -1495,7 +1495,7 @@ class AttachAdapter(MeetingConnector):
             # tear down beyond what the failure path already cleaned.
             self._stop_audio_pipeline()
             self._teardown_playwright()
-        log.info("AttachAdapter: detached from slip Chrome (Chrome stays alive)")
+        log.info("AttachAdapter: detached from dial Chrome (Chrome stays alive)")
 
     # ------------------------------------------------------------------
     # Internals
@@ -1624,16 +1624,16 @@ class AttachAdapter(MeetingConnector):
                 # a new @mention. Log the two latencies a participant cares
                 # about: (a) how long after the bot became visible in-call
                 # (`_meeting_entry_at`) it can hear them, and (b) total
-                # cold-start from /operator:slip firing.
+                # cold-start from /operator:dial firing.
                 now = time.monotonic()
                 parts = []
                 if self._meeting_entry_at is not None:
                     parts.append(
                         f"ms_since_meeting_entry={int((now - self._meeting_entry_at) * 1000)}"
                     )
-                if self._slip_start_at is not None:
+                if self._dial_start_at is not None:
                     parts.append(
-                        f"ms_since_slip_start={int((now - self._slip_start_at) * 1000)}"
+                        f"ms_since_dial_start={int((now - self._dial_start_at) * 1000)}"
                     )
                 if parts:
                     log.info(f"TIMING listening_ready {' '.join(parts)}")
@@ -1689,7 +1689,7 @@ class AttachAdapter(MeetingConnector):
             time.sleep(0.25)
 
         # Pass 2: not found — open a new tab with the URL. This is the
-        # path for the slip-Chrome-reuse case: existing Chrome with the
+        # path for the dial-Chrome-reuse case: existing Chrome with the
         # user's other tabs, no meeting tab yet. bring_to_front() so the
         # tab is foregrounded (matches the fresh-launch UX where
         # `open -na` brings Chrome to focus).
@@ -1952,7 +1952,7 @@ class AttachAdapter(MeetingConnector):
         helper = _resolve_audio_helper()
         if helper is None:
             log.warning(
-                "AttachAdapter: Operator audio helper not found — slip will run "
+                "AttachAdapter: Operator audio helper not found — dial will run "
                 "chat-only (no transcript). Run install.sh to build the helper."
             )
             return

@@ -6,14 +6,14 @@
 
 ## Command verbs (locked-in for v0.0.1)
 
-**slip → dial → deploy** — the three-rung ladder.
+**dial → dial → deploy** — the three-rung ladder.
 
 Each rung escalates one variable while holding others constant:
-- **slip** — Claude responds as you; no second account; no separate participant. Lowest stakes. Try-it-out mode.
+- **dial** — Claude responds as you; no second account; no separate participant. Lowest stakes. Try-it-out mode.
 - **dial** — Claude has its own identity; you and Claude join a fresh Meet together; no other participants. Private one-on-one with AI.
 - **deploy** — Claude has its own identity; joins your meeting with real participants. Full commitment, full visibility.
 
-The ladder is the product. Slip is the entry rung. Most users will start there. Some graduate to dial. A subset reach deploy.
+The ladder is the product. Dial is the entry rung. Most users will start there. Some graduate to dial. A subset reach deploy.
 
 ## One-line product description candidates
 
@@ -24,19 +24,19 @@ The ladder is the product. Slip is the entry rung. Most users will start there. 
 
 ## Three-rung framing copy
 
-- Start with slip, see what it feels like.
-- Start with slip, graduate to dial once you trust it, deploy when you're ready.
-- Slip Claude in. Dial Claude up. Deploy Claude.
+- Start with dial, see what it feels like.
+- Start with dial, graduate to dial once you trust it, deploy when you're ready.
+- Dial Claude in. Dial Claude up. Deploy Claude.
 
 ## Verb-by-verb mental models
 
-- **slip** — light, sneaky, low-commit. "Slip Claude into this meeting." You're in the meeting; Claude is along for the ride. Replies surface through your identity (with a marker so the room knows). The meeting feels normal; Claude's a quiet co-pilot you can summon with `@claude`.
+- **dial** — light, sneaky, low-commit. "Dial Claude into this meeting." You're in the meeting; Claude is along for the ride. Replies surface through your identity (with a marker so the room knows). The meeting feels normal; Claude's a quiet co-pilot you can summon with `@claude`.
 - **dial** — purposeful, deliberate. "Dial up Claude." Echoes the 1-800-Operator brand metaphor — you're picking up the phone, calling Claude. Private call: just you and the AI in a fresh Meet room. Good for solo brainstorms, voice-style sessions, transcribed interviews with yourself.
 - **deploy** — decisive, full-commitment. "Deploy Claude to my meeting." Military/devops cadence — you're sending Claude in. Claude joins the meeting as a separate named participant; everyone sees it; everyone hears it. Used for note-taking, project management, real-time research while you focus on the people.
 
 ## Honesty / AI-presence framing
 
-- Operator is honest about AI presence in meetings. Claude's replies always carry a marker so the room knows what's you and what's Claude. (For slip mode.)
+- Operator is honest about AI presence in meetings. Claude's replies always carry a marker so the room knows what's you and what's Claude. (For dial mode.)
 - No hidden AI. No deepfakes. Claude shows up labeled. (Stronger version.)
 
 ## Install/onboarding one-liner
@@ -45,11 +45,11 @@ The ladder is the product. Slip is the entry rung. Most users will start there. 
 curl -fsSL 1-800-operator.com/install | sh
 ```
 
-Then `operator slip claude <meet-url>` — no signup, no API keys, no setup. (Assumes Claude Code already installed and logged in.)
+Then `operator dial claude <meet-url>` — no signup, no API keys, no setup. (Assumes Claude Code already installed and logged in.)
 
 ## Trust ladder narration
 
-- "You don't trust meeting bots yet. Neither do we. Start with slip — Claude responds as you, with a marker, so the room always knows. When that feels normal, dial up Claude alone for a private session. When dial feels normal, deploy Claude into your real meetings."
+- "You don't trust meeting bots yet. Neither do we. Start with dial — Claude responds as you, with a marker, so the room always knows. When that feels normal, dial up Claude alone for a private session. When dial feels normal, deploy Claude into your real meetings."
 
 ## Anti-pitch (what we're explicitly not)
 
@@ -60,7 +60,7 @@ Then `operator slip claude <meet-url>` — no signup, no API keys, no setup. (As
 
 ## Rejected verb candidates
 
-For the slip-rung, considered and dropped:
+For the dial-rung, considered and dropped:
 - **merge** — git collision; doesn't carry low-stakes/try feel.
 - **channel** — strong identity-merging semantic but too metaphysical/woo for some audiences.
 - **patch** — switchboard-aligned with brand but more about *connecting* than *blending*.
@@ -75,6 +75,6 @@ For the deploy-rung, considered:
 
 ## Open questions / parking lot
 
-- Reply styling in slip mode: brackets `[Claude]`, robot emoji `🤖 `, italics `_..._` — we'll mock all three side-by-side and pick by feel.
+- Reply styling in dial mode: brackets `[Claude]`, robot emoji `🤖 `, italics `_..._` — we'll mock all three side-by-side and pick by feel.
 - Does the landing page lead with the install command (function-first) or the ladder (story-first)? Probably ladder, then install, then demo.
-- What's the visual for the demo asset? Three short clips, one per rung? Or one clip showing slip mode (the entry rung)?
+- What's the visual for the demo asset? Three short clips, one per rung? Or one clip showing dial mode (the entry rung)?

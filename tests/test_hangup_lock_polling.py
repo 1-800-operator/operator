@@ -1,8 +1,8 @@
-"""H-26 regression: /operator:hangup now polls on slip.pid being
+"""H-26 regression: /operator:hangup now polls on dial.pid being
 released rather than on the daemon's pid exiting.
 
 The daemon's _shutdown releases the lockfile early (~500ms after
-SIGTERM, intentional design — keeps /operator:slip retry-able mid-
+SIGTERM, intentional design — keeps /operator:dial retry-able mid-
 teardown). Pre-fix, hangup polled on pid liveness, which kept it
 blocked through the full 5-12s of teardown (PTY drain, connector.leave,
 audio helper exit). Hangup would then either bail at its 3s deadline
@@ -53,9 +53,9 @@ def test_hangup_returns_when_lock_released():
     """Common-path: daemon releases lock after ~300ms; hangup returns
     shortly after. Pre-fix this would have waited the full 3s."""
     tmp = Path(tempfile.mkdtemp(prefix="op_hangup_test_"))
-    fake_lock = tmp / "slip.pid"
-    original_lock = op_main._SLIP_LOCK_PATH
-    op_main._SLIP_LOCK_PATH = fake_lock
+    fake_lock = tmp / "dial.pid"
+    original_lock = op_main._DIAL_LOCK_PATH
+    op_main._DIAL_LOCK_PATH = fake_lock
 
     # Don't actually SIGTERM ourselves.
     original_kill = os.kill
@@ -89,7 +89,7 @@ def test_hangup_returns_when_lock_released():
         )
         print(f"  hangup returns ~{elapsed:.2f}s after early lock release: OK")
     finally:
-        op_main._SLIP_LOCK_PATH = original_lock
+        op_main._DIAL_LOCK_PATH = original_lock
         op_main.os.kill = original_kill
         op_main._pid_is_operator = original_pid_check
         try:
@@ -102,9 +102,9 @@ def test_hangup_returns_when_lock_released():
 def test_hangup_no_daemon_running():
     """No lockfile → hangup says 'not in a meeting' immediately."""
     tmp = Path(tempfile.mkdtemp(prefix="op_hangup_test_"))
-    fake_lock = tmp / "slip.pid"
-    original_lock = op_main._SLIP_LOCK_PATH
-    op_main._SLIP_LOCK_PATH = fake_lock
+    fake_lock = tmp / "dial.pid"
+    original_lock = op_main._DIAL_LOCK_PATH
+    op_main._DIAL_LOCK_PATH = fake_lock
     try:
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -114,7 +114,7 @@ def test_hangup_no_daemon_running():
         assert "not in a meeting" in out, out
         print("  hangup: 'not in a meeting' when no lockfile: OK")
     finally:
-        op_main._SLIP_LOCK_PATH = original_lock
+        op_main._DIAL_LOCK_PATH = original_lock
         tmp.rmdir()
 
 
@@ -122,11 +122,11 @@ def test_hangup_releases_lock_if_daemon_dies_without_releasing():
     """Pathological: daemon crashed mid-_shutdown without releasing the
     lock. Hangup detects pid is dead and unlinks the lock itself, then
     returns. Without this, the lock would persist (broken singleton)
-    until the next operator slip's stale-lock reclaim path."""
+    until the next operator dial's stale-lock reclaim path."""
     tmp = Path(tempfile.mkdtemp(prefix="op_hangup_test_"))
-    fake_lock = tmp / "slip.pid"
-    original_lock = op_main._SLIP_LOCK_PATH
-    op_main._SLIP_LOCK_PATH = fake_lock
+    fake_lock = tmp / "dial.pid"
+    original_lock = op_main._DIAL_LOCK_PATH
+    op_main._DIAL_LOCK_PATH = fake_lock
 
     # Pid that is almost certainly not in use → os.kill(pid, 0) raises
     # ProcessLookupError. We use a giant pid to be safe.
@@ -164,7 +164,7 @@ def test_hangup_releases_lock_if_daemon_dies_without_releasing():
         )
         print(f"  hangup self-releases lock when daemon is dead: OK ({out.strip()!r})")
     finally:
-        op_main._SLIP_LOCK_PATH = original_lock
+        op_main._DIAL_LOCK_PATH = original_lock
         op_main.os.kill = original_kill
         op_main._pid_is_operator = original_pid_check
         try:

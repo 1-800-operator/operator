@@ -8,7 +8,7 @@ Reporting contact and SLA live in `SECURITY.md` at the repo root.
 
 ## What Operator is
 
-A chat-based AI meeting participant. It CDP-attaches to a dedicated slip
+A chat-based AI meeting participant. It CDP-attaches to a dedicated dial
 Chrome window running a Google Meet, opens the chat panel, watches for
 messages addressed to it via the `@claude` trigger phrase, and forwards each
 one to a long-lived interactive `claude` subprocess — one per meeting,
@@ -53,7 +53,7 @@ would appear in a TUI nobody is watching, and the meeting would
 stall), and Operator has no permission layer of its own to gate them
 with.
 
-The alternative is `/operator:slip-guarded` (see "Yolo-off mode"
+The alternative is `/operator:dial-guarded` (see "Yolo-off mode"
 below) which spawns with Claude Code's normal permission rules and
 bridges each ask to meeting chat. The rest of this section describes
 the *default* path.
@@ -87,7 +87,7 @@ registered in that user's `~/.claude`.
 In yolo-on (the default), there is **no allowlist, denylist, or
 settings.json knob** a user can set to constrain a
 `--dangerously-skip-permissions` subprocess. The flag is genuinely
-all-or-nothing — within this mode. Switching to `/operator:slip-guarded`
+all-or-nothing — within this mode. Switching to `/operator:dial-guarded`
 re-activates Claude Code's permission rules (so `permissions.allow` /
 `deny` from `~/.claude/settings.json` start mattering again, and the
 hook bridges anything not pre-categorised to chat); see the "Yolo-off
@@ -98,7 +98,7 @@ The *only* configuration lever that affects it at all is
 - must live in **managed settings** (organization / MDM-level policy), not
   user or project `settings.json`; and
 - does not "constrain" the session — it **bans the flag outright**, which
-  means `operator slip` would simply fail to spawn inner-claude.
+  means `operator dial` would simply fail to spawn inner-claude.
 
 There is no middle setting. The one residual guardrail Claude Code keeps even
 in this mode is a hardcoded circuit-breaker that still prompts on
@@ -127,10 +127,10 @@ available to you are operational:
 - **If none of that is an acceptable trade, do not run Operator.** That is a
   legitimate outcome — the tool is not for every threat model.
 
-## Yolo-off mode: what `/operator:slip-guarded` actually does
+## Yolo-off mode: what `/operator:dial-guarded` actually does
 
-Operator ships a second slash command, **`/operator:slip-guarded`** (and
-`operator slip-guarded claude <url>` from the terminal), for users who
+Operator ships a second slash command, **`/operator:dial-guarded`** (and
+`operator dial-guarded claude <url>` from the terminal), for users who
 want to gate the inner-claude's tool calls without dropping into
 yolo-on. It is the **only** in-product alternative to the all-permissions
 default; pick the one that matches your trust model for the meeting.
@@ -163,7 +163,7 @@ default; pick the one that matches your trust model for the meeting.
 ### What yolo-off does **not** do
 
 - **No "allow always" / persistent-allow path.** Every uncategorised
-  tool asks every time. If you want friction-free, that's `/operator:slip`.
+  tool asks every time. If you want friction-free, that's `/operator:dial`.
 - **No mutation of your `settings.json`.** Yolo-off respects your
   pre-existing `permissions.allow` / `permissions.deny` rules but
   never writes to them.
@@ -214,10 +214,10 @@ without recognising the injection, the tool runs.
 
 ### When to pick which
 
-- **Pick `/operator:slip` (yolo-on, default)** when you trust the
+- **Pick `/operator:dial` (yolo-on, default)** when you trust the
   meeting brain to act unsupervised — you're running with a curated
   MCP set, on a least-privilege OS account, and friction is the enemy.
-- **Pick `/operator:slip-guarded` (yolo-off)** when you want the
+- **Pick `/operator:dial-guarded` (yolo-off)** when you want the
   meeting brain to pause and ask before doing anything you haven't
   already approved — at the cost of ~2-3s per uncategorised tool and
   a participant having to answer in chat.
@@ -250,7 +250,7 @@ your `~/.claude/settings.json`:
 
 | Entry | What it allows | Why |
 |---|---|---|
-| `Bash(operator:*)` | Every `operator` CLI subcommand (`slip`, `status`, `hangup`, `doctor`, `recap`) to run without an approval prompt. | The desktop app silent-fails un-allowlisted `!` blocks inside plugin skills — without this, the slash commands appear broken. |
+| `Bash(operator:*)` | Every `operator` CLI subcommand (`dial`, `status`, `hangup`, `doctor`, `recap`) to run without an approval prompt. | The desktop app silent-fails un-allowlisted `!` blocks inside plugin skills — without this, the slash commands appear broken. |
 | `Bash(claude plugin marketplace update:*)` | The `/operator:update` skill to refresh the plugin marketplace. | Same desktop-app silent-fail reason. |
 | `Bash(claude plugin update operator:*)` | The `/operator:update` skill to upgrade the operator plugin. | Same. |
 | `mcp__transcript__*` | Every tool on the bundled transcript MCP server to run without a prompt. | So inner-claude never hits a permission prompt mid-meeting when it reads captions. |
@@ -287,7 +287,7 @@ checkout that a stray `git add .` could capture. The artifacts are:
 
 - `~/.operator/.env` — the secrets file (any API keys / tokens the user puts
   there). Operator never writes to it.
-- `~/.operator/slip_profile/` — the dedicated Chrome profile for slip mode.
+- `~/.operator/dial_profile/` — the dedicated Chrome profile for dial mode.
   Holds logged-in Google session cookies — see residual risk R4.
 - `~/.operator/history/<slug>.jsonl` — append-only meeting record (chat +
   captions). See residual risk R5.
@@ -395,7 +395,7 @@ with known counterparts this is a non-issue.
 
 ### R4 — Google session cookies on disk
 
-`~/.operator/slip_profile/` holds the logged-in Google session for the
+`~/.operator/dial_profile/` holds the logged-in Google session for the
 account the bot signs in as. Anyone with local read access to that directory
 can impersonate that Google account in a browser.
 

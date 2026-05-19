@@ -40,7 +40,7 @@ dependencies = [
     "mcp==1.27.0",
     "pyyaml==6.0.3",
     "rich==14.3.3",
-    # Audio pipeline (Phase 14.20.4, S233 backend swap) — slip mode's local
+    # Audio pipeline (Phase 14.20.4, S233 backend swap) — dial mode's local
     # STT path. CTranslate2-based; runs CPU-only with no Metal/MLX dependency.
     # S233 swapped from mlx-whisper after two production crashes from MLX's
     # async Metal command-buffer abort path; see HWK S227 + S233 in

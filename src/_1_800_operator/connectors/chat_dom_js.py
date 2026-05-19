@@ -160,7 +160,7 @@ GET_PARTICIPANT_NAMES_JS = """() => {
 }"""
 
 
-# Return the operator-runner's Meet display name from the slip Chrome.
+# Return the operator-runner's Meet display name from the dial Chrome.
 # Identifies the LOCAL tile by the presence of CAMERA CONTROLS — specifically
 # the "Reframe" or "Backgrounds and effects" buttons. These only render on
 # your own tile because they only apply to your own video stream. Validated
@@ -177,7 +177,7 @@ GET_PARTICIPANT_NAMES_JS = """() => {
 # Pin/unmute/More-options but never camera controls).
 #
 # Localization caveat: "Reframe" and "Backgrounds and effects" are English
-# aria-labels; non-English locales would silently break. Today the slip
+# aria-labels; non-English locales would silently break. Today the dial
 # Chrome's UI language is whatever Meet renders for that Google account.
 #
 # Returns "" on failure — caller falls back to a generic label.
@@ -199,7 +199,7 @@ GET_SELF_NAME_JS = """() => {
 # when the speaking-indicator class (BlxGDf) appears or disappears on any
 # descendant element. The local tile is identified by the same predicate
 # as GET_SELF_NAME_JS (presence of "Reframe" / "Backgrounds and effects"
-# camera-control buttons) and deliberately skipped — slip Chrome's
+# camera-control buttons) and deliberately skipped — dial Chrome's
 # system-audio output never contains the runner's own voice (Meet doesn't
 # echo your mic back to your speakers), so a "speaking" local tile would
 # be mic activity and misattribute remote [S] audio to the runner.

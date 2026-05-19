@@ -1,7 +1,7 @@
 # Apple Developer setup for system-audio capture (Phase 14.20.5+)
 
 System audio (SCStream / ScreenCaptureKit) is the only path that doesn't work
-reliably without proper Apple signing. After Phase 14.20.4 shipped slip mode
+reliably without proper Apple signing. After Phase 14.20.4 shipped dial mode
 with mic-only audio, we deferred system-audio to this checklist.
 
 The whole reason this is needed: macOS 14+ silently denies SCStream audio
@@ -97,7 +97,7 @@ operator-audio-capture.app/
     <key>NSScreenCaptureUsageDescription</key>
     <string>Operator transcribes meeting audio so it can join chat conversations.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Operator transcribes your voice locally for slip-mode chat.</string>
+    <string>Operator transcribes your voice locally for dial-mode chat.</string>
 </dict>
 </plist>
 ```
@@ -176,7 +176,7 @@ Once signed + notarized + stapled, ship the `.app` either:
 Inside-the-wheel is simpler for v1. Separate download lets us update the helper
 independently of the Python package — useful once we're shipping multiple OS versions.
 
-## 8. Re-test the slip path
+## 8. Re-test the dial path
 
 After all the above, the previously-failing test should pass:
 

@@ -29,7 +29,7 @@ re-triaged with the user same day).
 criticism (Reddit / CVE worthy). Lower findings dropped.
 
 **TL;DR:** **5 critical**, **7 high** after re-triage. Two criticals and
-several highs were accepted as user-assumed risk (slip mode's "speak
+several highs were accepted as user-assumed risk (dial mode's "speak
 when spoken to" model means anyone the user invites to a meeting can
 steer claude — this gets documented in `security.md`, not code-fixed)
 or dropped as low-realism (macOS Gatekeeper covers the bundle-swap
@@ -49,19 +49,19 @@ naming the file(s) touched.
 
 ## CRITICAL
 
-### C-1 · CDP `--remote-allow-origins=*` exposes slip Chrome to any webpage on the box
+### C-1 · CDP `--remote-allow-origins=*` exposes dial Chrome to any webpage on the box
 
 **Where:** `src/_1_800_operator/connectors/attach_adapter.py:325-329`
 
-**What:** Slip Chrome boots with `--remote-debugging-port=9222
+**What:** Dial Chrome boots with `--remote-debugging-port=9222
 --remote-allow-origins=*`. The `*` removes the Origin-header check
 Chrome added in 121+ to block cross-origin CDP WebSocket connections.
 Any webpage the user visits in any browser on the same Mac can
 `fetch("http://localhost:9222/json/list")`, open a CDP WebSocket, and
-drive slip Chrome with full `Network.getAllCookies`,
+drive dial Chrome with full `Network.getAllCookies`,
 `Runtime.evaluate`, `Page.navigate`.
 
-**Why it matters:** Slip Chrome holds the user's persistent Google
+**Why it matters:** Dial Chrome holds the user's persistent Google
 session indefinitely (and per S239 design now stays alive across
 operator detach/hangup). Cookie exfiltration → full Google account
 takeover. This is the exact threat Chrome's Origin-header check was
@@ -77,7 +77,7 @@ already have plenty of capability on the user's machine.
 
 **Status — RESOLVED:** `_new_cdp_origin()` / `_write_cdp_origin()` /
 `_read_cdp_origin()` in `attach_adapter.py` generate a 128-bit-random
-URL stored in `~/.operator/slip_profile/.cdp_origin` (0o600). Chrome
+URL stored in `~/.operator/dial_profile/.cdp_origin` (0o600). Chrome
 launches with `--remote-allow-origins=<nonce>`; Playwright's
 `connect_over_cdp` passes the matching `Origin` header. S239 reuse
 path reads the existing nonce; first-launch generates fresh.
@@ -105,7 +105,7 @@ tools, the JSON-dumped tool_input becomes the `{question}` slot.
 Inner-claude (steered by hostile chat) can craft a tool call whose
 input encodes the same kind of override.
 
-**Why it matters:** Turns "guarded slip mode" into "yolo for anyone
+**Why it matters:** Turns "guarded dial mode" into "yolo for anyone
 with a Meet seat." A single pre-seeded chat line silently flips every
 subsequent permreq to allow. User thinks they're guarded. Canonical
 OSS-criticism shape for LLM-as-judge security controls.
@@ -150,7 +150,7 @@ Weeks later, the user runs `claude` in their terminal for unrelated
 work and asks "what did we talk about yesterday?" — or claude decides
 to search past meetings on its own. The MCP returns the planted
 instruction unquarantined, and claude executes it in a session with
-full filesystem access and none of the slip-mode guards. The user
+full filesystem access and none of the dial-mode guards. The user
 never opted in to that risk.
 
 **Fix:** Wrap every result containing attendee text in
@@ -318,7 +318,7 @@ note documenting the tradeoff so reviewers and users aren't surprised.
 
 **Status — RESOLVED:** Docstring at `chat_runner.py:109` rewritten to
 state "window is NOT sender-scoped" with a `SECURITY:` block
-explaining the tradeoff and pointing at slip-strict mode for the
+explaining the tradeoff and pointing at dial-strict mode for the
 sender-scoped alternative.
 
 ---
@@ -425,7 +425,7 @@ If the marker file is kept for any reason, validate after read:
 `path.resolve().is_relative_to(HISTORY_DIR.resolve())` +
 `path.is_file()` + `path.stat().st_uid == os.getuid()`.
 
-**Status — RESOLVED:** `__main__.py:_run_slip` sets
+**Status — RESOLVED:** `__main__.py:_run_dial` sets
 `OPERATOR_MEETING_RECORD_PATH` before spawning provider — inner-claude
 inherits, MCP subprocess inherits atomically. `_resolve_record_path`
 in `record_server.py` now prefers env var over marker; both go
@@ -474,7 +474,7 @@ or below the audit bar):
   untrusted DOM/text into evaluated JS.
 - MutationObserver reads `innerText`/`textContent` only — no JS
   execution path back from DOM content into operator.
-- Slip profile dir is created `0o700` + chmod follow-up; debug
+- Dial profile dir is created `0o700` + chmod follow-up; debug
   screenshots are `0o600`.
 - `_disclaimed_spawn` disclaim scope is narrow — disclaim only retargets
   TCC responsibility, doesn't bypass entitlements/sandboxing.
@@ -507,7 +507,7 @@ or below the audit bar):
   inviting claude into a meeting with others means accepting that
   others can take the wheel. Will document in `security.md`.
 - **Bracketed-paste escape via hostile chat** — same user-assumed risk;
-  meeting participants in slip-yolo can already run arbitrary commands
+  meeting participants in dial-yolo can already run arbitrary commands
   via @claude prompts. Will document.
 - **PID-reuse spoofing in `_pid_is_operator`** — too far-fetched to
   warrant the engineering cost (requires stale lockfile + PID
@@ -591,7 +591,7 @@ H-1, H-5, H-6, H-11 live-validated end-to-end on a real Google Meet.
 
 ## HIGH
 
-### H-1 (formerly H-16) · CDP reuse path attaches to *any* Chrome on port 9222, not just the slip profile
+### H-1 (formerly H-16) · CDP reuse path attaches to *any* Chrome on port 9222, not just the dial profile
 
 **Where:** `src/_1_800_operator/connectors/attach_adapter.py:571-602` (`_browser_session`)
 
@@ -600,25 +600,25 @@ If `_cdp_endpoint_alive()` is True AND `_cdp_page_count() > 0`,
 operator takes the reuse path and `connect_over_cdp`'s to whatever
 Chrome is on 9222 — even if it's the user's own debug-Chrome running
 for a different tool. The meeting URL then opens as a new tab in the
-*wrong* profile: different Google identity, no slip cookies, possibly
+*wrong* profile: different Google identity, no dial cookies, possibly
 attributed to the user's main account.
 
-**Why high:** The entire point of the dedicated slip profile (separate
+**Why high:** The entire point of the dedicated dial profile (separate
 user-data-dir, dodging Chrome 121+ CDP restrictions, isolating meeting
 identity from the user's primary Google session) is silently bypassed.
 Anyone who runs a separate `--remote-debugging-port=9222` workflow
 (Puppeteer dev, browser automation tests, another LLM browser tool)
-hits this on first slip attempt.
+hits this on first dial attempt.
 
 **Fix sketch:** Before taking the reuse path, verify the user-data-dir
-of the attached Chrome matches `~/.operator/slip_profile/` (via
-`Browser.getVersion` + process introspection, or by writing a slip
+of the attached Chrome matches `~/.operator/dial_profile/` (via
+`Browser.getVersion` + process introspection, or by writing a dial
 marker into the profile and checking it's reachable). Mismatch →
-treat as "not slip Chrome," fall through to evict + relaunch.
+treat as "not dial Chrome," fall through to evict + relaunch.
 
 **Status — RESOLVED.** First-layer mitigation came from security C-1:
 the per-launch random Origin nonce stored in
-`~/.operator/slip_profile/.cdp_origin` is now required on the
+`~/.operator/dial_profile/.cdp_origin` is now required on the
 `connect_over_cdp` Origin header. A foreign Chrome on 9222 launched
 with default Origin lockdown (Chrome 121+ default) rejects the
 WebSocket upgrade because its allowed-origin list doesn't contain
@@ -636,13 +636,13 @@ end-to-end.
 **Where:** `src/_1_800_operator/connectors/attach_adapter.py:857`
 
 **What:** Outbound chat uses `input_box.fill(full_message)`, which
-clears the textarea before typing. In slip mode the human user and the
+clears the textarea before typing. In dial mode the human user and the
 bot share the same Meet chat input. If the user is mid-typing when
 claude's reply lands (likely — the user often types a follow-up while
 claude is still answering), their draft is destroyed with no warning,
 no save, no restore.
 
-**Why high:** This is a daily-driver UX bug for slip mode's primary
+**Why high:** This is a daily-driver UX bug for dial mode's primary
 use case. Lost text, no recovery, no surfaced cause — the user will
 attribute their disappearing draft to "Meet being flaky" until they
 figure out it's operator. Trust-eroding on first encounter.
@@ -733,7 +733,7 @@ the drain thread trims on append. PTY tail reads still serve the last
 
 **Where:** `src/_1_800_operator/pipeline/providers/claude_cli.py:1091-1218`, `:1430-1445` (`_assistant_texts_split`, `_poll_transcript`)
 
-**What — plain English:** In slip / slip-strict mode, the user denies a
+**What — plain English:** In dial / dial-strict mode, the user denies a
 tool call (say `rm foo`) from the meeting chat permreq. The deny is
 supposed to do two things: (1) the tool doesn't run, and (2) claude's
 voice-over about it ("I'm going to remove that file…") is suppressed
@@ -746,7 +746,7 @@ to chat before it saw the deny. Once the deny lands in the next batch,
 the announcement is already out there and there's nothing to retract.
 
 **Why high:** Trust in the deny path is the core promise of guarded
-slip mode. User vetoes a tool from chat and still watches claude
+dial mode. User vetoes a tool from chat and still watches claude
 announce it to everyone in the meeting — feels like the deny didn't
 work even though the file is safe. Particularly bad on sensitive ops
 (file deletion, message sending, code changes) where the *announcement*
@@ -788,7 +788,7 @@ confidently with content from yesterday's standup. Trust-eroding
 exactly the way "AI hallucinates" is — except it's not hallucination,
 it's stale state served with a confident frame. Crashes happen.
 
-**Fix sketch:** Cross-check the marker against `slip.pid`: if no live
+**Fix sketch:** Cross-check the marker against `dial.pid`: if no live
 operator owns the lock, treat marker as stale and return "no live
 meeting." Or have the MCP `mtime`-check the marker file (>N minutes
 without a participant snapshot update → stale).
@@ -800,7 +800,7 @@ marker file — the live-meeting case is no longer race-prone or
 stale-prone, and `_is_safe_record_path` validator rejects poisoned
 paths. Second-layer freshness check shipped in `90b1de3`: the marker-
 file fallback path (bare claude session, no env var inherited) now
-cross-checks `slip.pid` liveness before trusting the marker. If no
+cross-checks `dial.pid` liveness before trusting the marker. If no
 live operator owns the lock, the marker is treated as stale and the
 MCP returns "no live meeting." Live-validated end-to-end.
 
@@ -966,29 +966,29 @@ the writer rather than imposing an ordering constraint on shutdown.
 **Where:** `src/_1_800_operator/__main__.py:618` (`_run_hangup`)
 
 **What:** Hangup polls up to 3s for the daemon to exit, then prints
-"hung up (1 session)." But the slip daemon's `_shutdown` waits up to
+"hung up (1 session)." But the dial daemon's `_shutdown` waits up to
 10–12s on `connector.leave()`. So the user-facing success message
 fires while the daemon is still draining — and a follow-up
-`/operator:slip` within those 7s hits the singleton guard with "another
-slip session is running" (despite hangup just having claimed success).
+`/operator:dial` within those 7s hits the singleton guard with "another
+dial session is running" (despite hangup just having claimed success).
 
 **Why high:** Direct contradiction between two user-facing commands —
-hangup says done, slip says it's not. Same launch-day path that
-`/operator:hangup; /operator:slip <next-meeting>` traverses for every
+hangup says done, dial says it's not. Same launch-day path that
+`/operator:hangup; /operator:dial <next-meeting>` traverses for every
 back-to-back meeting. The error message is misleading and the
 workaround (`wait 10s and retry`) is not documented.
 
 **Fix sketch:** Change hangup's poll signal from "daemon pid exited"
-to "slip lock released." The daemon's `_shutdown` already releases
+to "dial lock released." The daemon's `_shutdown` already releases
 the lock early (~500ms after SIGTERM — intentional design preserved
 from the H-15 design discussion), so polling on lock-released returns
 truthfully in <1s in the common case. Background teardown continues
-as it does today; the next `/operator:slip` finds the lock free and
+as it does today; the next `/operator:dial` finds the lock free and
 proceeds.
 
 **Status — RESOLVED in `90b1de3`.** Hangup polls on lock-released
 rather than daemon-exited; returns in <1s vs. ~3s previously.
-Live-validated end-to-end. Net `hangup` → re-`slip` → joined is now
+Live-validated end-to-end. Net `hangup` → re-`dial` → joined is now
 ~7s end-to-end (vs ~15-25s with the originally-proposed sentinel from
 H-15).
 
@@ -1032,13 +1032,13 @@ next non-`@claude` message stays off-record.
 
 ### Originally H-15 · Shared-resource handoff during in-flight teardown isn't safe
 
-**Was:** `_shutdown` releases `slip.pid` early by design, so a second
-`/operator:slip` can acquire the lock during the 5–12s teardown window
+**Was:** `_shutdown` releases `dial.pid` early by design, so a second
+`/operator:dial` can acquire the lock during the 5–12s teardown window
 and race the still-tearing-down first instance on the audio-helper
 bundle, the meeting JSONL, and the `.current_meeting` marker.
 
 **Was-proposed:** A `~/.operator/.teardown_in_progress` sentinel that
-new slip's startup polls for after acquiring the lock, waiting up to
+new dial's startup polls for after acquiring the lock, waiting up to
 ~5s for it to clear before touching shared resources.
 
 **Why ripped (S242):** Built, live-tested, then removed after a
@@ -1047,7 +1047,7 @@ overlapped entirely with the per-resource defenses H-1 (formerly H-16,
 user-data-dir verification on CDP reuse) and H-10 (formerly H-25,
 `MeetingRecord.append`-after-close seal) already provide. The 5–15s
 of wait the sentinel imposed wasn't earning its keep against a
-theoretical Playwright timing race. Net: hangup → re-slip → joined
+theoretical Playwright timing race. Net: hangup → re-dial → joined
 now ~7s end-to-end (vs ~15–25s with the sentinel).
 
 ---
@@ -1086,7 +1086,7 @@ Original ordering proposed at audit time. 9 of 12 already shipped in
 
 1. **Lifecycle promise PR** (originally H-15 + H-25 + H-26) — H-15 was
    ripped, H-10 (H-25) and H-11 (H-26) shipped in `90b1de3`. Together
-   with H-1 (H-16) they restore the "hangup means hung up, then slip
+   with H-1 (H-16) they restore the "hangup means hung up, then dial
    works" contract.
 2. **Provider reliability PR** (originally H-18 + H-19, now H-3 + H-4)
    — `_unavailable` retry path + `_pty_dump` bounded deque. Shipped.
@@ -1136,7 +1136,7 @@ in-module (module-level constant) or inline literal.
 | CDP_PORT | 9222 | connectors/attach_adapter.py:83 | TCP port Chrome's remote-debugging-port binds to | Chrome convention; comment threads describe Chrome 121+ user-data-dir restriction | scattered |
 | CDP_READY_TIMEOUT_SECONDS | 30 s | connectors/attach_adapter.py:94 | bound on waiting for Chrome's CDP TCP listener | comment "Chrome can take 20+s to bring up the debug server on a profile with extensions or syncing data. 30s is generous" | scattered |
 | _SPEAKING_RESCAN_INTERVAL_S | 2.0 s | connectors/attach_adapter.py:143 | how often the speaking observer rescans for new tiles | comment "2s is short enough that a late joiner who immediately starts talking gets attributed correctly within their first utterance, and long enough that the per-call DOM walk doesn't pile up" | scattered |
-| SLIP_PROFILE_DIR | ~/.operator/slip_profile | connectors/attach_adapter.py:90 | dedicated Chrome user-data-dir for slip mode | "Operator-owned slip profile — never touches the user's main Chrome" | scattered (path) |
+| DIAL_PROFILE_DIR | ~/.operator/dial_profile | connectors/attach_adapter.py:90 | dedicated Chrome user-data-dir for dial mode | "Operator-owned dial profile — never touches the user's main Chrome" | scattered (path) |
 | _recent_s_captions deque maxlen | 16 | connectors/attach_adapter.py:431 | rolling buffer of recent S-leg captions for bleed dedupe | unknown — no rationale in code | scattered |
 | _speaking_history deque maxlen | 512 | connectors/attach_adapter.py:463 | timeline of speaking events for interval-overlap attribution | comment "512 entries ≈ 8min of dense conversation, well past any plausible Whisper lag" | scattered |
 | lsof eviction timeout | 2 s | connectors/attach_adapter.py:196 | `lsof -iTCP:9222` to find Chrome holding the port | unknown — no rationale in code | scattered |
@@ -1173,7 +1173,7 @@ in-module (module-level constant) or inline literal.
 | POLL_INTERVAL | 0.1 s | pipeline/chat_runner.py:100 | chat-runner main poll cadence (read_chat + state checks) | comment: dropped from 0.5→0.1 after S220 instrumentation showed consistent 500ms poll_lag_ms | scattered |
 | PARTICIPANT_CHECK_INTERVAL | 3 s | pipeline/chat_runner.py:101 | cadence for participant-count refresh + roster file write | inline comment "seconds between participant count checks" | scattered |
 | STREAM_PARAGRAPH_MIN_INTERVAL | 0.25 s | pipeline/chat_runner.py:107 | min wall-clock between back-to-back streamed paragraph posts | comment "(a) Meet's chat panel rate-limits rapid sends and may swallow back-to-back messages, (b) staggered posts give the user's eye a chance to register each paragraph as a distinct message" | scattered |
-| CONTINUATION_WINDOW_SECONDS | 90.0 s | pipeline/chat_runner.py:117 | sticky conversation window after @claude (slip mode) | comment "follow-up messages from that same sender within CONTINUATION_WINDOW_SECONDS skip the trigger requirement" | scattered |
+| CONTINUATION_WINDOW_SECONDS | 90.0 s | pipeline/chat_runner.py:117 | sticky conversation window after @claude (dial mode) | comment "follow-up messages from that same sender within CONTINUATION_WINDOW_SECONDS skip the trigger requirement" | scattered |
 | CONTINUATION_DEBOUNCE_SECONDS | 2.0 s | pipeline/chat_runner.py:118 | coalesce rapid corrections inside the continuation window | comment "a quick correction ('thanks — wait, no, do Y instead') collapses into a single forwarded prompt (the last one)" | scattered |
 | _permreq_safety_timeout_s | 125.0 s | pipeline/chat_runner.py:250 | defensive ceiling past the hook's own 120s | comment "slightly past the hook's own 120s ceiling — defensive cleanup if the hook self-denied without ChatRunner being notified" | scattered |
 | join wait timeout | LOBBY_WAIT_SECONDS + 60 | pipeline/chat_runner.py:367 | total time to wait for connector.join | derived (config + fixed 60s pad); pad rationale unknown — no comment | derived |
@@ -1263,23 +1263,23 @@ Total constants tabulated: **110**.
 
 ### Audit 3 · Component 1 (CLI entry & lifecycle)
 
-Files in scope: `src/_1_800_operator/__main__.py`, `src/_1_800_operator/config.py`, slip.pid handling, shutdown teardown.
+Files in scope: `src/_1_800_operator/__main__.py`, `src/_1_800_operator/config.py`, dial.pid handling, shutdown teardown.
 
 Findings:
 - `config.py` is the only intentionally-centralized constants file. Holds: `ALONE_EXIT_GRACE_SECONDS=60`, `LOBBY_WAIT_SECONDS=600`, `MAX_TOKENS=2000`, `BLEED_DEDUPE_WINDOW_SECONDS=4.0`, `BLEED_DEDUPE_SIMILARITY=0.75`. Plus 4 path constants (`ENV_FILE`, `DEBUG_DIR`, `LAST_FAILURE_PATH`, `CURRENT_MEETING_PARTICIPANTS_PATH`).
 - `__main__.py` has six inline subprocess `timeout=` literals (3, 1, 5, 30, 2, 2) for child-reap / probe / TCC warmup / ps liveness paths — none named, none in config.py.
 - Hangup polling: `deadline = monotonic() + 3.0` plus `_time.sleep(0.2)` inline at lines 618 + 624.
-- Daemonization, signal handling, lockfile paths (`~/.operator/slip.pid`, `~/.operator/.current_meeting`) are inline literals.
-- LOG path `/tmp/operator.log` is hardcoded in `logging.basicConfig` in both `_run_slip` and `_run_wiretap` — duplicated.
+- Daemonization, signal handling, lockfile paths (`~/.operator/dial.pid`, `~/.operator/.current_meeting`) are inline literals.
+- LOG path `/tmp/operator.log` is hardcoded in `logging.basicConfig` in both `_run_dial` and `_run_wiretap` — duplicated.
 
-### Audit 3 · Component 2 (Slip Chrome connector)
+### Audit 3 · Component 2 (Dial Chrome connector)
 
 Files in scope: `connectors/attach_adapter.py`, `connectors/session.py`, `connectors/chat_dom_js.py`, `connectors/base.py`.
 
 Findings:
 - `CDP_PORT=9222` and derived `CDP_URL` at attach_adapter.py:83-84 (module-level constants — good shape; just not in `config.py`).
 - `CDP_READY_TIMEOUT_SECONDS=30` (top-level constant). Inner socket-probe timeouts 0.5/1.0s are unnamed defaults.
-- `SLIP_PROFILE_DIR` is hardcoded to `~/.operator/slip_profile` at attach_adapter.py:90.
+- `DIAL_PROFILE_DIR` is hardcoded to `~/.operator/dial_profile` at attach_adapter.py:90.
 - `_SPEAKING_RESCAN_INTERVAL_S=2.0` named constant at line 143.
 - Deques: `_recent_s_captions` maxlen=16 (line 431, no rationale), `_speaking_history` maxlen=512 (line 463, well-documented).
 - Browser-thread queue.get timeouts: send/read at 10s, three roster lookups at 5s — four unnamed literals at lines 736, 747, 758, 769, 785. **All five could collapse to one or two named constants.**
@@ -1313,7 +1313,7 @@ Findings:
   - PTY: `_PTY_ROWS=40`, `_PTY_COLS=120`, bracket-paste 0.05/0.1/0.2.
   - Per-turn reply timeout `600.0` is an inline literal at line 1462 (not named).
   - `_pty_tail` default n_bytes=2000 is an inline default arg — same magnitude as `_FAILURE_PTY_TAIL_MAX` (potential duplicate).
-- `bridges/claude.py` holds two non-numeric constants only: `TRIGGER_PHRASE`, `REPLY_PREFIX_SLIP`.
+- `bridges/claude.py` holds two non-numeric constants only: `TRIGGER_PHRASE`, `REPLY_PREFIX_DIAL`.
 - `_disclaimed_spawn.py` has one inline `_time.sleep(0.05)` in the custom `wait(timeout=)` polling impl.
 
 ### Audit 3 · Component 5 (Audio pipeline)
@@ -1376,7 +1376,7 @@ Findings:
 3. `WhisperModel` instantiation parameters (`"deepdml/faster-whisper-large-v3-turbo-ct2"`, `device="cpu"`, `compute_type="int8"`, `beam_size=5`) appear verbatim in `pipeline/audio.py` (the production path) and `pipeline/doctor.py:_check_faster_whisper_warm` (the diagnostic warmup). The doctor comment says it runs "the same faster-whisper warmup operator does" — but the constants are typed twice. A drift here would silently degrade doctor's coverage.
 4. `_FAILURE_PTY_TAIL_MAX=2000` (chat_runner) and `_pty_tail` default `n_bytes=2000` (claude_cli) are the same number for the same purpose — no shared constant.
 5. The 120s permreq timeout in `operator-plugin/hooks/scripts/permission_request.sh` and the 125s safety ceiling in `chat_runner.py` are intentionally paired but live in different repos with no documentation linking them. Drift here would either cause spurious early-cleanup or hidden hangs.
-6. Hardcoded path `/tmp/operator.log` appears in `__main__.py` (twice — `_run_slip` and `_run_wiretap`), and is read by `pipeline/chat_runner.py:_operator_log_tail`. Three references to the same string, no named constant.
+6. Hardcoded path `/tmp/operator.log` appears in `__main__.py` (twice — `_run_dial` and `_run_wiretap`), and is read by `pipeline/chat_runner.py:_operator_log_tail`. Three references to the same string, no named constant.
 7. Audio-helper install path `~/.operator/bin/Operator.app/Contents/MacOS/Operator` appears in `__main__.py:118-119`, `pipeline/doctor.py:42-45`, and `connectors/attach_adapter.py:103-106`. Three files, three definitions, all using identical path construction.
 
 **Strong candidates for promotion to `config.py`.** These are runtime knobs the user would tune if anyone tunes them:
@@ -1388,7 +1388,7 @@ Findings:
 
 **Numbers that look obviously off.** None spotted. The two numbers most likely to be over-tuned are `STREAM_PARAGRAPH_MIN_INTERVAL=0.25` (extremely fast paragraph cadence — Meet rate-limits may or may not actually require this aggressive a value) and the permreq summary 200-char truncation hardcoded 3 times in chat_runner.py:1342-1351 (looks copy-pasted). Both deserve a triage pass, not a blanket recommendation.
 
-**Pathnames.** `~/.operator/...` paths are universally inline. `config.py` defines four of them (env, debug, last-failure, participants) but a dozen more (slip_profile, slip.pid, sessions, .current_meeting, history, bin/Operator.app, bin/aec3) are constructed in-place by the modules that use them. Worth a separate "where do operator's on-disk state files live?" consolidation pass.
+**Pathnames.** `~/.operator/...` paths are universally inline. `config.py` defines four of them (env, debug, last-failure, participants) but a dozen more (dial_profile, dial.pid, sessions, .current_meeting, history, bin/Operator.app, bin/aec3) are constructed in-place by the modules that use them. Worth a separate "where do operator's on-disk state files live?" consolidation pass.
 
 ---
 
@@ -1421,7 +1421,7 @@ inner-claude interaction is constructing the provider/runner and calling
 hook (`Stop` / `SessionEnd` / `PostToolUse` / etc.) could observe or
 replace.
 
-## Audit 4 · Component 2 (Slip Chrome connector)
+## Audit 4 · Component 2 (Dial Chrome connector)
 
 Clean — no conversion opportunities. The connector layer talks only to
 Chrome (CDP, Meet DOM, chat-panel observer) and the Swift audio helper;
@@ -1486,7 +1486,7 @@ Clean. All hits are env-var **names** or unrelated tokens:
 
 No `.env` parsing leaks values; secrets are read from `~/.operator/.env` at runtime via `python-dotenv`, never embedded.
 
-### Audit 5 · Component 2 (Slip Chrome connector)
+### Audit 5 · Component 2 (Dial Chrome connector)
 
 Files: `src/_1_800_operator/connectors/{attach_adapter.py, session.py, chat_dom_js.py, base.py}`.
 
@@ -1494,7 +1494,7 @@ Clean.
 
 - `attach_adapter.py:14` — comment reading "malware harvesting OAuth tokens via DevTools (Chromium issue 40066423, …)". Reference to a known Chromium bug, not a credential. The CDP attack-surface explanation is the security narrative.
 
-No cookies, session tokens, or profile material in the tree. Slip profile lives at `~/.operator/slip_profile/` — outside the repo, gitignored category irrelevant.
+No cookies, session tokens, or profile material in the tree. Dial profile lives at `~/.operator/dial_profile/` — outside the repo, gitignored category irrelevant.
 
 ### Audit 5 · Component 3 (Chat runner & trigger logic)
 
@@ -1612,7 +1612,7 @@ Currently covered:
 Not covered (hygiene gaps — non-blocking for launch since none of these currently exist in the tree, but worth adding as future-leak insurance):
 
 - **Apple signing material globs**: `*.p12`, `*.pem`, `*.key`, `*.cer`, `*.mobileprovision`, `*.certSigningRequest`. None currently in tree, but the build_signed_helper.sh workflow involves generating CSRs and downloading `.cer` files on the dev machine — a misclick `git add` could leak.
-- **`slip_profile/`** glob — current naming the codebase uses (the gitignore has the older `browser_profile/`). Operator's slip profile lives in `~/.operator/slip_profile/` so this can only land via symlink-or-copy mistake, but a defensive entry costs nothing.
+- **`dial_profile/`** glob — current naming the codebase uses (the gitignore has the older `browser_profile/`). Operator's dial profile lives in `~/.operator/dial_profile/` so this can only land via symlink-or-copy mistake, but a defensive entry costs nothing.
 - **`Operator`** raw Mach-O at `src/_1_800_operator/swift/Operator` — currently untracked; gitignore handles the old `operator-audio-capture` name. Add `src/_1_800_operator/swift/Operator` to mirror.
 
 ## A5 Recommendations
@@ -1629,7 +1629,7 @@ Non-blocking hygiene (do whenever convenient):
    *.cer
    *.mobileprovision
    *.certSigningRequest
-   slip_profile/
+   dial_profile/
    src/_1_800_operator/swift/Operator
    ```
 2. The deleted `.app` bundle at `src/_1_800_operator/swift/operator-audio-capture.app/...` is currently shown as deleted in `git status` but still tracked in HEAD. A future commit will need to remove it from the index (`git rm`). No security implication — the contents (signing manifest plist, public cert chain in Mach-O) were never secret — but cleanliness for the public flip.

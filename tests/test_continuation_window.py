@@ -1,5 +1,5 @@
 """
-Tests for the sticky conversation window in ChatRunner (slip mode).
+Tests for the sticky conversation window in ChatRunner (dial mode).
 
 Stage 3 redesign (S238):
   - @claude opens the window; any participant can follow up while it's
@@ -52,7 +52,7 @@ class StubLLM:
         pass
 
 
-def make_runner(mode="slip"):
+def make_runner(mode="dial"):
     runner = ChatRunner(StubConnector(), StubLLM(), meeting_record=None, mode=mode)
     runner._dispatched = []
 
@@ -62,17 +62,17 @@ def make_runner(mode="slip"):
     return runner
 
 
-# ---- slip mode -------------------------------------------------------------
+# ---- dial mode -------------------------------------------------------------
 
-def test_slip_trigger_dispatches_and_opens_window():
+def test_dial_trigger_dispatches_and_opens_window():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi there", sender="Alice")
     assert runner._dispatched == [{"text": "hi there", "sender": "Alice"}]
     assert runner._continuation_open_until > time.time()
-    print("  slip: trigger dispatches + opens window: OK")
+    print("  dial: trigger dispatches + opens window: OK")
 
 
-def test_slip_followup_same_sender_buffered():
+def test_dial_followup_same_sender_buffered():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
@@ -80,10 +80,10 @@ def test_slip_followup_same_sender_buffered():
     assert runner._dispatched == []
     assert runner._continuation_pending is not None
     assert runner._continuation_pending["text"] == "thanks"
-    print("  slip: same-sender follow-up buffered, not dispatched immediately: OK")
+    print("  dial: same-sender follow-up buffered, not dispatched immediately: OK")
 
 
-def test_slip_followup_dispatches_after_debounce():
+def test_dial_followup_dispatches_after_debounce():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
@@ -92,10 +92,10 @@ def test_slip_followup_dispatches_after_debounce():
     runner._flush_continuation_if_ready()
     assert runner._dispatched == [{"text": "thanks", "sender": "Alice"}]
     assert runner._continuation_pending is None
-    print("  slip: follow-up dispatches after debounce: OK")
+    print("  dial: follow-up dispatches after debounce: OK")
 
 
-def test_slip_rapid_followups_collapse_to_latest():
+def test_dial_rapid_followups_collapse_to_latest():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} go", sender="Alice")
     runner._dispatched.clear()
@@ -105,10 +105,10 @@ def test_slip_rapid_followups_collapse_to_latest():
     runner._flush_continuation_if_ready()
     assert len(runner._dispatched) == 1
     assert runner._dispatched[0]["text"] == "actually no, do Y instead", runner._dispatched
-    print("  slip: rapid follow-ups collapse to the latest: OK")
+    print("  dial: rapid follow-ups collapse to the latest: OK")
 
 
-def test_slip_window_is_not_sender_scoped():
+def test_dial_window_is_not_sender_scoped():
     """S238: window is no longer sender-scoped. Bob CAN follow up in
     Alice's window without @claude."""
     runner = make_runner()
@@ -121,10 +121,10 @@ def test_slip_window_is_not_sender_scoped():
     runner._continuation_pending["ts"] = time.time() - cr_mod.CONTINUATION_DEBOUNCE_SECONDS - 0.5
     runner._flush_continuation_if_ready()
     assert runner._dispatched == [{"text": "relevant aside from Bob", "sender": "Bob"}]
-    print("  slip: window not sender-scoped — anyone can follow up: OK")
+    print("  dial: window not sender-scoped — anyone can follow up: OK")
 
 
-def test_slip_window_expires_after_window_seconds():
+def test_dial_window_expires_after_window_seconds():
     runner = make_runner()
     runner._dispatch_user_message(f"{config.TRIGGER_PHRASE} hi", sender="Alice")
     runner._dispatched.clear()
@@ -132,10 +132,10 @@ def test_slip_window_expires_after_window_seconds():
     runner._dispatch_user_message("late follow-up", sender="Alice")
     assert runner._dispatched == []
     assert runner._continuation_pending is None
-    print("  slip: time-based window expires after CONTINUATION_WINDOW_SECONDS: OK")
+    print("  dial: time-based window expires after CONTINUATION_WINDOW_SECONDS: OK")
 
 
-def test_slip_question_keeps_window_open_indefinitely():
+def test_dial_question_keeps_window_open_indefinitely():
     """If claude's last chat post had `?`, the window stays open past
     the time-based ceiling."""
     runner = make_runner()
@@ -148,10 +148,10 @@ def test_slip_question_keeps_window_open_indefinitely():
     # Follow-up arrives — window is open via the ? flag.
     runner._dispatch_user_message("blue", sender="Alice")
     assert runner._continuation_pending is not None, "? flag should keep window open"
-    print("  slip: `?` in claude's reply keeps window open past time ceiling: OK")
+    print("  dial: `?` in claude's reply keeps window open past time ceiling: OK")
 
 
-def test_slip_incoming_reply_clears_question_flag():
+def test_dial_incoming_reply_clears_question_flag():
     """First non-self incoming message clears the `?`-driven indefinite
     window. The flag is cleared in _process_messages — exercise that path."""
     runner = make_runner()
@@ -160,7 +160,7 @@ def test_slip_incoming_reply_clears_question_flag():
     # arriving through that path.
     runner._process_messages([{"id": "m1", "sender": "Alice", "text": "hi"}])
     assert runner._last_reply_had_question is False
-    print("  slip: incoming non-self message clears the ?-driven flag: OK")
+    print("  dial: incoming non-self message clears the ?-driven flag: OK")
 
 
 # ---- strict mode -----------------------------------------------------------
@@ -227,14 +227,14 @@ def test_invalid_mode_raises():
 if __name__ == "__main__":
     print("Sticky conversation-window + mode tests:")
     tests = [
-        test_slip_trigger_dispatches_and_opens_window,
-        test_slip_followup_same_sender_buffered,
-        test_slip_followup_dispatches_after_debounce,
-        test_slip_rapid_followups_collapse_to_latest,
-        test_slip_window_is_not_sender_scoped,
-        test_slip_window_expires_after_window_seconds,
-        test_slip_question_keeps_window_open_indefinitely,
-        test_slip_incoming_reply_clears_question_flag,
+        test_dial_trigger_dispatches_and_opens_window,
+        test_dial_followup_same_sender_buffered,
+        test_dial_followup_dispatches_after_debounce,
+        test_dial_rapid_followups_collapse_to_latest,
+        test_dial_window_is_not_sender_scoped,
+        test_dial_window_expires_after_window_seconds,
+        test_dial_question_keeps_window_open_indefinitely,
+        test_dial_incoming_reply_clears_question_flag,
         test_strict_trigger_dispatches,
         test_strict_followup_without_trigger_dropped,
         test_strict_no_continuation_state_mutated,

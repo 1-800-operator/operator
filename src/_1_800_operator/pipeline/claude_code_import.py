@@ -1,6 +1,6 @@
 """Claude Code installation preflight — used at boot.
 
-Used by `_run_slip` and `operator doctor` to fail loudly before any
+Used by `_run_dial` and `operator doctor` to fail loudly before any
 browser starts when the `claude` CLI is missing, logged out, or too old
 for operator's PTY + hook-events flow.
 """

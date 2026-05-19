@@ -9,7 +9,7 @@ fails (so CI / scripts can gate on it).
 Composition: each check is a tiny pure function returning a
 `CheckResult(name, ok, detail, fix)`. `run_doctor()` calls them in
 order and renders. macOS-only TCC checks (Screen Recording + Microphone
-for slip's audio helper, Phase 14.20.4) skip on other platforms.
+for dial's audio helper, Phase 14.20.4) skip on other platforms.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def chrome_installed() -> bool:
         return True
     return CHROME_PATH.exists()
 
-# Slip's audio helper. Production is the signed+notarized .app produced by
+# Dial's audio helper. Production is the signed+notarized .app produced by
 # scripts/build_signed_helper.sh (only this path can capture system audio).
 # Dev fallback is the raw swiftc-built binary in-tree (mic-only). Production
 # wins when both exist; mirrors attach_adapter.py:_AUDIO_HELPER_INSTALLED.
@@ -51,7 +51,7 @@ _AUDIO_HELPER_DEV = Path(__file__).resolve().parent.parent / "swift" / "Operator
 # AEC3 speaker-bleed cleaner. Production is the cargo-built binary installed
 # under ~/.operator/bin/; dev fallback is the in-tree build. Mirrors
 # attach_adapter.py:_AEC_BINARY_INSTALLED. Optional — missing AEC isn't fatal,
-# slip just runs without the bleed defense.
+# dial just runs without the bleed defense.
 _AEC_BINARY_INSTALLED = Path.home() / ".operator" / "bin" / "aec3"
 _AEC_BINARY_DEV = (
     Path(__file__).resolve().parent.parent / "rust" / "aec3" / "target" / "release" / "aec3"
@@ -107,7 +107,7 @@ def _check_claude() -> CheckResult:
 
 
 def _check_chrome() -> CheckResult:
-    """Real Google Chrome.app present (macOS) — required by slip's CDP attach."""
+    """Real Google Chrome.app present (macOS) — required by dial's CDP attach."""
     if chrome_installed():
         return CheckResult(
             "Google Chrome",
@@ -146,7 +146,7 @@ def _check_cwd_trusted(*, registry_path: Path | None = None,
                        cwd: Path | None = None) -> CheckResult:
     """Claude Code's workspace-trust state for the current directory.
 
-    `operator slip` spawns claude with cwd = the dir operator was
+    `operator dial` spawns claude with cwd = the dir operator was
     invoked from. If Claude Code hasn't been trusted for that dir, it
     shows a first-run "trust this folder?" dialog and blocks on input —
     which wedges the meeting bot's boot: the SessionStart hook never
@@ -193,7 +193,7 @@ def _check_cwd_trusted(*, registry_path: Path | None = None,
         ),
         fix=(
             "open this folder in Claude Code once and accept the trust "
-            "prompt — or run /operator:slip from a folder you've already "
+            "prompt — or run /operator:dial from a folder you've already "
             "used with Claude Code"
         ),
         optional=True,
@@ -410,7 +410,7 @@ def _probe_audio_helper() -> dict[str, str] | None:
 
 
 def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
-    """TCC Screen Recording — slip system-audio capture (ScreenCaptureKit).
+    """TCC Screen Recording — dial system-audio capture (ScreenCaptureKit).
 
     Apple gates SCK audio behind the same TCC service as video, even when
     capturing audio only. Without it the helper exits with the silent-
@@ -418,23 +418,23 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
     """
     if _audio_helper() is None:
         return CheckResult(
-            name="Screen Recording (slip)",
+            name="Screen Recording (dial)",
             ok=False,
             detail="audio helper not built",
             fix=_installer_fix(),
         )
     if probe is None:
         return CheckResult(
-            name="Screen Recording (slip)",
+            name="Screen Recording (dial)",
             ok=False,
             detail="audio helper probe failed",
             fix=_installer_fix(),
         )
     status = probe.get("screen_recording", "unknown")
     if status == "ok":
-        return CheckResult("Screen Recording (slip)", True, "granted", "")
+        return CheckResult("Screen Recording (dial)", True, "granted", "")
     return CheckResult(
-        name="Screen Recording (slip)",
+        name="Screen Recording (dial)",
         ok=False,
         detail=_TCC_STATUS_DETAIL.get(status, status),
         fix=(
@@ -445,7 +445,7 @@ def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
 
 
 def _check_faster_whisper_warm() -> CheckResult:
-    """Run the same faster-whisper warmup operator does at slip meeting entry.
+    """Run the same faster-whisper warmup operator does at dial meeting entry.
 
     Surfaces two failure modes at install/diagnostic time rather than mid-
     meeting:
@@ -456,7 +456,7 @@ def _check_faster_whisper_warm() -> CheckResult:
          not at meeting-join. Warm-cache subsequent runs are 1-2s.
 
       2. CTranslate2 binary / architecture / disk issues — operator catches
-         these cleanly at slip entry (falls back to chat-only), but the
+         these cleanly at dial entry (falls back to chat-only), but the
          failure-now-vs-mid-meeting framing applies.
 
     S233 swapped this from `mlx-whisper` after two production crashes from
@@ -464,13 +464,13 @@ def _check_faster_whisper_warm() -> CheckResult:
     docs/agent-context.md. The MLX/Metal crash family no longer exists.
 
     Optional check: a failure here doesn't fail `operator doctor`'s exit
-    code — slip still runs (chat-only), so this is a warning, not a blocker.
+    code — dial still runs (chat-only), so this is a warning, not a blocker.
     """
     if sys.platform != "darwin":
         return CheckResult(
             "faster-whisper warmup",
             True,
-            "skipped (slip audio is mac-only)",
+            "skipped (dial audio is mac-only)",
             "",
             optional=True,
         )
@@ -482,7 +482,7 @@ def _check_faster_whisper_warm() -> CheckResult:
         return CheckResult(
             name="faster-whisper warmup",
             ok=False,
-            detail=f"import failed: {e} — slip will run chat-only",
+            detail=f"import failed: {e} — dial will run chat-only",
             fix=_installer_fix(),
             optional=True,
         )
@@ -528,7 +528,7 @@ def _check_faster_whisper_warm() -> CheckResult:
         return CheckResult(
             name="faster-whisper warmup",
             ok=False,
-            detail=f"{first_line} — slip will run chat-only (no transcripts)",
+            detail=f"{first_line} — dial will run chat-only (no transcripts)",
             fix=(
                 "check network (model downloads from HuggingFace on first run) and "
                 "that ~/.cache/huggingface/ is writable. Re-run `operator doctor` to retry."
@@ -549,21 +549,21 @@ def _check_aec_binary() -> CheckResult:
     binary = _aec_binary()
     if binary is not None:
         return CheckResult(
-            "aec3 cleaner (slip)",
+            "aec3 cleaner (dial)",
             True,
             f"installed at {binary}",
             "",
         )
     if shutil.which("cargo") is None:
         return CheckResult(
-            name="aec3 cleaner (slip)",
+            name="aec3 cleaner (dial)",
             ok=False,
             detail="not installed and cargo missing — mic transcripts may include speaker bleed",
             fix=_installer_fix("install Rust first (https://rustup.rs/)"),
             optional=True,
         )
     return CheckResult(
-        name="aec3 cleaner (slip)",
+        name="aec3 cleaner (dial)",
         ok=False,
         detail="not installed — mic transcripts may include speaker bleed",
         fix=_installer_fix(),
@@ -572,20 +572,20 @@ def _check_aec_binary() -> CheckResult:
 
 
 def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
-    """TCC Microphone — slip mic capture (AVAudioEngine.inputNode)."""
+    """TCC Microphone — dial mic capture (AVAudioEngine.inputNode)."""
     if _audio_helper() is None or probe is None:
         # Same upstream cause as Screen Recording — only report once.
         return CheckResult(
-            name="Microphone (slip)",
+            name="Microphone (dial)",
             ok=False,
             detail="audio helper unavailable (see Screen Recording check)",
             fix="",
         )
     status = probe.get("microphone", "unknown")
     if status == "ok":
-        return CheckResult("Microphone (slip)", True, "granted", "")
+        return CheckResult("Microphone (dial)", True, "granted", "")
     return CheckResult(
-        name="Microphone (slip)",
+        name="Microphone (dial)",
         ok=False,
         detail=_TCC_STATUS_DETAIL.get(status, status),
         fix=(
@@ -688,7 +688,7 @@ def run_doctor() -> int:
         _check_git(),
         _check_cwd_trusted(),
     ]
-    # Slip is macOS-only — TCC checks are meaningless elsewhere.
+    # Dial is macOS-only — TCC checks are meaningless elsewhere.
     if sys.platform == "darwin":
         probe = _probe_audio_helper()
         checks.append(_check_screen_recording(probe))
@@ -725,11 +725,11 @@ def run_doctor() -> int:
     print()
 
     if failures == 0 and warnings == 0:
-        print("All checks passed. You're ready to slip.")
+        print("All checks passed. You're ready to dial.")
         return 0
     if failures == 0:
         word = "warning" if warnings == 1 else "warnings"
-        print(f"{warnings} optional {word} above — slip will still run.")
+        print(f"{warnings} optional {word} above — dial will still run.")
         return 0
     word = "issue" if failures == 1 else "issues"
     print(f"{failures} {word} above. Fix and re-run `operator doctor`.")

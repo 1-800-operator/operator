@@ -515,16 +515,16 @@ def test_env_var_wins_over_marker_file():
     print("✓ env var wins over marker file (H-6 priority order)")
 
 
-def _fake_live_slip_lock() -> Path:
-    """Write a slip.pid that points at THIS test process (always live).
+def _fake_live_dial_lock() -> Path:
+    """Write a dial.pid that points at THIS test process (always live).
 
     Returns the path so the caller can monkey-patch
-    record_server.SLIP_LOCK + unlink at teardown. H-21's freshness gate
-    treats the marker as stale if slip.pid points at a dead pid, so
+    record_server.DIAL_LOCK + unlink at teardown. H-21's freshness gate
+    treats the marker as stale if dial.pid points at a dead pid, so
     tests that exercise the marker-fallback path need a live-looking
-    slip.pid to pass.
+    dial.pid to pass.
     """
-    fd, p = tempfile.mkstemp(prefix="op_slip_lock_")
+    fd, p = tempfile.mkstemp(prefix="op_dial_lock_")
     os.close(fd)
     Path(p).write_text(str(os.getpid()), encoding="utf-8")
     return Path(p)
@@ -533,7 +533,7 @@ def _fake_live_slip_lock() -> Path:
 def test_marker_fallback_when_env_unset():
     """No env var → marker file is consulted (legacy compatibility).
 
-    Post-H-21: marker fallback also requires slip.pid to point at a
+    Post-H-21: marker fallback also requires dial.pid to point at a
     live process. The test fakes that with the current pid.
     """
     now = time.time()
@@ -545,9 +545,9 @@ def test_marker_fallback_when_env_unset():
     os.close(fd)
     with open(marker_path, "w") as f:
         f.write(marker_target)
-    slip_lock = _fake_live_slip_lock()
+    dial_lock = _fake_live_dial_lock()
     record_server.MARKER_FILE = Path(marker_path)
-    record_server.SLIP_LOCK = slip_lock
+    record_server.DIAL_LOCK = dial_lock
     os.environ.pop(record_server.ENV_PATH, None)
     record_server.HISTORY_DIR = Path(marker_target).resolve().parent
     _set_now(now)
@@ -555,10 +555,10 @@ def test_marker_fallback_when_env_unset():
     assert "marker worked" in out, out
     os.unlink(marker_target)
     os.unlink(marker_path)
-    slip_lock.unlink()
+    dial_lock.unlink()
     record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
-    record_server.SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
-    print("✓ env var unset → marker file fallback works (with live slip.pid)")
+    record_server.DIAL_LOCK = Path.home() / ".operator" / "dial.pid"
+    print("✓ env var unset → marker file fallback works (with live dial.pid)")
 
 
 def test_marker_stale_after_crash_is_rejected():
@@ -570,14 +570,14 @@ def test_marker_stale_after_crash_is_rejected():
     state served confidently. Erodes trust the same way hallucination
     does.
 
-    Post-fix: the marker-fallback path requires slip.pid to point at a
+    Post-fix: the marker-fallback path requires dial.pid to point at a
     live process. No live operator → marker is treated as stale, MCP
     returns the unwired empty-state.
 
     Two stale-marker scenarios covered:
-      (a) slip.pid missing entirely (clean shutdown that forgot, or a
+      (a) dial.pid missing entirely (clean shutdown that forgot, or a
           fresh install before operator's first run)
-      (b) slip.pid present but pid is dead (crash / SIGKILL / OOM)
+      (b) dial.pid present but pid is dead (crash / SIGKILL / OOM)
     """
     now = time.time()
     marker_target = _write_fixture([
@@ -592,36 +592,36 @@ def test_marker_stale_after_crash_is_rejected():
     record_server.HISTORY_DIR = Path(marker_target).resolve().parent
     _set_now(now)
 
-    # (a) No slip.pid at all → stale.
-    no_lock = Path(tempfile.gettempdir()) / "_test_no_slip_lock"
+    # (a) No dial.pid at all → stale.
+    no_lock = Path(tempfile.gettempdir()) / "_test_no_dial_lock"
     if no_lock.exists():
         no_lock.unlink()
-    record_server.SLIP_LOCK = no_lock
+    record_server.DIAL_LOCK = no_lock
     out = record_server.list_captions()
     assert "yesterday's standup" not in out, (
-        "missing slip.pid should treat marker as stale; "
+        "missing dial.pid should treat marker as stale; "
         f"got: {out!r}"
     )
 
-    # (b) slip.pid present but pid is dead → stale.
+    # (b) dial.pid present but pid is dead → stale.
     # Pick a pid that's almost certainly not in use: a giant number
     # outside the typical OS range. os.kill(pid, 0) returns
     # ProcessLookupError.
-    dead_lock = _fake_live_slip_lock()
+    dead_lock = _fake_live_dial_lock()
     dead_lock.write_text("9999999", encoding="utf-8")
-    record_server.SLIP_LOCK = dead_lock
+    record_server.DIAL_LOCK = dead_lock
     out = record_server.list_captions()
     assert "yesterday's standup" not in out, (
-        "dead pid in slip.pid should treat marker as stale; "
+        "dead pid in dial.pid should treat marker as stale; "
         f"got: {out!r}"
     )
 
-    # Sanity: with a live slip.pid (this process), the marker IS trusted.
-    live_lock = _fake_live_slip_lock()
-    record_server.SLIP_LOCK = live_lock
+    # Sanity: with a live dial.pid (this process), the marker IS trusted.
+    live_lock = _fake_live_dial_lock()
+    record_server.DIAL_LOCK = live_lock
     out = record_server.list_captions()
     assert "yesterday's standup" in out, (
-        "live slip.pid should let marker through; "
+        "live dial.pid should let marker through; "
         f"got: {out!r}"
     )
 
@@ -631,8 +631,8 @@ def test_marker_stale_after_crash_is_rejected():
     dead_lock.unlink()
     live_lock.unlink()
     record_server.MARKER_FILE = Path.home() / ".operator" / ".current_meeting"
-    record_server.SLIP_LOCK = Path.home() / ".operator" / "slip.pid"
-    print("✓ H-21: stale marker (no slip.pid OR dead pid) rejected; live pid accepted")
+    record_server.DIAL_LOCK = Path.home() / ".operator" / "dial.pid"
+    print("✓ H-21: stale marker (no dial.pid OR dead pid) rejected; live pid accepted")
 
 
 def test_poisoned_path_rejected_by_safety_filter():
@@ -687,7 +687,7 @@ def test_find_meetings_by_participant():
     now = time.time()
     tmp = _make_history_dir({
         "aaa-bbbb-ccc": [
-            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "slip"},
+            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "dial"},
             {"kind": "session_start", "timestamp": now - 3600},
             {"kind": "chat", "sender": "Alice", "text": "hi", "timestamp": now - 3500},
             {"kind": "participants_final", "timestamp": now - 100,
@@ -719,7 +719,7 @@ def test_find_meetings_fallback_to_chat_senders_when_no_participants_final():
     now = time.time()
     tmp = _make_history_dir({
         "crashed-meeting": [
-            {"kind": "meta", "slug": "crashed-meeting", "meet_url": "https://meet.google.com/crashed-meeting", "mode": "slip"},
+            {"kind": "meta", "slug": "crashed-meeting", "meet_url": "https://meet.google.com/crashed-meeting", "mode": "dial"},
             {"kind": "session_start", "timestamp": now - 1000},
             {"kind": "chat", "sender": "Erin", "text": "hello", "timestamp": now - 900},
             {"kind": "caption", "sender": "Frank", "text": "spoken", "timestamp": now - 800},
@@ -766,11 +766,11 @@ def test_find_meetings_url_contains():
     now = time.time()
     tmp = _make_history_dir({
         "aaa-bbbb-ccc": [
-            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "slip"},
+            {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "dial"},
             {"kind": "session_start", "timestamp": now},
         ],
         "zzz-yyyy-xxx": [
-            {"kind": "meta", "slug": "zzz-yyyy-xxx", "meet_url": "https://meet.google.com/zzz-yyyy-xxx", "mode": "slip"},
+            {"kind": "meta", "slug": "zzz-yyyy-xxx", "meet_url": "https://meet.google.com/zzz-yyyy-xxx", "mode": "dial"},
             {"kind": "session_start", "timestamp": now},
         ],
     })

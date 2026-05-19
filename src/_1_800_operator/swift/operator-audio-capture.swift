@@ -1,4 +1,4 @@
-// operator-audio-capture.swift — slip-mode dual-stream audio helper.
+// operator-audio-capture.swift — dial-mode dual-stream audio helper.
 //
 // Captures system audio AND the user's microphone via ScreenCaptureKit's
 // captureMicrophone API (macOS 15+) in a single SCStream; writes framed PCM
@@ -603,7 +603,7 @@ for delaySeconds in stride(from: 2, through: 12, by: 2) {
 // `tccutil reset ScreenCapture com.1-800-operator.audio-capture` + respawn (see
 // AttachAdapter._audio_reader_loop). Exit code 4 = system silent-failure;
 // the parent retries once. If the system stays silent after the retry,
-// parent falls back to mic-only — slip still works for the user's own
+// parent falls back to mic-only — dial still works for the user's own
 // voice, system audio is "best effort."
 DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
     // Mic silent at 10s is unrecoverable — exit so parent fails fast.

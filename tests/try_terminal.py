@@ -5,7 +5,7 @@ real Google Meet.
 Spirit-of-the-old-`operator try`: a TerminalConnector that implements
 MeetingConnector with full parity (stdin lines → chat messages, send_chat
 → stdout), wired through the same MeetingRecord + LLMClient +
-ClaudeCLIProvider + ChatRunner that slip mode uses. Lets the assistant
+ClaudeCLIProvider + ChatRunner that dial mode uses. Lets the assistant
 exercise:
 
     - trigger phrase gating (only `@claude …` forwards)
@@ -60,7 +60,7 @@ class TerminalConnector(MeetingConnector):
     Implements every method on the base. Browser-specific concepts
     (participant count, captions, connection liveness) get pragmatic
     real implementations rather than no-ops so ChatRunner's logic
-    exercises the same code paths it would in slip mode.
+    exercises the same code paths it would in dial mode.
     """
 
     def __init__(self, reply_prefix: str = ""):
@@ -106,7 +106,7 @@ class TerminalConnector(MeetingConnector):
             logging.getLogger("terminal").warning(f"stdin pump exited: {e}")
 
     def send_chat(self, message):
-        """Bot-voice post — prepend the slip reply prefix so the harness
+        """Bot-voice post — prepend the dial reply prefix so the harness
         output mirrors what a participant would see in Meet chat."""
         prefixed = f"{self._reply_prefix}{message}" if self._reply_prefix else message
         sys.stdout.write(prefixed + "\n")
@@ -168,7 +168,7 @@ def main():
     llm = LLMClient(build_provider(resume_session_id=None))
     llm.set_record(meeting_record)
 
-    # Same marker file slip mode writes — lets the bundled transcript MCP
+    # Same marker file dial mode writes — lets the bundled transcript MCP
     # find this harness's JSONL when inner-claude calls search_captions.
     marker = Path.home() / ".operator" / ".current_meeting"
     try:
@@ -177,7 +177,7 @@ def main():
     except OSError as e:
         log.warning(f"could not write current-meeting marker: {e}")
 
-    connector = TerminalConnector(reply_prefix=claude_bridge.REPLY_PREFIX_SLIP)
+    connector = TerminalConnector(reply_prefix=claude_bridge.REPLY_PREFIX_DIAL)
     runner = ChatRunner(connector, llm, meeting_record=meeting_record)
 
     _shutdown_called = False

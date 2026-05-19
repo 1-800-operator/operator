@@ -120,7 +120,7 @@ STREAM_PARAGRAPH_MIN_INTERVAL = 0.25
 # (mirrors how a human assistant in the room would respond to anyone
 # during an active back-and-forth), but it means inviting claude into a
 # meeting also invites every participant to drive claude until the
-# window closes. Slip-strict mode disables this — every prompt requires
+# window closes. Dial-strict mode disables this — every prompt requires
 # @claude.
 CONTINUATION_WINDOW_SECONDS = 90.0
 CONTINUATION_DEBOUNCE_SECONDS = 2.0
@@ -135,12 +135,12 @@ class ChatRunner:
         llm,
         meeting_record: MeetingRecord | None = None,
         permission_classifier=None,
-        mode: str = "slip",
+        mode: str = "dial",
     ):
         # `mode` controls the trigger-routing branch in `_dispatch_user_message`,
         # the continuation-window semantics, and the provider/llm wiring in
         # `run()`. Four modes:
-        #   - "slip"   default. Guarded (PermreqClassifier active). First
+        #   - "dial"   default. Guarded (PermreqClassifier active). First
         #              `@claude` opens a sticky conversation window; sender
         #              not scoped — anyone in the meeting can follow up.
         #              `?` in claude's last chat post keeps the window open
@@ -154,7 +154,7 @@ class ChatRunner:
         #   - "wiretap" no inner-claude. Chat is recorded but never
         #              dispatched. `llm` and `permission_classifier` must
         #              both be None.
-        valid_modes = {"slip", "strict", "yolo", "wiretap"}
+        valid_modes = {"dial", "strict", "yolo", "wiretap"}
         if mode not in valid_modes:
             raise ValueError(f"ChatRunner mode must be one of {valid_modes}, got {mode!r}")
         self._mode = mode
@@ -241,7 +241,7 @@ class ChatRunner:
         # participant who spoofs their display name to "Claude" would
         # otherwise have every message they send silently dropped,
         # including any "no" reply to a permreq. The local tile's
-        # display name comes from the slip Chrome profile's Google
+        # display name comes from the dial Chrome profile's Google
         # session and isn't trivially spoofable by other attendees.
         self._self_name: str | None = None
 
@@ -268,7 +268,7 @@ class ChatRunner:
         self._permreq_seen_at_post: set[str] = set()
         self._permreq_safety_timeout_s: float = 125.0
 
-        # Sticky conversation window state (slip mode only). See
+        # Sticky conversation window state (dial mode only). See
         # CONTINUATION_WINDOW_SECONDS / CONTINUATION_DEBOUNCE_SECONDS at
         # the module top for the spec. _continuation_pending holds the
         # last buffered non-trigger follow-up (overwritten on each new
@@ -282,7 +282,7 @@ class ChatRunner:
         # `?`-driven indefinite window: True iff claude's last chat post
         # contained a `?`. Set in `_send` when kind=="chat"; cleared in
         # `_process_messages` on any non-self incoming message. While
-        # True, the slip-mode continuation window stays open regardless
+        # True, the dial-mode continuation window stays open regardless
         # of the time-based ceiling — "claude asked a question, wait
         # for the room to answer." Permreq questions count too; the
         # first reply (resolving the permreq OR just side chat) clears
@@ -535,7 +535,7 @@ class ChatRunner:
             if self._stop_event.is_set():
                 break
 
-            # Slip mode is "speak when spoken to" — claude only responds
+            # Dial mode is "speak when spoken to" — claude only responds
             # to messages containing the trigger phrase OR to follow-ups
             # from the same sender inside the sticky conversation window.
             self._process_messages(messages)
@@ -636,7 +636,7 @@ class ChatRunner:
                 self._safe_leave()
                 return True
         else:
-            # count == 1 and _saw_others == False (slip-mode lobby wait,
+            # count == 1 and _saw_others == False (dial-mode lobby wait,
             # 1-on-1 mode pre-arrival). Not a leave condition.
             self._alone_since = None
         return False
@@ -729,7 +729,7 @@ class ChatRunner:
           - "strict": message dispatched only if it contains the trigger
                       phrase. No continuation window — every prompt
                       requires `@claude`.
-          - "slip":   trigger phrase → dispatch + open sticky window.
+          - "dial":   trigger phrase → dispatch + open sticky window.
                       No trigger but window is open → buffer as
                       continuation (debounced to coalesce rapid
                       corrections). The window is NOT sender-scoped
@@ -760,7 +760,7 @@ class ChatRunner:
             ).strip()
             if prompt:
                 self._handle_message(prompt, sender=sender, t_dom=t_dom, t_drained=t_drained)
-                if self._mode == "slip":
+                if self._mode == "dial":
                     self._open_continuation_window(sender)
             return
 
@@ -769,7 +769,7 @@ class ChatRunner:
             log.debug("ChatRunner: stored as context (strict mode, no trigger)")
             return
 
-        # slip mode: maybe in the continuation window.
+        # dial mode: maybe in the continuation window.
         if self._continuation_active():
             self._continuation_pending = {
                 "sender": sender,
@@ -798,7 +798,7 @@ class ChatRunner:
         self._continuation_open_until = time.time() + CONTINUATION_WINDOW_SECONDS
 
     def _continuation_active(self) -> bool:
-        """True iff the sticky window is currently open. Slip mode only.
+        """True iff the sticky window is currently open. Dial mode only.
 
         Two paths to True:
           - claude's last chat post contained a `?` (set by `_send`,
@@ -1080,7 +1080,7 @@ class ChatRunner:
         building the LLM prompt (only `chat` and `caption` are replayed).
 
         Everything goes out through the connector's `send_chat`, which
-        prepends the slip bot prefix `[🤖 Claude] ` — there is no
+        prepends the dial bot prefix `[🤖 Claude] ` — there is no
         unprefixed/operator-voice send path anymore (removed S228).
 
         Own-message dedup: primary path is by message ID — when the connector
@@ -1146,7 +1146,7 @@ class ChatRunner:
                 and "t_first_visible" not in self._turn_timing
             ):
                 self._turn_timing["t_first_visible"] = int(time.time() * 1000)
-            # `?`-driven indefinite window tracking (slip mode). Permreq
+            # `?`-driven indefinite window tracking (dial mode). Permreq
             # questions count too — they end with "— OK?" and that's a
             # legitimate signal to wait for a reply. The first non-self
             # incoming message in _process_messages clears the flag, so
