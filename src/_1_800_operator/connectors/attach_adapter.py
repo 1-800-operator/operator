@@ -73,6 +73,8 @@ from .chat_dom_js import (
     DRAIN_CHAT_QUEUE_JS,
     DRAIN_GCHAT_QUEUE_JS,
     DRAIN_SPEAKING_QUEUE_JS,
+    GCHAT_CLICK_SEND_JS,
+    GCHAT_INSERT_JS,
     GET_PARTICIPANT_NAMES_JS,
     GET_SELF_NAME_JS,
     INSTALL_CHAT_OBSERVER_JS,
@@ -1238,6 +1240,17 @@ class AttachAdapter(MeetingConnector):
         full_message = (
             f"{self._reply_prefix}{message}" if self._reply_prefix else message
         )
+        # Google Chat space embed: send through the OOPIF's CDP target — the
+        # in-page textarea path doesn't exist there. No data-message-id
+        # readback (returns None → caller's text-match dedup handles the bot's
+        # own message, same as the classic timeout fallback; the read path
+        # strips self._reply_prefix so it isn't re-dispatched).
+        if self._chat_surface == "iframe":
+            if self._iframe_send(full_message):
+                log.info(f"AttachAdapter: chat sent (iframe): {full_message!r}")
+            else:
+                log.warning(f"AttachAdapter: iframe send failed: {full_message!r}")
+            return None
         self._ensure_chat_open(page)
         try:
             pre_ids = set(page.evaluate(SNAPSHOT_MESSAGE_IDS_JS))
@@ -1682,33 +1695,73 @@ class AttachAdapter(MeetingConnector):
                 return t.get("webSocketDebuggerUrl")
         return None
 
+    def _ensure_iframe_cdp(self):
+        """Return a connected CDPTarget for the Google Chat OOPIF, or None.
+
+        Discovers the target + connects + enables Runtime on first use. The
+        target id rotates on panel close/reopen, so callers that hit a
+        transport error should _close_iframe_cdp() and call again to
+        re-discover.
+        """
+        if self._iframe_cdp is not None:
+            return self._iframe_cdp
+        ws_url = self._discover_gchat_target_ws()
+        if not ws_url:
+            return None
+        try:
+            cdp = CDPTarget(ws_url)
+            cdp.connect()
+            cdp.call("Runtime.enable")
+        except CDPError as e:
+            log.debug(f"AttachAdapter: iframe CDP connect failed: {e}")
+            self._close_iframe_cdp()
+            return None
+        self._iframe_cdp = cdp
+        return cdp
+
     def _iframe_evaluate(self, arrow_fn_src):
         """Evaluate JS in the Google Chat OOPIF via its CDP target websocket.
 
-        Lazily (re)connects self._iframe_cdp. On any transport failure the
-        connection is dropped + the target re-discovered + retried once
-        (the target id rotates on panel close/reopen). Returns the JS value,
-        or None if the iframe can't be reached.
+        On transport failure the connection is dropped + the target
+        re-discovered + retried once. Returns the JS value, or None if the
+        iframe can't be reached.
         """
-        for attempt in (1, 2):
-            if self._iframe_cdp is None:
-                ws_url = self._discover_gchat_target_ws()
-                if not ws_url:
-                    return None
-                try:
-                    self._iframe_cdp = CDPTarget(ws_url)
-                    self._iframe_cdp.connect()
-                    self._iframe_cdp.call("Runtime.enable")
-                except CDPError as e:
-                    log.debug(f"AttachAdapter: iframe CDP connect failed: {e}")
-                    self._close_iframe_cdp()
-                    continue
+        for _attempt in (1, 2):
+            cdp = self._ensure_iframe_cdp()
+            if cdp is None:
+                return None
             try:
-                return self._iframe_cdp.evaluate(arrow_fn_src)
+                return cdp.evaluate(arrow_fn_src)
             except CDPError as e:
-                log.debug(f"AttachAdapter: iframe CDP evaluate failed (attempt {attempt}): {e}")
+                log.debug(f"AttachAdapter: iframe CDP evaluate failed: {e}")
                 self._close_iframe_cdp()
         return None
+
+    def _iframe_send(self, text):
+        """Post `text` into the Google Chat OOPIF. Returns True on success.
+
+        Insert via GCHAT_INSERT_JS (execCommand + InputEvent — preserves the
+        emoji prefix and enables Google's Send button), then poll-click Send
+        until it enables. Retries once on transport failure with a fresh
+        connection.
+        """
+        for _attempt in (1, 2):
+            cdp = self._ensure_iframe_cdp()
+            if cdp is None:
+                return False
+            try:
+                if cdp.evaluate(GCHAT_INSERT_JS, text) is not True:
+                    return False
+                # Send enables once the editor registers the inserted text.
+                for _ in range(20):
+                    if cdp.evaluate(GCHAT_CLICK_SEND_JS) is True:
+                        return True
+                    time.sleep(0.05)
+                return False
+            except CDPError as e:
+                log.debug(f"AttachAdapter: iframe send failed: {e}")
+                self._close_iframe_cdp()
+        return False
 
     def _close_iframe_cdp(self):
         if self._iframe_cdp is not None:

@@ -98,10 +98,25 @@ def test_read_classic_still_applies_spaces_filter():
     print("  read classic applies spaces/ filter: PASS")
 
 
+def test_send_routes_to_iframe_when_surface_iframe():
+    a = AttachAdapter()
+    a._reply_prefix = "[BOT] "
+    a._chat_surface = "iframe"
+    a._iframe_send = MagicMock(return_value=True)
+    page = MagicMock()
+    out = a._do_send_chat(page, "hello there")
+    # iframe send is used, with the prefix applied; classic textarea is NOT touched
+    a._iframe_send.assert_called_once_with("[BOT] hello there")
+    assert out is None, "iframe send returns None (text-match dedup fallback)"
+    assert not page.locator.called, "classic textarea path must not run for iframe"
+    print("  send routes to iframe + applies prefix: PASS")
+
+
 if __name__ == "__main__":
     print("Google Chat iframe observer wiring tests:")
     test_install_selects_iframe_surface()
     test_install_selects_classic_surface()
     test_read_drains_from_iframe_and_bypasses_spaces_filter()
     test_read_classic_still_applies_spaces_filter()
+    test_send_routes_to_iframe_when_surface_iframe()
     print("\nAll tests passed.")

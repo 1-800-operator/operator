@@ -162,14 +162,22 @@ class CDPTarget:
                 return msg.get("result", {})
             # Events (no id) and responses to other ids are ignored.
 
-    def evaluate(self, arrow_fn_src: str):
+    _UNSET = object()
+
+    def evaluate(self, arrow_fn_src: str, arg=_UNSET):
         """Evaluate an arrow-function source in the target and return its value.
 
-        The chat_dom_js constants are all `() => {...}` sources; we wrap them
-        as an IIFE so Runtime.evaluate runs them.
+        The chat_dom_js constants are `() => {...}` (no-arg) or `(x) => {...}`
+        (one-arg) sources; we wrap them as an IIFE so Runtime.evaluate runs
+        them. When `arg` is supplied it's JSON-encoded into the call so the
+        value (e.g. a chat message with quotes/emoji) crosses safely.
         """
+        if arg is CDPTarget._UNSET:
+            expr = f"({arrow_fn_src})()"
+        else:
+            expr = f"({arrow_fn_src})({json.dumps(arg)})"
         res = self.call(
             "Runtime.evaluate",
-            {"expression": f"({arrow_fn_src})()", "returnByValue": True},
+            {"expression": expr, "returnByValue": True},
         )
         return res.get("result", {}).get("value")

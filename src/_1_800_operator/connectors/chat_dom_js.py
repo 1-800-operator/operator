@@ -130,6 +130,51 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
 OBSERVER_ATTACHED_CHECK_JS = "() => !!window.__operatorChatObserver"
 
 
+# --- Google Chat iframe SEND path (S250) ------------------------------------
+# Sending into the space embed: focus + clear the contenteditable, then the
+# Python side types the text via CDP Input.insertText (the real input
+# pipeline — execCommand insertText puts text in visually but Google's editor
+# leaves the Send button DISABLED because its synthetic event isn't
+# registered; Input.insertText enables it). Then click Send. Validated live
+# S250. The input is a div[contenteditable="true"][role="textbox"]; the Send
+# button is button[aria-label="Send message"], disabled until the editor sees
+# content.
+
+# Focus + clear the editable, insert `msg`, and notify the editor. Returns
+# true if the editable was found.
+#
+# Insertion uses execCommand('insertText') — which preserves astral-plane
+# characters like the [🤖 Claude] prefix that CDP Input.insertText drops when
+# they're embedded mid-string — followed by an explicit InputEvent dispatch.
+# Google's model-based editor leaves the Send button DISABLED on a bare
+# execCommand (it doesn't sync from raw DOM mutations); the dispatched
+# InputEvent is what makes it register the content and enable Send. Both
+# verified live S250. execCommand is deprecated but functional in Chrome 148;
+# if it ever stops, fall back to per-call CDP Input.insertText (drops embedded
+# emoji) or a paste-based path.
+GCHAT_INSERT_JS = """(msg) => {
+    const ed = document.querySelector('div[contenteditable="true"][role="textbox"]')
+            || document.querySelector('div[contenteditable="true"]');
+    if (!ed) return false;
+    ed.focus();
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+    document.execCommand('insertText', false, msg);
+    ed.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: msg}));
+    return true;
+}"""
+
+# Click Send if it's present + enabled. Returns true if clicked, false if the
+# button is missing or still disabled (caller polls — it enables once the
+# editor registers the inserted text).
+GCHAT_CLICK_SEND_JS = """() => {
+    const b = document.querySelector('button[aria-label="Send message"]');
+    if (!b || b.disabled) return false;
+    b.click();
+    return true;
+}"""
+
+
 # Drain window.__operatorChatQueue and reset it to an empty array.
 # Returns the drained list of {id, sender, text} message dicts. Safe
 # to call before the observer attaches — returns [] in that case.
