@@ -72,10 +72,17 @@ from .chat_dom_js import (
     GET_PARTICIPANT_NAMES_JS,
     GET_SELF_NAME_JS,
     INSTALL_CHAT_OBSERVER_JS,
+    INSTALL_GCHAT_OBSERVER_JS,
     INSTALL_SPEAKING_OBSERVER_JS,
     OBSERVER_ATTACHED_CHECK_JS,
     SNAPSHOT_MESSAGE_IDS_JS,
 )
+
+# A Meet attached to a Google Chat space renders chat inside a cross-origin
+# chat.google.com iframe rather than the in-page [data-panel-id] panel. We
+# detect that frame by this URL marker and install the gchat observer into
+# it instead of the classic page observer.
+_GCHAT_FRAME_MARKER = "chat.google.com"
 from .session import JoinStatus, save_debug, _is_real_meet_room
 
 
@@ -629,6 +636,11 @@ class AttachAdapter(MeetingConnector):
         self._page = None
         self._chrome_proc = None
         self._observer_installed = False
+        # Which chat surface the installed observer is watching:
+        # "classic" (in-page Meet panel) or "iframe" (Google Chat space
+        # embed). Set when the observer attaches; gates the drain target
+        # and the spaces/-id placeholder filter in _do_read_chat.
+        self._chat_surface = None
         # Browser thread + chat command queue. Playwright's sync API is
         # single-threaded by contract: only the thread that opened the
         # context may call its methods. To keep AttachAdapter safe to
@@ -740,6 +752,7 @@ class AttachAdapter(MeetingConnector):
         self._browser_alive.clear()
         self._browser_closed.clear()
         self._observer_installed = False
+        self._chat_surface = None
         self._dial_start_at = time.monotonic()
         self._meeting_entry_at = None
         # Silent-breakage detector for the speaking observer. Meet's
@@ -1274,7 +1287,14 @@ class AttachAdapter(MeetingConnector):
         # the panel is hidden). So once installed at join, we just drain.
         self._install_chat_observer(page)
         try:
-            messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
+            # Drain from whichever surface the observer attached to. The
+            # iframe queue lives on the frame's own window, so it's drained
+            # via the frame, not the page.
+            if self._chat_surface == "iframe":
+                frame = self._find_gchat_frame(page)
+                messages = frame.evaluate(DRAIN_CHAT_QUEUE_JS) if frame else []
+            else:
+                messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
             # t_drained) separately from Python-side processing (t_drained →
             # turn dispatch). Same wall clock as JS Date.now(), in ms.
@@ -1286,7 +1306,12 @@ class AttachAdapter(MeetingConnector):
             filtered = []
             for msg in messages:
                 mid = msg.get("id") or ""
-                if not mid.startswith("spaces/"):
+                # The spaces/ placeholder filter only applies to classic Meet
+                # chat, where Meet emits an optimistic placeholder id before
+                # the canonical spaces/... id. Google Chat iframe messages key
+                # on data-topic-id (e.g. "MFivfrcBGcI") — a different
+                # namespace with no placeholder phase — so don't drop them.
+                if self._chat_surface != "iframe" and not mid.startswith("spaces/"):
                     log.debug(
                         f"AttachAdapter: dropping placeholder-id message "
                         f"id={mid!r} text={msg.get('text', '')[:40]!r} "
@@ -1623,16 +1648,47 @@ class AttachAdapter(MeetingConnector):
             except Exception:
                 pass
 
+    def _find_gchat_frame(self, page):
+        """Return the live chat.google.com iframe Frame, or None.
+
+        A Meet attached to a Google Chat space renders chat inside a
+        cross-origin chat.google.com iframe; the in-page observer can't
+        reach it (same-origin policy). Re-resolved on every call rather
+        than cached — frames detach/reattach across Meet's view changes,
+        and a stale Frame handle raises on evaluate.
+        """
+        try:
+            for fr in page.frames:
+                if _GCHAT_FRAME_MARKER in (fr.url or ""):
+                    return fr
+        except Exception:
+            pass
+        return None
+
     def _install_chat_observer(self, page):
-        """Inject the chat-panel MutationObserver."""
+        """Inject the chat MutationObserver — classic panel or Chat iframe.
+
+        Prefers the Google Chat iframe when the meeting is space-attached;
+        falls back to the in-page Meet chat panel otherwise. Sets
+        _chat_surface so the drain path knows which surface to read and
+        whether the spaces/-id placeholder filter applies.
+        """
         if self._observer_installed:
             return
+        frame = self._find_gchat_frame(page)
         try:
-            page.evaluate(INSTALL_CHAT_OBSERVER_JS)
-            attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
+            if frame is not None:
+                frame.evaluate(INSTALL_GCHAT_OBSERVER_JS)
+                attached = frame.evaluate(OBSERVER_ATTACHED_CHECK_JS)
+                surface, target_desc = "iframe", "Google Chat iframe"
+            else:
+                page.evaluate(INSTALL_CHAT_OBSERVER_JS)
+                attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
+                surface, target_desc = "classic", "chat MutationObserver"
             if attached:
                 self._observer_installed = True
-                log.info("AttachAdapter: chat MutationObserver installed")
+                self._chat_surface = surface
+                log.info(f"AttachAdapter: {target_desc} installed")
                 # The observer is the first thing that lets operator notice
                 # a new @mention. Log the two latencies a participant cares
                 # about: (a) how long after the bot became visible in-call
@@ -1650,6 +1706,8 @@ class AttachAdapter(MeetingConnector):
                     )
                 if parts:
                     log.info(f"TIMING listening_ready {' '.join(parts)}")
+            elif frame is not None:
+                log.warning("AttachAdapter: Google Chat iframe observer not attached (message list not in DOM yet) — will retry next poll")
             else:
                 log.warning("AttachAdapter: chat observer not attached (textarea or panel container not in DOM) — will retry next poll")
         except Exception as e:

@@ -140,6 +140,93 @@ DRAIN_CHAT_QUEUE_JS = """() => {
 }"""
 
 
+# ---------------------------------------------------------------------------
+# Google Chat space-embed variant (S250)
+# ---------------------------------------------------------------------------
+# When a Meet is attached to a Google Chat space, Meet renders chat inside a
+# cross-origin chat.google.com iframe instead of the in-page [data-panel-id]
+# panel. The classic observer above queries the parent document and can't
+# reach it (same-origin policy). This observer is installed INTO that frame
+# via Playwright's Frame.evaluate — the frame has its own window, so it
+# reuses the same __operatorChat* globals and the same DRAIN_CHAT_QUEUE_JS /
+# OBSERVER_ATTACHED_CHECK_JS work unchanged against the frame.
+#
+# Message identity differs from classic Meet chat:
+#   - container : c-wiz[data-topic-id][data-is-user-topic="true"]
+#                 (the [data-is-user-topic] guard skips the
+#                 "firstHistoryFurniture" system node + reaction-button
+#                 nodes, which also carry data-topic-id)
+#   - id        : data-topic-id (e.g. "MFivfrcBGcI" — NOT a "spaces/..." id;
+#                 the read_chat spaces/ filter must be bypassed for these)
+#   - sender    : descendant [data-message-id][role="heading"] innerText
+#                 ("You" for the dial profile's own posts)
+#   - body      : [jsname="bgckF"] innerText
+#   - t_dom     : data-local-sort-time-msec (epoch ms — already the same
+#                 clock as classic's Date.now())
+# Selectors validated live against a space-attached meeting (S250,
+# debug probes via CDP). jsname values (bgckF) rotate ~quarterly like Meet's
+# obfuscated classes; the data-* attrs are stable. Body falls back to
+# innerText-minus-heading if the jsname rotates so a rotation degrades to a
+# slightly noisier body rather than zero capture.
+INSTALL_GCHAT_OBSERVER_JS = """() => {
+    if (window.__operatorChatObserver) return;
+    window.__operatorChatQueue = [];
+    window.__operatorSeenIds = new Set();
+
+    function extractMessage(topic) {
+        const id = topic.getAttribute('data-topic-id');
+        if (!id || window.__operatorSeenIds.has(id)) return null;
+        window.__operatorSeenIds.add(id);
+        let sender = '';
+        const h = topic.querySelector('[data-message-id][role="heading"]');
+        if (h) sender = (h.innerText || '').trim();
+        let text = '';
+        const bodyEl = topic.querySelector('[jsname="bgckF"]');
+        if (bodyEl) {
+            text = (bodyEl.innerText || '').trim();
+        } else {
+            // jsname rotated — fall back to topic text minus the heading leaf.
+            const full = (topic.innerText || '').trim();
+            text = h ? full.split(h.innerText).join(' ').replace(/\\s+/g, ' ').trim() : full;
+        }
+        const t = topic.getAttribute('data-local-sort-time-msec');
+        return {id: id, sender: sender, text: text,
+                t_dom: t ? parseInt(t, 10) : Date.now()};
+    }
+
+    // Seed seen IDs with existing messages so we don't re-emit history.
+    document.querySelectorAll('[data-topic-id][data-is-user-topic="true"]')
+        .forEach(t => window.__operatorSeenIds.add(t.getAttribute('data-topic-id')));
+
+    // Observe the message-list region. role=main is the chat scroller; fall
+    // back to body so a role rename still attaches (subtree:true catches the
+    // topic nodes either way).
+    const root = document.querySelector('[role="main"]') || document.body;
+    if (!root) return;
+
+    window.__operatorChatObserver = new MutationObserver(mutations => {
+        for (const mut of mutations) {
+            for (const node of mut.addedNodes) {
+                if (node.nodeType !== 1) continue;
+                if (node.matches &&
+                    node.matches('[data-topic-id][data-is-user-topic="true"]')) {
+                    const msg = extractMessage(node);
+                    if (msg) window.__operatorChatQueue.push(msg);
+                }
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('[data-topic-id][data-is-user-topic="true"]')
+                        .forEach(el => {
+                            const msg = extractMessage(el);
+                            if (msg) window.__operatorChatQueue.push(msg);
+                        });
+                }
+            }
+        }
+    });
+    window.__operatorChatObserver.observe(root, {childList: true, subtree: true});
+}"""
+
+
 # Participant name scrape via tile DOM. Meet renders one tile per
 # participant with `data-requested-participant-id`; the display name
 # lives in a `span.notranslate` leaf inside each tile. Returns a
