@@ -546,6 +546,77 @@ def _check_faster_whisper_warm() -> CheckResult:
     )
 
 
+def _check_silero_vad() -> CheckResult:
+    """Verify Silero VAD loads and runs.
+
+    Silero is bundled inside the faster-whisper package at
+    assets/silero_vad_v6.onnx and runs via onnxruntime. If faster-whisper
+    is importable but the ONNX session can't be created (corrupt asset,
+    missing onnxruntime native lib for the arch), captions will silently
+    fall back to RMS-only VAD — which is what we just spent today moving
+    away from. Surfacing this here means a user with a broken Silero
+    install sees "silero VAD: FAIL" in doctor instead of mysteriously
+    bad captions in production.
+
+    Optional check: failure doesn't fail doctor's exit code — captions
+    degrade rather than disappear.
+    """
+    if sys.platform != "darwin":
+        return CheckResult(
+            "silero VAD",
+            True,
+            "skipped (dial audio is mac-only)",
+            "",
+            optional=True,
+        )
+    try:
+        import numpy as np
+        from _1_800_operator.pipeline.audio import _get_vad, _silero_is_speech
+    except ImportError as e:
+        return CheckResult(
+            name="silero VAD",
+            ok=False,
+            detail=f"import failed: {e} — captions fall back to RMS-only VAD",
+            fix=_installer_fix(),
+            optional=True,
+        )
+    vad = _get_vad()
+    if vad is None:
+        return CheckResult(
+            name="silero VAD",
+            ok=False,
+            detail="model load failed — captions fall back to RMS-only VAD",
+            fix="reinstall operator; check ~/.cache/huggingface/ permissions",
+            optional=True,
+        )
+    # Sanity-probe: 0.5s of silence should return False.
+    try:
+        silence = np.zeros(int(0.5 * 16000), dtype=np.float32).tobytes()
+        result = _silero_is_speech(silence)
+        if result is not False:
+            return CheckResult(
+                name="silero VAD",
+                ok=False,
+                detail=f"silence probe returned {result!r} (expected False)",
+                fix="reinstall operator",
+                optional=True,
+            )
+    except Exception as e:
+        return CheckResult(
+            name="silero VAD",
+            ok=False,
+            detail=f"inference failed: {e}",
+            fix="reinstall operator",
+            optional=True,
+        )
+    return CheckResult(
+        "silero VAD",
+        True,
+        "ready (loaded + silence probe = silent)",
+        "",
+    )
+
+
 def _check_aec_binary() -> CheckResult:
     """aec3 speaker-bleed cleaner. Optional but recommended on built-in speakers."""
     binary = _aec_binary()
@@ -697,6 +768,7 @@ def run_doctor() -> int:
         checks.append(_check_microphone(probe))
         checks.append(_check_aec_binary())
         checks.append(_check_faster_whisper_warm())
+        checks.append(_check_silero_vad())
 
     print()
     print("operator doctor")

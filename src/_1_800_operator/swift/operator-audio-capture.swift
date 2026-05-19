@@ -600,19 +600,38 @@ var micSession: AVCaptureSession?
 var micConverter: AVAudioConverter?
 var micSourceFormat: AVAudioFormat?
 var currentMicDeviceUID: String?
+// Debug instrumentation for the device-swap convert -1 bug.
+var micConvertErrorCount: Int = 0
+var micCallbacksSinceLastError: Int = 0
+var micCallbacksSinceSwap: Int = 0  // reset to 0 in restartMicForCurrentDefaultInput
 
 final class MicAudioDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         micStats.callbacks += 1
+        micCallbacksSinceSwap += 1
+        // Trace the first few post-swap callbacks so we can tell if buffers
+        // are reaching the delegate at all after a device swap.
+        let postSwap = micCallbacksSinceSwap
+        if postSwap <= 5 {
+            fputs("operator-audio-capture: [M] delegate post_swap=\(postSwap)\n", stderr)
+        }
 
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            if postSwap <= 5 {
+                fputs("operator-audio-capture: [M] early-return post_swap=\(postSwap) reason=no_format_desc\n", stderr)
+            }
             return
         }
         var asbd = asbdPtr.pointee
-        guard let srcFormat = AVAudioFormat(streamDescription: &asbd) else { return }
+        guard let srcFormat = AVAudioFormat(streamDescription: &asbd) else {
+            if postSwap <= 5 {
+                fputs("operator-audio-capture: [M] early-return post_swap=\(postSwap) reason=no_srcFormat\n", stderr)
+            }
+            return
+        }
 
         // Lazy converter init OR rebuild on source-format change. The
         // listener-triggered restart can sometimes deliver a first
@@ -694,6 +713,33 @@ final class MicAudioDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         }
         if anyNonZero { micStats.nonZeroCallbacks += 1 }
 
+        // Identity-format bypass — empirically, AVAudioConverter returns
+        // paramErr (-1) with empty userInfo on the first post-swap buffer
+        // when src and target formats match exactly (e.g., Bose HFP coming
+        // up at 16kHz/1ch Float32 mid-meeting and matching our 16kHz/1ch
+        // Float32 target). Boot-path identity converters work; only the
+        // swap-path ones fail. No Apple-documented reason; route around
+        // it by skipping the converter entirely when there's no work to
+        // do. Faster too — no resampling for the identity case.
+        if srcFormat.sampleRate == targetFormat.sampleRate
+            && srcFormat.channelCount == targetFormat.channelCount
+            && srcFormat.commonFormat == targetFormat.commonFormat {
+            // Non-interleaved Float32 mono: channel 0 holds all the samples.
+            guard let chans = inputPCM.floatChannelData else { return }
+            let frames = Int(inputPCM.frameLength)
+            guard frames > 0 else { return }
+            let bytes = frames * MemoryLayout<Float32>.size
+            writeFrame(tag: TAG_MIC, payload: UnsafeRawPointer(chans[0]), length: bytes)
+            micStats.bytes += bytes
+            if micStats.callbacks <= 3 {
+                fputs("operator-audio-capture: [M] callback #\(micStats.callbacks) — \(bytes) bytes (identity bypass)\n", stderr)
+            }
+            if postSwap <= 5 {
+                fputs("operator-audio-capture: [M] identity-bypass post_swap=\(postSwap) frames=\(frames)\n", stderr)
+            }
+            return
+        }
+
         let ratio = targetFormat.sampleRate / srcFormat.sampleRate
         let outCapacity = AVAudioFrameCount(Double(inputPCM.frameLength) * ratio + 16)
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCapacity) else { return }
@@ -710,9 +756,31 @@ final class MicAudioDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             return inputPCM
         }
         if convStatus == .error {
-            fputs("operator-audio-capture: [M] convert error: \(convError?.localizedDescription ?? "?")\n", stderr)
+            micConvertErrorCount += 1
+            micCallbacksSinceLastError = 0
+            // Verbose dump on first error of a swap cycle — full NSError +
+            // converter/buffer state — so we can tell if the converter
+            // permanently broke vs got a single bad buffer.
+            if micConvertErrorCount <= 3 {
+                let e = convError
+                fputs("operator-audio-capture: [M] convert error #\(micConvertErrorCount):\n", stderr)
+                fputs("  localizedDescription: \(e?.localizedDescription ?? "?")\n", stderr)
+                fputs("  domain: \(e?.domain ?? "?")  code: \(e?.code ?? -999)\n", stderr)
+                fputs("  userInfo: \(e?.userInfo as Any)\n", stderr)
+                fputs("  srcFormat: \(srcFormat) sampleRate=\(srcFormat.sampleRate) channels=\(srcFormat.channelCount) interleaved=\(srcFormat.isInterleaved) commonFormat=\(srcFormat.commonFormat.rawValue)\n", stderr)
+                fputs("  inputPCM frameLength=\(inputPCM.frameLength) frameCapacity=\(inputPCM.frameCapacity)\n", stderr)
+                fputs("  targetFormat: \(targetFormat) sampleRate=\(targetFormat.sampleRate) channels=\(targetFormat.channelCount)\n", stderr)
+                fputs("  outBuf frameCapacity=\(outBuf.frameCapacity) frameLength=\(outBuf.frameLength)\n", stderr)
+            }
             return
         }
+        // First successful convert after an error tells us the converter
+        // recovered on its own — useful to know we don't need to rebuild.
+        if micConvertErrorCount > 0 && micCallbacksSinceLastError == 0 {
+            fputs("operator-audio-capture: [M] convert RECOVERED after \(micConvertErrorCount) error(s)\n", stderr)
+            micConvertErrorCount = 0
+        }
+        micCallbacksSinceLastError += 1
 
         let frames = Int(outBuf.frameLength)
         guard frames > 0, let chans = outBuf.floatChannelData else { return }
@@ -764,6 +832,18 @@ func buildMicSession(forDevice device: AVCaptureDevice?) -> AVCaptureSession? {
     }
     session.addOutput(output)
     session.commitConfiguration()
+    // Observe session-level runtime errors so we know if the session
+    // itself blows up (vs just convert() failing on a single buffer).
+    // Note: AVCaptureSessionWasInterrupted's reason key is iOS-only on
+    // macOS, so we don't bother with that notification.
+    NotificationCenter.default.addObserver(
+        forName: AVCaptureSession.runtimeErrorNotification,
+        object: session,
+        queue: nil
+    ) { note in
+        let err = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        fputs("operator-audio-capture: [M] AVCaptureSessionRuntimeError: domain=\(err?.domain ?? "?") code=\(err?.code ?? -999) desc=\(err?.localizedDescription ?? "?")\n", stderr)
+    }
     return session
 }
 
@@ -801,6 +881,7 @@ func restartMicForCurrentDefaultInput() {
         micSession = nil
         micConverter = nil
         micSourceFormat = nil
+        micCallbacksSinceSwap = 0
 
         // AVCaptureDevice.default(for: .audio) tracks the current system
         // default at call time, so rebuilding with `nil` picks up the new

@@ -39,15 +39,28 @@ log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 
-# VAD constants — carried verbatim from voice-preserved. Tuned against real
-# meeting audio; don't loosen without re-tuning. RMS=0.02 is the floor that
-# rejects HVAC / fan noise but catches normal speech; SILENCE_THRESHOLD=2
-# checks @ 0.5s = ~1s of trailing silence to call an utterance done;
-# MAX_DURATION=10s caps runaway utterances (long speakers get chunked).
+# VAD constants. Hybrid asymmetric design (S249, replacing voice-preserved
+# RMS-only): start utterances on (silero≥0.5 OR rms≥0.04); end utterances
+# on silero-only silence after SILENCE_THRESHOLD ticks (1.5s). When
+# silero-silence ends an utterance but rms still fires in the closing
+# window, immediately restart at that window — catches unvoiced-onset
+# words like "Three" that silero underweights. Tuning validated against
+# four 10s recordings (built-in mic speech, AirPods HFP speech, ambient
+# noise, single-speaker sentence with internal amplitude dips):
+#   - silero=0.5: standard speech-vs-not threshold
+#   - rms=0.04: above ambient noise floor (~0.025) but below partial-word
+#     RMS (~0.046). The 0.02 floor from voice-preserved triggered spurious
+#     utterances on AC/fan noise — too tight.
+#   - silence_threshold=3 @ 0.5s tick = 1.5s of silence to end. 1.0s
+#     (threshold=2) cut mid-sentence on natural pauses.
 UTTERANCE_CHECK_INTERVAL = 0.5
-UTTERANCE_SILENCE_THRESHOLD = 2
+UTTERANCE_SILENCE_THRESHOLD = 3
 UTTERANCE_MAX_DURATION = 10
-UTTERANCE_SILENCE_RMS = 0.02
+UTTERANCE_SILENCE_RMS = 0.04
+SILERO_SPEECH_THRESHOLD = 0.5
+# Silero v6 operates on 512-sample frames at 16kHz (32ms). One drain
+# (0.5s = 8000 samples) contains 15 silero frames + 320 padding samples.
+SILERO_FRAME_SAMPLES = 512
 
 # faster-whisper decoder beam. Benched at S240 against beam_size 1/3/5 on
 # the 12-utterance ground-truth set (debug/14_28_cpu_whisper_spike/
@@ -82,6 +95,15 @@ _MODEL = None
 _MODEL_LOAD_LOCK = threading.Lock()
 _MODEL_USE_LOCK = threading.Lock()
 
+# Silero VAD singleton (S249). The model is reentrant for inference per
+# upstream docs, but we serialize anyway since both legs may call into it
+# concurrently and the ONNX session is shared. Bundled as part of
+# faster-whisper at faster_whisper/assets/silero_vad_v6.onnx — we use the
+# bundled SileroVADModel wrapper rather than the standalone silero-vad pkg.
+_VAD = None
+_VAD_LOAD_LOCK = threading.Lock()
+_VAD_USE_LOCK = threading.Lock()
+
 
 def _get_model():
     """Return the shared WhisperModel, instantiating on first call.
@@ -107,6 +129,57 @@ def _get_model():
         return _MODEL
 
 
+def _get_vad():
+    """Return the shared SileroVADModel, loading on first call.
+
+    ~2MB ONNX, ~50ms to load. Returns None if onnxruntime is unavailable
+    or the bundled asset can't be located — caller falls back to RMS-only
+    VAD in that case.
+    """
+    global _VAD
+    if _VAD is not None:
+        return _VAD
+    with _VAD_LOAD_LOCK:
+        if _VAD is not None:
+            return _VAD
+        try:
+            import faster_whisper
+            from faster_whisper.vad import SileroVADModel
+            asset = os.path.join(
+                os.path.dirname(faster_whisper.__file__),
+                "assets", "silero_vad_v6.onnx",
+            )
+            _VAD = SileroVADModel(asset)
+        except Exception as e:
+            log.warning(f"_get_vad: Silero load failed ({e}) — falling back to RMS-only VAD")
+            _VAD = False  # sentinel: tried + failed
+        return _VAD if _VAD is not False else None
+
+
+def _silero_is_speech(chunk: bytes) -> bool:
+    """Run Silero on a 0.5s drain chunk. Return True if max frame prob
+    across the chunk exceeds SILERO_SPEECH_THRESHOLD.
+
+    Pads the chunk to a multiple of SILERO_FRAME_SAMPLES so the model
+    accepts it. Returns False on any internal failure — caller still has
+    the RMS branch as a safety net.
+    """
+    vad = _get_vad()
+    if vad is None:
+        return False
+    try:
+        audio = np.frombuffer(chunk, dtype=np.float32)
+        pad = (-len(audio)) % SILERO_FRAME_SAMPLES
+        if pad:
+            audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
+        with _VAD_USE_LOCK:
+            probs = vad(audio).reshape(-1)
+        return bool(probs.max() >= SILERO_SPEECH_THRESHOLD)
+    except Exception as e:
+        log.warning(f"_silero_is_speech: inference failed ({e})")
+        return False
+
+
 class AudioProcessor:
     """Per-stream audio buffer + utterance loop + Whisper STT.
 
@@ -117,10 +190,15 @@ class AudioProcessor:
     itself is module-global and serialised under _MODEL_USE_LOCK.
     """
 
-    def __init__(self):
-        # Trigger lazy model load on the construction thread. First-ever
-        # call downloads the model; subsequent constructions are cheap.
+    def __init__(self, tag: str = ""):
+        self.tag = tag
+        self._tagp = f"[{tag}] " if tag else ""
+        # Trigger lazy model loads on the construction thread. First-ever
+        # call downloads whisper (~1.5GB); subsequent constructions are
+        # cheap. Silero is bundled with faster-whisper (~2MB) and loads in
+        # ~50ms.
         _get_model()
+        _get_vad()
         # Warmup pass — one transcribe on a second of silence to JIT any
         # compute-type-specific kernels. Without this the first real
         # utterance pays the JIT cost.
@@ -135,13 +213,22 @@ class AudioProcessor:
             # until you iterate.
             for _ in segments:
                 pass
-        log.info("AudioProcessor: faster-whisper-large-v3-turbo ready")
+        log.info(f"AudioProcessor: {self._tagp}faster-whisper-large-v3-turbo ready")
         self._audio_buffer = b""
         self._audio_lock = threading.Lock()
         self.capturing = False
         # Set to a directory path to enable per-utterance WAV dumps (debug).
         self.debug_dir: str | None = None
         self._debug_seq = 0
+        # Asymmetric-VAD pending state: when a silero-detected silence
+        # closes an utterance but the closing chunk still has RMS-fire
+        # (likely an unvoiced word onset like "Three" that silero
+        # underweights), we hold that chunk over and make it the seed of
+        # the NEXT utterance. capture_next_utterance both reads and writes
+        # these — only the utterance thread touches them, so no lock needed.
+        self._pending_prefix: bytes = b""
+        self._pending_speech_detected: bool = False
+        self._pending_start_time: float | None = None
 
     def feed_audio(self, chunk: bytes) -> None:
         """Append raw PCM bytes to the buffer. Called from the helper-reader thread."""
@@ -170,50 +257,98 @@ class AudioProcessor:
         indicator. Attribution must look up "who was speaking at
         speech_start_time", not "who is speaking now."
 
-        Loops at UTTERANCE_CHECK_INTERVAL, accumulating PCM until either
-        SILENCE_THRESHOLD consecutive silent ticks (utterance done) or
-        MAX_DURATION elapsed (forced cut).
+        Loops at UTTERANCE_CHECK_INTERVAL. Hybrid asymmetric VAD (S249):
+        utterance ONSET fires on (silero≥0.5 OR rms≥0.04); utterance END
+        fires after SILENCE_THRESHOLD ticks of silero-only-silence.
+
+        Asymmetric boundary-restart: if the chunk that pushes silence_count
+        over threshold ALSO has rms-fire (silero silent + rms loud, the
+        signature of an unvoiced word onset like "Three" that silero
+        underweights), we pull that chunk out of the current utterance and
+        hold it as the seed of the NEXT utterance. This recovers content
+        that pure-Silero would lose at sentence boundaries.
         """
-        speech_detected = False
+        # Seed from any pending state left by the previous call's
+        # boundary-restart. If we were handed a prefix chunk, treat it
+        # as the start of this utterance (speech already detected).
+        speech_detected = self._pending_speech_detected
+        speech_start_time = self._pending_start_time
+        utterance_audio = self._pending_prefix
         silence_count = 0
-        utterance_audio = b""
-        speech_start_time: float | None = None
-        silence_start_time: float | None = None
+        # Track whether Silero ever called any chunk speech during this
+        # utterance. Used to silero-gate the hallucination filter — if
+        # Silero never fired, we treat short whisper outputs that match
+        # known hallucinations as artifacts and drop them. A real speaker
+        # always trips Silero somewhere, so this is a safe gate.
+        silero_ever_fired = False
+        self._pending_prefix = b""
+        self._pending_speech_detected = False
+        self._pending_start_time = None
 
         while self.capturing:
             time.sleep(UTTERANCE_CHECK_INTERVAL)
             raw = self.drain_audio_buffer()
-            if raw:
-                rms = float(np.sqrt(np.mean(np.frombuffer(raw, dtype=np.float32) ** 2)))
-                if rms >= UTTERANCE_SILENCE_RMS:
-                    if not speech_detected:
-                        speech_start_time = time.time()
-                        log.info(f"AudioProcessor: speech_first rms={rms:.4f}")
-                    speech_detected = True
-                    silence_count = 0
-                    silence_start_time = None
-                    utterance_audio += raw
-                else:
-                    if speech_detected:
-                        utterance_audio += raw
-                        silence_count += 1
-                        if silence_count == 1:
-                            silence_start_time = time.time()
-            # An empty drain means the helper produced no frames this tick
-            # (transient backpressure — TCC renegotiation, CPU pressure,
-            # whisper inference feeding back to read scheduling). It is NOT
-            # silence — bumping silence_count here would finalize mid-word
-            # utterances under any system load. Leave silence_count untouched
-            # so the countdown effectively pauses during starvation. The
-            # max-duration guard below still bounds the wait.
+            if not raw:
+                # An empty drain means the helper produced no frames this
+                # tick (transient backpressure — TCC renegotiation, CPU
+                # pressure, whisper inference feeding back to read
+                # scheduling). NOT silence — leave silence_count untouched
+                # so the countdown effectively pauses during starvation.
+                # max-duration guard still bounds the wait.
+                if speech_detected and speech_start_time is not None and time.time() - speech_start_time > UTTERANCE_MAX_DURATION:
+                    log.info(f"AudioProcessor: {self._tagp}utterance_done (max_duration)")
+                    break
+                continue
 
-            if speech_detected:
+            rms = float(np.sqrt(np.mean(np.frombuffer(raw, dtype=np.float32) ** 2)))
+            silero_speech = _silero_is_speech(raw)
+            rms_speech = rms >= UTTERANCE_SILENCE_RMS
+            hybrid_speech = silero_speech or rms_speech
+
+            if not speech_detected:
+                # Onset: either VAD firing starts the utterance.
+                if hybrid_speech:
+                    speech_detected = True
+                    speech_start_time = time.time()
+                    if silero_speech:
+                        silero_ever_fired = True
+                    log.info(
+                        f"AudioProcessor: {self._tagp}speech_first "
+                        f"rms={rms:.4f} silero={'1' if silero_speech else '0'}"
+                    )
+                    utterance_audio += raw
+                    silence_count = 0
+                # If neither fires, drop the chunk (pre-utterance silence).
+                continue
+
+            # In utterance: append audio; only silero counts toward silence.
+            utterance_audio += raw
+            if silero_speech:
+                silero_ever_fired = True
+                silence_count = 0
+            else:
+                silence_count += 1
                 if silence_count >= UTTERANCE_SILENCE_THRESHOLD:
-                    log.info("AudioProcessor: utterance_done (silence)")
+                    if hybrid_speech:
+                        # rms fired in the closing window but silero said
+                        # silent — unvoiced onset of a new utterance.
+                        # Pull this chunk out of current utt and stash it
+                        # as the seed of the next.
+                        utterance_audio = utterance_audio[:-len(raw)]
+                        self._pending_prefix = raw
+                        self._pending_speech_detected = True
+                        self._pending_start_time = time.time()
+                        log.info(
+                            f"AudioProcessor: {self._tagp}utterance_done "
+                            f"(silence + boundary-restart rms={rms:.4f})"
+                        )
+                    else:
+                        log.info(f"AudioProcessor: {self._tagp}utterance_done (silence)")
                     break
-                if speech_start_time is not None and time.time() - speech_start_time > UTTERANCE_MAX_DURATION:
-                    log.info("AudioProcessor: utterance_done (max_duration)")
-                    break
+
+            if speech_start_time is not None and time.time() - speech_start_time > UTTERANCE_MAX_DURATION:
+                log.info(f"AudioProcessor: {self._tagp}utterance_done (max_duration)")
+                break
 
         # S244: capturing=False (shutdown) exits the while loop without the
         # last 0.5s window of audio ever reaching utterance_audio. Drain one
@@ -228,12 +363,15 @@ class AudioProcessor:
                 rms = float(np.sqrt(np.mean(np.frombuffer(residual, dtype=np.float32) ** 2)))
                 # Append if we were already mid-utterance, OR if the residual
                 # itself contains speech (someone started talking right as
-                # shutdown fired).
-                if speech_detected or rms >= UTTERANCE_SILENCE_RMS:
+                # shutdown fired). Use the same hybrid speech check as the
+                # main loop so the trailing word matches what the live VAD
+                # would have caught.
+                residual_speech = _silero_is_speech(residual) or rms >= UTTERANCE_SILENCE_RMS
+                if speech_detected or residual_speech:
                     if not speech_detected:
                         speech_start_time = time.time()
                     utterance_audio += residual
-                    log.info(f"AudioProcessor: shutdown_drain captured {len(residual)}B (rms={rms:.4f})")
+                    log.info(f"AudioProcessor: {self._tagp}shutdown_drain captured {len(residual)}B (rms={rms:.4f})")
 
         if not utterance_audio:
             return "", None
@@ -247,14 +385,21 @@ class AudioProcessor:
         # (0o700/0o600); the root logger writes /tmp/operator.log with
         # default umask (0o644 → world-readable on multi-user macOS, plus
         # any sandboxed app on the box). Length counter only.
-        log.info("AudioProcessor: whisper_done (%d chars)", len(text or ""))
+        log.info(f"AudioProcessor: {self._tagp}whisper_done ({len(text or '')} chars)")
         if not text:
             return "", None
-        if text.lower() in WHISPER_HALLUCINATIONS:
-            log.info("AudioProcessor: dropped (silence hallucination)")
+        # Silero-gated hallucination filter: only drop matching short
+        # outputs when Silero never said yes during the utterance. Real
+        # participants saying "thank you" always trip Silero somewhere;
+        # phantom whisper-on-noise outputs don't. Stripping trailing
+        # punctuation lets us match against the bare-word entries in the
+        # list (whisper adds periods to clean short outputs).
+        normalized = text.lower().rstrip(".!?,;: ")
+        if not silero_ever_fired and normalized in WHISPER_HALLUCINATIONS:
+            log.info(f"AudioProcessor: {self._tagp}dropped (silence hallucination, silero=0)")
             return "", None
         if self._is_repetition_hallucination(text):
-            log.info("AudioProcessor: dropped (repetition hallucination)")
+            log.info(f"AudioProcessor: {self._tagp}dropped (repetition hallucination)")
             return "", None
         return text, speech_start_time
 
@@ -276,10 +421,10 @@ class AudioProcessor:
                 wf.setsampwidth(2)
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(data_int16.tobytes())
-            log.info(f"AudioProcessor: debug WAV → {path} ({len(data)} samples)")
+            log.info(f"AudioProcessor: {self._tagp}debug WAV → {path} ({len(data)} samples)")
             return path
         except Exception as e:
-            log.warning(f"AudioProcessor: debug WAV write failed: {e}")
+            log.warning(f"AudioProcessor: {self._tagp}debug WAV write failed: {e}")
             return None
 
     @staticmethod

@@ -89,8 +89,17 @@ class WhisperWorker:
         self._recent_s_lock = threading.Lock()
 
         # AudioProcessors — whisper model loads inside the first call.
-        self.s_proc = AudioProcessor()
-        self.m_proc = AudioProcessor()
+        self.s_proc = AudioProcessor(tag="S")
+        self.m_proc = AudioProcessor(tag="M")
+        # Debug: dump every utterance to ~/.operator/debug/audio_<ts>/{S,M}/
+        # so we can listen to what each leg actually captured. Off by default;
+        # set OPERATOR_AUDIO_DEBUG=1 to enable.
+        if os.environ.get("OPERATOR_AUDIO_DEBUG") == "1":
+            import time as _t
+            base = os.path.expanduser(f"~/.operator/debug/audio_{int(_t.time())}")
+            self.s_proc.debug_dir = os.path.join(base, "S")
+            self.m_proc.debug_dir = os.path.join(base, "M")
+            log.info(f"whisper_worker: audio debug dumps enabled → {base}")
         # Both legs need capturing=True before their utterance threads start
         # or they exit on the first iteration.
         self.s_proc.capturing = True
