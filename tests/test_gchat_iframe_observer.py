@@ -98,6 +98,59 @@ def test_read_classic_still_applies_spaces_filter():
     print("  read classic applies spaces/ filter: PASS")
 
 
+def test_reply_prefix_re_emoji_tolerant():
+    """The matcher holds whether or not the 🤖 emoji survived DOM render.
+
+    The iframe surface drops the emoji on read-back ('[🤖 Claude] ' →
+    '[ Claude] '), which is what triggered the live S250 echo loop.
+    """
+    rx = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
+    assert rx.match("[🤖 Claude] Standing by.")  # emoji intact (classic)
+    assert rx.match("[ Claude] Standing by.")    # emoji dropped (iframe — observed)
+    assert rx.match("[🤖 Claude] ")              # bare prefix
+    # Must NOT swallow ordinary participant messages.
+    assert not rx.match("hey @claude what's up")
+    assert not rx.match("Claude is great")
+    assert not rx.match("[note] see above")
+    assert AttachAdapter._compile_reply_prefix_re("") is None
+    print("  reply-prefix regex emoji-tolerant: PASS")
+
+
+def test_iframe_drops_own_echo():
+    """Iframe read path drops the bot's own reply even with the emoji gone.
+
+    Without this the bot re-reads '[ Claude] Standing by.' (sender 'You')
+    as a fresh message and loops on itself."""
+    own_echo = {"id": "MFivfrcBGcI", "sender": "You",
+                "text": "[ Claude] Standing by.", "t_dom": 1779226033229}
+    user_msg = {"id": "MFivfrcBGcJ", "sender": "Alice",
+                "text": "@claude hello", "t_dom": 1779226033230}
+    a = _iframe_adapter(drain_return=[own_echo, user_msg])
+    a._reply_prefix = "[🤖 Claude] "
+    a._reply_prefix_re = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
+    msgs = a._do_read_chat(_make_page(drain_return=[]))
+    texts = [m["text"] for m in msgs]
+    assert texts == ["@claude hello"], f"own echo not dropped: {texts}"
+    print("  iframe drops own echo: PASS")
+
+
+def test_classic_strips_own_prefix_not_drops():
+    """Classic surface keeps strip-and-forward (its msg-id dedup is primary),
+    and the strip is now emoji-tolerant too."""
+    own_echo = {"id": "spaces/AAA/messages/BBB", "sender": "You",
+                "text": "[🤖 Claude] Standing by.", "t_dom": 2}
+    a = AttachAdapter()
+    a._discover_gchat_target_ws = MagicMock(return_value=None)
+    a._reply_prefix = "[🤖 Claude] "
+    a._reply_prefix_re = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
+    page = _make_page(drain_return=[own_echo])
+    msgs = a._do_read_chat(page)
+    assert a._chat_surface == "classic"
+    assert len(msgs) == 1, f"classic should forward (stripped), not drop: {msgs}"
+    assert msgs[0]["text"] == "Standing by.", f"prefix not stripped: {msgs[0]['text']!r}"
+    print("  classic strips own prefix (not drop): PASS")
+
+
 def test_send_routes_to_iframe_when_surface_iframe():
     a = AttachAdapter()
     a._reply_prefix = "[BOT] "
@@ -118,5 +171,8 @@ if __name__ == "__main__":
     test_install_selects_classic_surface()
     test_read_drains_from_iframe_and_bypasses_spaces_filter()
     test_read_classic_still_applies_spaces_filter()
+    test_reply_prefix_re_emoji_tolerant()
+    test_iframe_drops_own_echo()
+    test_classic_strips_own_prefix_not_drops()
     test_send_routes_to_iframe_when_surface_iframe()
     print("\nAll tests passed.")

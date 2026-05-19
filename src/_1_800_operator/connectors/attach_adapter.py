@@ -595,6 +595,7 @@ class AttachAdapter(MeetingConnector):
     def __init__(self, reply_prefix: str = "", jsonl_path: "str | Path | None" = None):
         super().__init__()
         self._reply_prefix = reply_prefix
+        self._reply_prefix_re = self._compile_reply_prefix_re(reply_prefix)
         # Path to the meeting JSONL. When provided, audio captions land in
         # the JSONL via the whisper_worker subprocess (S244 — drain decoupled
         # from main shutdown). When None, falls back to the legacy in-process
@@ -1274,6 +1275,31 @@ class AttachAdapter(MeetingConnector):
             log.warning(f"AttachAdapter: send_chat failed: {e}")
             return None
 
+    @staticmethod
+    def _compile_reply_prefix_re(prefix: str):
+        """Build an emoji-tolerant regex matching the reply prefix at line start.
+
+        send_chat prepends self._reply_prefix ('[🤖 Claude] '). The Google
+        Chat iframe surface drops the 🤖 emoji when the DOM is read back, so
+        the bot's own reply returns as '[ Claude] …'. A literal
+        str.startswith(prefix) check misses that, the bot re-reads its own
+        words as a fresh 'You' message, and an echo loop kicks off (observed
+        live S250). Make each non-ASCII char in the prefix optional and runs
+        of whitespace flexible so the match holds whether or not the emoji
+        survived rendering. Returns None when there is no prefix.
+        """
+        if not prefix:
+            return None
+        parts = []
+        for ch in prefix:
+            if ch.isspace():
+                parts.append(r"\s*")
+            elif not ch.isascii():
+                parts.append(re.escape(ch) + "?")
+            else:
+                parts.append(re.escape(ch))
+        return re.compile("^" + "".join(parts))
+
     def _do_read_chat(self, page):
         """Browser-thread implementation. Drains the JS-side chat queue.
 
@@ -1349,11 +1375,26 @@ class AttachAdapter(MeetingConnector):
                 msg["t_drained"] = t_drained_ms
                 filtered.append(msg)
             messages = filtered
-            if self._reply_prefix and messages:
+            # Keep the bot's own replies out of the dispatch stream.
+            # send_chat prepends self._reply_prefix; _reply_prefix_re matches
+            # it emoji-tolerantly (the iframe surface drops the 🤖). The
+            # iframe surface returns no data-message-id (see _do_send_chat),
+            # so this prefix match is its ONLY echo defense — own replies are
+            # dropped outright. The downstream text-match dedup can't save it:
+            # Meet labels own messages 'You', and that fallback is gated on an
+            # empty sender. The classic surface strips-and-forwards as before
+            # (its message-id dedup is primary), now via the same regex so an
+            # emoji-drop there can't reintroduce the loop.
+            if self._reply_prefix_re and messages:
+                kept = []
                 for msg in messages:
-                    text = msg.get("text", "")
-                    if text.startswith(self._reply_prefix):
-                        msg["text"] = text[len(self._reply_prefix):]
+                    m = self._reply_prefix_re.match(msg.get("text", "") or "")
+                    if m:
+                        if self._chat_surface == "iframe":
+                            continue  # bot's own echo — drop it entirely
+                        msg["text"] = msg["text"][m.end():]
+                    kept.append(msg)
+                messages = kept
             return messages
         except Exception as e:
             log.warning(f"AttachAdapter: read_chat failed: {e}")
