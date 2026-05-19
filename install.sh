@@ -194,7 +194,11 @@ if command -v claude >/dev/null 2>&1; then
   # because remove/uninstall raise when the target doesn't exist.
   claude plugin uninstall operator </dev/null >/dev/null 2>&1 || true
   claude plugin marketplace remove 1-800-operator </dev/null >/dev/null 2>&1 || true
-  if claude plugin marketplace add 1-800-operator/operator </dev/null >/dev/null; then
+  # Use explicit HTTPS URL (not the `owner/repo` shorthand) so the
+  # marketplace clone doesn't fall back to SSH on machines without
+  # GitHub SSH keys. New users without a configured ssh identity were
+  # hitting `git@github.com: Permission denied (publickey)` here.
+  if claude plugin marketplace add https://github.com/1-800-operator/operator.git </dev/null >/dev/null; then
     if claude plugin install operator@1-800-operator </dev/null >/dev/null; then
       info "Installed operator plugin (user-scope). Slash commands /operator:* are now available in Claude Code."
     else
