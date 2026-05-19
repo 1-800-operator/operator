@@ -1,5 +1,15 @@
 # Operator — Roadmap
 
+## Post-launch
+
+Items deferred until after launch — not blocking, parked here so they
+don't keep accreting in current open-items lists.
+
+- **H-23 AEC pre-shift hardcoded for built-in speakers** (renumbered H-8 in `docs/launch-audit-findings.md:849`). AEC's 150ms pre-shift compensates for SCStream's 63ms output-buffer skew on built-in laptop speakers, but is wrong for headphones (different device latency, reference signal misaligned). Recommended config (headphones) still works *good enough* unaided; built-in-speakers users get degraded AEC. Multi-session scope: probe each output device's actual latency via CoreAudio + refactor the Rust AEC binary's stdin protocol to accept dynamic device latency.
+- **A3 promotion candidates + duplication cleanup** (S241 carry). Audit 3 tabulated 110 numeric constants across all 8 components; only 5 live in `config.py`. ~9 strong promotion candidates already pre-comment-blocked in-source with rationale (5 chat_runner + 3 claude_cli + `CDP_READY_TIMEOUT_SECONDS`). Plus 7 documented duplications (bracketed-paste timings across classifier/claude_cli, audio frame protocol across aec_cleaner/attach_adapter, faster-whisper config across audio/doctor, the 120s permreq timeout ↔ 125s safety ceiling pair, `/tmp/operator.log` 3-site path, `~/.operator/bin/Operator.app/...` 3-site path, `_FAILURE_PTY_TAIL_MAX=2000` ↔ `_pty_tail n_bytes=2000`). Pure code hygiene — single source of truth for tunable knobs.
+
+---
+
 *Last updated: May 18, 2026 (session 245 — doctor MCP-registration check + dual-target installer fix lines + briefing tab-close awareness; plugin v0.1.24 SKILL copy rewrite scrubbing "guarded mode" wording and selling slip-yolo as the goal mode). Two commits on operator-main pushed to both remotes: `043269e S245: doctor MCP-registration check + briefing tab-close awareness` and `a43403b marketplace: bump operator-plugin to v0.1.24`. operator-plugin v0.1.24 tagged + pushed. Local marketplace cache pulled; desktop app updated from v0.1.22 → v0.1.24 (restart required to pick up new copy).*
 
 **Doctor MCP-registration check (S245).** New `_check_meeting_record_mcp` in `src/_1_800_operator/pipeline/doctor.py` — verifies that `operator-meeting-record` is registered with claude (parses `claude mcp list` for the `✓ Connected` status) AND that `mcp__operator-meeting-record__*` is present in `~/.claude/settings.json`'s `permissions.allow`. Catches two silent failure modes that today only surface mid-meeting: uv-tool path rot after a reinstall (registration exists but points at a now-gone python path → `✗ Failed to connect`) and profile-move asymmetry between machines (settings.json travels easily; the MCP registration in `~/.claude.json` rarely does). Single CheckResult covers both halves; fix in either case routes through `_installer_fix`. Closes the S243 PM carry. 7 new test cases in `tests/test_doctor.py`; 16/16 doctor tests green.
@@ -24,11 +34,7 @@
 
 **Validation.** Five spikes upfront (drain timing, O_APPEND concurrency, detached-child survival, worker E2E, AttachAdapter↔worker integration) all green. Live wiretap + live slip meetings validated end-to-end: trailing mid-sentence utterance captured, single meeting_end seal, sub-second main exit, ~3-7s worker drain in the background, same-link reconnect appends to existing JSONL with clean per-session seals. 20 test files green.
 
-**Carry forward (post-S245):**
-- **Live-validate worker respawn** — coded but no live test that kills a running worker mid-meeting to confirm replay actually works.
-- **Worker-spawn-failure path not tested** — could spike by temporarily breaking the worker entrypoint.
-- **H-23 AEC** (multi-session scope).
-- **Option B fallback (S245)** — if the briefing tab-close paragraph ever degrades in practice (claude still confabulates duplicates across reconnects), the next-tier fix is on-shutdown injection of a "[SYSTEM] Meeting <slug> ended" turn into the shared session before SIGTERM, so resumed claude reads explicit closure rather than relying on a prompt to compensate for missing signal. Not building until briefing-only proves insufficient.
+**Carry forward (post-S245):** all resolved in S246 — live-validated worker respawn (3ms detect → 9s warmup → captions resumed); shipped respawn circuit breaker for the spawn-storm case (commit `45d9ddf`); H-23 AEC moved to post-launch section; Option B fallback retired (Option A held).
 
 *Previously (session 243 evening — startup-latency optimization + reply-latency observability + plugin v0.1.22 SKILL prose softening).*
 

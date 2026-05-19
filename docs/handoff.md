@@ -32,25 +32,14 @@ updated 0.1.22 → 0.1.24 + user restarted.
 
 ## Exact next step
 
-No required next step. Optional pickups in priority order:
-**Live-validate worker respawn** (S244 carry — kill the worker pid
-mid-meeting via `kill <pid>` while someone is speaking; expect
-"whisper_worker (pid=X) died mid-meeting — respawning" + captions
-resume on the new worker).
+No required next step. User QAs the install + permissions flow
+tonight on a fresh machine (S237 carry) and runs through
+`docs/qa-monday.md` during Monday's meeting.
 
 ## Open items / blockers
 
-- **Live-validate worker respawn** (S244 carry).
-- **Worker-spawn-failure path not tested** (S244 carry).
-- **Option B fallback (S245)** — if the briefing tab-close fix
-  ever degrades, the next-tier fix is on-shutdown injection of a
-  `[SYSTEM] Meeting <slug> ended` turn into the shared session
-  before SIGTERM. Not building until briefing-only proves
-  insufficient.
-- **TCC warmup on a fresh user account** (S237 carry).
-- **A3 promotion candidates + duplication cleanup** (S241 carry).
-- **H-23 AEC** (multi-session scope).
-- **QA items the user is updating async** in `docs/qa-monday.md`.
+- **TCC warmup on a fresh user account** (S237 carry) — user installing on new machine tonight to QA everything.
+- **QA items the user is updating async** in `docs/qa-monday.md` (now includes the audio.py drain check).
 
 ## Working-tree state
 

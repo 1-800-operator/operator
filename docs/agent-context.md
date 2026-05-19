@@ -36,12 +36,8 @@ Audit grep confirmed zero remaining "guarded mode" mentions in user-facing skill
 **Final session state.** Both commits pushed to `origin` (dufis1) and `public` (1-800-operator). Plugin v0.1.24 live in the desktop app. Pre-existing modifications (`docs/handoff.md`, `debug/14_22_pty_spike/bench/state/replies.jsonl`) and pre-existing untracked debug artifacts left alone.
 
 **Next:**
-- **Live-validate worker respawn** (S244 carry) — no test that killed a running worker.
-- **Worker-spawn-failure path not tested** (S244 carry).
-- **H-23 AEC** deferred — multi-session scope.
-- **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).
-- **TCC warmup on a fresh user account** (S237 carry).
-- **Option B fallback (S245)** — if the briefing tab-close paragraph degrades in practice, the next-tier fix is on-shutdown injection of a `[SYSTEM] Meeting <slug> ended` turn into the shared session before SIGTERM. Not building until briefing-only proves insufficient.
+- **TCC warmup on a fresh user account** (S237 carry) — user installing on new machine tonight to QA everything.
+- **QA items in `docs/qa-monday.md`** (now includes the audio.py drain check from the S244 carry).
 
 ---
 
