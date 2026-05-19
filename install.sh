@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.29}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.30}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -371,7 +371,28 @@ if [ "${OS}" = "macos" ]; then
       # validation (mic granted cleanly; screen recording hit Apple's
       # post-deny cooldown only because the test env was over-cycled).
       HELPER_BIN="${INSTALLED_APP}/Contents/MacOS/Operator"
-      PROBE_BEFORE="$("${HELPER_BIN}" --probe 2>/dev/null || echo '{}')"
+      # Probe via _disclaimed_spawn so TCC attribution resolves to Operator.app
+      # itself, not to the parent terminal/IDE through bash's responsibility
+      # chain. Without disclaim, AVCaptureDevice.authorizationStatus and
+      # CGPreflightScreenCaptureAccess answer against the responsible-process
+      # chain and the probe lies — reporting "denied" even when System
+      # Settings shows the helper as granted (see memory:
+      # project_tcc_responsibility_chain_attribution.md).
+      probe_helper() {
+        "${PY_IN_TOOL}" - <<PYEOF 2>/dev/null
+import sys
+try:
+    from _1_800_operator.pipeline._disclaimed_spawn import spawn_disclaimed, minimal_helper_env
+    p = spawn_disclaimed(["${HELPER_BIN}", "--probe"], env=minimal_helper_env())
+    out = p.stdout.read(4096).decode("utf-8", errors="replace").strip() if p.stdout else ""
+    p.wait(timeout=5)
+    print(out)
+except Exception:
+    print("{}")
+PYEOF
+      }
+      PROBE_BEFORE="$(probe_helper)"
+      [ -z "${PROBE_BEFORE}" ] && PROBE_BEFORE='{}'
       if echo "${PROBE_BEFORE}" | grep -q '"screen_recording":"ok"' \
         && echo "${PROBE_BEFORE}" | grep -q '"microphone":"ok"'; then
         info "Audio permissions already granted (Screen Recording + Microphone)"
@@ -386,7 +407,8 @@ if [ "${OS}" = "macos" ]; then
         # a fresh instance even if a stale one is around. 2>/dev/null
         # suppresses a benign Launch Services warning some setups emit.
         open -W -n -a "${INSTALLED_APP}" 2>/dev/null || true
-        PROBE_AFTER="$("${HELPER_BIN}" --probe 2>/dev/null || echo '{}')"
+        PROBE_AFTER="$(probe_helper)"
+        [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
         if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' \
           && echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
           info "✓ Audio permissions granted (Screen Recording + Microphone)"
