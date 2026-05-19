@@ -273,22 +273,24 @@ def test_queueing_serializes_concurrent_requests():
     print("  queueing: serializes one question at a time: OK")
 
 
-def test_skips_self_messages_via_sender_match():
+def test_same_named_participant_can_answer_permreq():
+    # The permreq path no longer filters by sender name. A participant whose
+    # display name happens to match the bot's (the S250 name-collision bug)
+    # must still be able to answer. The bot's own echoes are filtered upstream
+    # by reply-prefix in the connector's read path, so they never reach here.
     classifier = FakeClassifier(verdict=True)
     runner = make_runner(classifier=classifier)
     req, _ = make_req()
     runner._on_permission_request(req)
-    # Bot's own outgoing posts come back through read_chat tagged with
-    # the bot's sender name — must be filtered out so the classifier
-    # never sees them.
     runner._connector.chat_messages = [
-        {"id": "echo-1", "sender": config.AGENT_NAME, "text": "yes"}
+        {"id": "ans-1", "sender": config.AGENT_NAME, "text": "yes"}
     ]
     runner._check_permreq_chat_for_answer()
-    assert classifier.calls == [], classifier.calls
-    assert runner._permreq_active is req, "self-echo should not resolve permreq"
-    assert not req["answer_path"].exists()
-    print("  self-message filter: own echoes don't reach classifier: OK")
+    assert classifier.calls == [("yes", req["_question_text"], [])], classifier.calls
+    assert req["answer_path"].exists(), "same-named participant's reply should resolve permreq"
+    assert json.loads(req["answer_path"].read_text()) == {"behavior": "allow"}
+    assert runner._permreq_active is None
+    print("  same-named participant can answer permreq: OK")
 
 
 def test_pre_existing_chat_does_not_count_as_answer():
@@ -395,7 +397,7 @@ if __name__ == "__main__":
         test_chatter_classified_first_then_resolved,
         test_safety_timeout_clears_active_without_writing_answer,
         test_queueing_serializes_concurrent_requests,
-        test_skips_self_messages_via_sender_match,
+        test_same_named_participant_can_answer_permreq,
         test_pre_existing_chat_does_not_count_as_answer,
         test_send_failure_resolves_with_deny,
         test_question_truncation_for_long_inputs,

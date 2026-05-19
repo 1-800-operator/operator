@@ -172,9 +172,10 @@ class ChatRunner:
         # can inject mocks.
         self._classifier = permission_classifier
         self._stop_event = threading.Event()
-        # Track messages we've sent so we can ignore our own echoes
-        self._own_messages: set[str] = set()
-        # Track message IDs we've already processed
+        # Track message IDs we've already processed (dedups repeat reads of the
+        # same message across polls). The bot's own replies are filtered by the
+        # reply-prefix in the connector's read path, not here — see
+        # AttachAdapter._do_read_chat / _own_prefixes.
         self._seen_ids: set[str] = set()
         # Per-turn heartbeat. Set in _handle_message, drained in
         # _dispatch_result on the terminal text branches. None means
@@ -199,9 +200,7 @@ class ChatRunner:
         # single-threaded by contract; the streaming-paragraph callback
         # (provider pump thread) and the main poll loop both call _send,
         # so concurrent connector.send_chat would race. The lock also
-        # keeps _own_messages add + send_chat + record append atomic,
-        # which prevents a partial-state observer from the read loop
-        # seeing one without the other.
+        # keeps send_chat + record append atomic.
         self._send_lock = threading.Lock()
         # Loop-state. Promoted to self.* (vs. _loop locals) so the
         # _check_participant_state / _process_messages helpers can read+mutate
@@ -233,17 +232,6 @@ class ChatRunner:
         # been attempted. So: say it once, then go quiet — repeated
         # @mentions after the latch are logged but never re-narrated.
         self._claude_unavailable_announced = False
-
-        # Cached connector self-name (the local Meet tile's display
-        # name). Resolved lazily on the first message tick where the
-        # browser is alive. SECURITY: own-message filtering compares
-        # against THIS, not against a hardcoded "Claude" string — a
-        # participant who spoofs their display name to "Claude" would
-        # otherwise have every message they send silently dropped,
-        # including any "no" reply to a permreq. The local tile's
-        # display name comes from the dial Chrome profile's Google
-        # session and isn't trivially spoofable by other attendees.
-        self._self_name: str | None = None
 
         # PermissionRequest round-trip state (yolo-off mode). The
         # provider tails permreq_requests.jsonl during a turn and fires
@@ -642,14 +630,13 @@ class ChatRunner:
         return False
 
     def _process_messages(self, messages):
-        """Filter out own/seen/empty messages, persist new ones to the record,
-        and dispatch them to the LLM router."""
-        # Track which own-message texts matched this batch so we can discard
-        # AFTER the full batch — Meet creates multiple DOM elements per
-        # message (different IDs, same text), so we must keep the text in
-        # the set until all duplicates are filtered.
-        own_matched = set()
+        """Filter out seen/empty messages, persist new ones to the record,
+        and dispatch them to the LLM router.
 
+        The bot's own replies are already filtered out upstream in the
+        connector's read path (by the reply-prefix — see
+        AttachAdapter._do_read_chat / _own_prefixes), so nothing here needs
+        to recognize them by sender or text."""
         for msg in messages:
             msg_id = msg.get("id", "")
             text = msg.get("text", "").strip()
@@ -663,23 +650,7 @@ class ChatRunner:
             if not text:
                 continue
 
-            # Skip our own messages. Primary path is the ID-based dedup
-            # above (msg_id added to _seen_ids by `_send`); these two checks
-            # are fallbacks for adapters that can't return an ID, or when
-            # the post-send DOM read-back timed out. Text match compares
-            # stripped strings since Meet's DOM strips trailing whitespace
-            # on render — exact-equality comparison broke session-164's
-            # stuck-LLM watchdog (`...hang tight.\n\n` sent vs `...hang
-            # tight.` read back) and triggered a self-reply cascade.
-            if self._is_self_sender(sender):
-                log.debug(f"ChatRunner: skipping own message (sender match)")
-                continue
-            if not sender and text in self._own_messages:
-                log.debug(f"ChatRunner: skipping own message (text match)")
-                own_matched.add(text)
-                continue
-
-            # Any non-self incoming message clears the `?`-driven indefinite
+            # Any incoming message clears the `?`-driven indefinite
             # window. The flag's contract is "claude is waiting for a
             # response to its question" — that wait ends on the first reply
             # from the room, regardless of whether the reply actually
@@ -716,8 +687,6 @@ class ChatRunner:
                 self._record.append(sender=sender, text=text, kind="chat")
 
             self._dispatch_user_message(text, sender=sender, t_dom=t_dom, t_drained=t_drained)
-
-        self._own_messages -= own_matched
 
     def _dispatch_user_message(self, text: str, sender: str = "", *, t_dom: int = 0, t_drained: int = 0):
         """Route a chat message to the LLM based on the runner's `mode`.
@@ -1074,22 +1043,16 @@ class ChatRunner:
         return on_paragraph
 
     def _send(self, text, kind: str = "chat", *, is_reply: bool = False):
-        """Send a chat message, append it to the meeting record, and track it as our own.
+        """Send a chat message and append it to the meeting record.
 
         `kind` is persisted to the record but filtered by `pipeline/llm.py` when
         building the LLM prompt (only `chat` and `caption` are replayed).
 
         Everything goes out through the connector's `send_chat`, which
         prepends the dial bot prefix `[🤖 Claude] ` — there is no
-        unprefixed/operator-voice send path anymore (removed S228).
-
-        Own-message dedup: primary path is by message ID — when the connector
-        returns the new `data-message-id` it captured post-send, we add it to
-        `_seen_ids` so the read path's later observation gets short-circuited
-        at the ID check. The text-match path (`_own_messages`) is the fallback
-        for adapters that can't return an ID (linux) or when the ID read-back
-        times out; we store text stripped so DOM normalization (trailing
-        newlines etc.) doesn't break the comparison.
+        unprefixed/operator-voice send path anymore (removed S228). That
+        prefix is also how the connector's read path recognizes and drops the
+        bot's own messages, so they never round-trip back as fresh input.
 
         Off-thread callers get their send enqueued instead of executed inline —
         Playwright's sync API rejects calls from any thread other than the
@@ -1106,15 +1069,12 @@ class ChatRunner:
         if threading.current_thread() is not self._main_thread:
             self._send_queue.put((text, kind, is_reply))
             return None
-        text_normalized = text.strip()
         with self._send_lock:
-            self._own_messages.add(text_normalized)
             t_send_start = time.monotonic()
             try:
                 msg_id = self._connector.send_chat(text)
             except Exception as e:
                 log.error(f"ChatRunner: send_chat failed: {e}")
-                self._own_messages.discard(text_normalized)
                 return None
             send_chat_ms = int((time.monotonic() - t_send_start) * 1000)
             # Per-turn first + max send_chat round-trip into self._turn_timing.
@@ -1316,15 +1276,13 @@ class ChatRunner:
                 continue  # was already visible when we posted the question
             if msg_id and msg_id in self._seen_ids:
                 continue  # already routed elsewhere
-            # Skip our own messages (sender filter + text-match fallback).
-            if self._is_self_sender(sender):
-                continue
-            if not sender and text in self._own_messages:
-                continue
+            # The bot's own messages were already dropped in the connector's
+            # read path (by reply-prefix), so any message here is a real
+            # participant reply.
 
-            # First non-self, post-question reply — this is the answer
-            # candidate. Mark seen so _loop's _process_messages won't
-            # re-route it as a new @claude trigger after the turn ends.
+            # First post-question reply — this is the answer candidate. Mark
+            # seen so _loop's _process_messages won't re-route it as a new
+            # @claude trigger after the turn ends.
             if msg_id:
                 self._seen_ids.add(msg_id)
             # Persist to the meeting record so the audit trail reflects
@@ -1442,33 +1400,6 @@ class ChatRunner:
         # back of an unrelated `?`-driven indefinite continuation window.
         self._last_reply_had_question = False
         self._post_next_permreq()
-
-    def _is_self_sender(self, sender) -> bool:
-        """True iff `sender` is the local Meet tile's display name.
-
-        SECURITY: this is the own-message dedup gate. It was previously a
-        hardcoded compare against config.AGENT_NAME ("Claude"), which let
-        any attendee silently mute themselves (and weaponise the mute by
-        guaranteeing only their accomplice's permreq reply reached the
-        classifier) by setting their Meet display name to "Claude". The
-        connector-authoritative self-name is read lazily on first call
-        (the browser must be alive — a tick will have happened) and
-        cached. If the scrape fails (DOM shape changed, etc.), this
-        returns False and we fall back to the ID-based _seen_ids dedup
-        and the text-match _own_messages fallback elsewhere.
-        """
-        if not sender:
-            return False
-        if self._self_name is None:
-            try:
-                n = self._connector.get_self_name()
-            except Exception:
-                n = ""
-            if n:
-                self._self_name = n.strip()
-        if not self._self_name:
-            return False
-        return sender.strip().lower() == self._self_name.lower()
 
     def _format_permreq_question(self, req):
         """Build the chat post for a permission question.

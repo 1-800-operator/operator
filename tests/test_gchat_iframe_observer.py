@@ -98,22 +98,29 @@ def test_read_classic_still_applies_spaces_filter():
     print("  read classic applies spaces/ filter: PASS")
 
 
-def test_reply_prefix_re_emoji_tolerant():
-    """The matcher holds whether or not the 🤖 emoji survived DOM render.
+def _own_prefixes(prefix="[🤖 Claude] "):
+    """Mirror AttachAdapter.__init__'s _own_prefixes derivation."""
+    return tuple(dict.fromkeys(
+        p for p in (prefix, "".join(c for c in prefix if c.isascii())) if p
+    ))
 
-    The iframe surface drops the emoji on read-back ('[🤖 Claude] ' →
-    '[ Claude] '), which is what triggered the live S250 echo loop.
-    """
-    rx = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
-    assert rx.match("[🤖 Claude] Standing by.")  # emoji intact (classic)
-    assert rx.match("[ Claude] Standing by.")    # emoji dropped (iframe — observed)
-    assert rx.match("[🤖 Claude] ")              # bare prefix
+
+def test_own_prefixes_cover_both_forms():
+    """The two read-back forms: prefix verbatim and emoji-stripped.
+
+    The iframe drops the 🤖 on render ('[🤖 Claude] ' → '[ Claude] '),
+    which is what triggered the live S250 echo loop."""
+    prefixes = _own_prefixes("[🤖 Claude] ")
+    assert prefixes == ("[🤖 Claude] ", "[ Claude] "), prefixes
+    assert any("[🤖 Claude] Standing by.".startswith(p) for p in prefixes)
+    assert any("[ Claude] Standing by.".startswith(p) for p in prefixes)
     # Must NOT swallow ordinary participant messages.
-    assert not rx.match("hey @claude what's up")
-    assert not rx.match("Claude is great")
-    assert not rx.match("[note] see above")
-    assert AttachAdapter._compile_reply_prefix_re("") is None
-    print("  reply-prefix regex emoji-tolerant: PASS")
+    assert not any("hey @claude what's up".startswith(p) for p in prefixes)
+    assert not any("Claude is great".startswith(p) for p in prefixes)
+    # All-ASCII prefix collapses to a single form (deduped).
+    assert _own_prefixes("[BOT] ") == ("[BOT] ",)
+    assert _own_prefixes("") == ()
+    print("  own-prefixes cover both forms: PASS")
 
 
 def test_iframe_drops_own_echo():
@@ -127,28 +134,46 @@ def test_iframe_drops_own_echo():
                 "text": "@claude hello", "t_dom": 1779226033230}
     a = _iframe_adapter(drain_return=[own_echo, user_msg])
     a._reply_prefix = "[🤖 Claude] "
-    a._reply_prefix_re = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
+    a._own_prefixes = _own_prefixes("[🤖 Claude] ")
     msgs = a._do_read_chat(_make_page(drain_return=[]))
     texts = [m["text"] for m in msgs]
     assert texts == ["@claude hello"], f"own echo not dropped: {texts}"
     print("  iframe drops own echo: PASS")
 
 
-def test_classic_strips_own_prefix_not_drops():
-    """Classic surface keeps strip-and-forward (its msg-id dedup is primary),
-    and the strip is now emoji-tolerant too."""
+def test_classic_drops_own_prefix():
+    """Classic surface drops own replies too — the prefix is the single
+    own-message filter on every surface (no sender/text-match anymore)."""
     own_echo = {"id": "spaces/AAA/messages/BBB", "sender": "You",
                 "text": "[🤖 Claude] Standing by.", "t_dom": 2}
+    user_msg = {"id": "spaces/AAA/messages/CCC", "sender": "Alice",
+                "text": "@claude hi", "t_dom": 3}
     a = AttachAdapter()
     a._discover_gchat_target_ws = MagicMock(return_value=None)
     a._reply_prefix = "[🤖 Claude] "
-    a._reply_prefix_re = AttachAdapter._compile_reply_prefix_re("[🤖 Claude] ")
-    page = _make_page(drain_return=[own_echo])
+    a._own_prefixes = _own_prefixes("[🤖 Claude] ")
+    page = _make_page(drain_return=[own_echo, user_msg])
     msgs = a._do_read_chat(page)
     assert a._chat_surface == "classic"
-    assert len(msgs) == 1, f"classic should forward (stripped), not drop: {msgs}"
-    assert msgs[0]["text"] == "Standing by.", f"prefix not stripped: {msgs[0]['text']!r}"
-    print("  classic strips own prefix (not drop): PASS")
+    texts = [m["text"] for m in msgs]
+    assert texts == ["@claude hi"], f"own echo not dropped on classic: {texts}"
+    print("  classic drops own prefix: PASS")
+
+
+def test_same_named_participant_not_dropped():
+    """A participant whose display name equals the bot's tile name must NOT
+    be filtered — own-message detection is by prefix, not sender. (This was
+    the S250 name-collision bug: bot tile 'Jojo Shapiro' + participant
+    'Jojo Shapiro' got muted.)"""
+    same_name = {"id": "MFivfrcBGcZ", "sender": "Jojo Shapiro",
+                 "text": "@claude are you there?", "t_dom": 10}
+    a = _iframe_adapter(drain_return=[same_name])
+    a._reply_prefix = "[🤖 Claude] "
+    a._own_prefixes = _own_prefixes("[🤖 Claude] ")
+    msgs = a._do_read_chat(_make_page(drain_return=[]))
+    texts = [m["text"] for m in msgs]
+    assert texts == ["@claude are you there?"], f"same-named participant dropped: {texts}"
+    print("  same-named participant not dropped: PASS")
 
 
 def test_send_routes_to_iframe_when_surface_iframe():
@@ -171,8 +196,9 @@ if __name__ == "__main__":
     test_install_selects_classic_surface()
     test_read_drains_from_iframe_and_bypasses_spaces_filter()
     test_read_classic_still_applies_spaces_filter()
-    test_reply_prefix_re_emoji_tolerant()
+    test_own_prefixes_cover_both_forms()
     test_iframe_drops_own_echo()
-    test_classic_strips_own_prefix_not_drops()
+    test_classic_drops_own_prefix()
+    test_same_named_participant_not_dropped()
     test_send_routes_to_iframe_when_surface_iframe()
     print("\nAll tests passed.")

@@ -99,19 +99,30 @@ def test_trigger_phrase_stripping():
     print("  trigger phrase stripping: PASS")
 
 
-def test_sender_filtering():
-    """Bot's own messages should be filtered by sender name."""
-    bot_name = config.AGENT_NAME
+def test_own_message_prefix_filtering():
+    """Bot's own messages are filtered by the reply-prefix, not by sender.
 
-    assert bot_name  # non-empty; the actual value comes from the active agent
-    assert bot_name.lower() == bot_name.lower()
-    assert "Alice".lower() != bot_name.lower()
+    send_chat prepends the prefix to every bot message; the connector's read
+    path drops anything starting with either read-back form (with + without
+    the 🤖 the iframe strips). A participant who shares the bot's display name
+    must NOT be filtered — that was the S250 name-collision bug."""
+    # Mirror AttachAdapter.__init__'s _own_prefixes derivation.
+    prefix = "[🤖 Claude] "
+    prefixes = tuple(dict.fromkeys(
+        p for p in (prefix, "".join(c for c in prefix if c.isascii())) if p
+    ))
 
-    own_messages = {"Hello there"}
-    text = "Hello there"
-    assert text in own_messages
+    def is_own(text):
+        return any(text.startswith(p) for p in prefixes)
 
-    print("  sender filtering: PASS")
+    assert is_own("[🤖 Claude] Standing by.")   # bot reply, emoji intact
+    assert is_own("[ Claude] Standing by.")     # bot reply, emoji dropped (iframe)
+    assert not is_own("@claude hello")          # ordinary participant message
+    assert not is_own("Claude is great")        # mentions Claude, not a bot post
+    # Sender name is irrelevant now — same-named participant is NOT filtered.
+    assert not is_own("hi from another Jojo Shapiro")
+
+    print("  own-message prefix filtering: PASS")
 
 
 if __name__ == "__main__":
@@ -120,5 +131,5 @@ if __name__ == "__main__":
     test_slug_from_url()
     test_trigger_phrase_gating()
     test_trigger_phrase_stripping()
-    test_sender_filtering()
+    test_own_message_prefix_filtering()
     print("\nAll tests passed.")
