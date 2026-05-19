@@ -227,6 +227,37 @@ INSTALL_GCHAT_OBSERVER_JS = """() => {
 }"""
 
 
+# Iframe-specific drain. Same contract as DRAIN_CHAT_QUEUE_JS (returns +
+# clears the queue) but re-resolves the sender from the live DOM for any
+# queued message whose sender is still a "Name loading…" placeholder.
+#
+# Why: the MutationObserver fires the instant Google Chat mounts a message
+# node, which can be a beat before it resolves the author's display name —
+# so extractMessage occasionally captures "Name loading…". The message text
+# is stable immediately; only the name lags. By drain time (next poll,
+# ~500ms later) the name has resolved, so we look it up again by data-topic-id.
+# CSS.escape guards against any non-identifier characters in the id.
+DRAIN_GCHAT_QUEUE_JS = """() => {
+    const q = window.__operatorChatQueue || [];
+    window.__operatorChatQueue = [];
+    const PLACEHOLDER = /^(name loading|loading)/i;
+    for (const m of q) {
+        if (m.sender && !PLACEHOLDER.test(m.sender)) continue;
+        let topic = null;
+        try {
+            topic = document.querySelector('[data-topic-id="' + CSS.escape(m.id) + '"]');
+        } catch (e) { topic = null; }
+        if (!topic) continue;
+        const h = topic.querySelector('[data-message-id][role="heading"]');
+        if (h) {
+            const fresh = (h.innerText || '').trim();
+            if (fresh && !PLACEHOLDER.test(fresh)) m.sender = fresh;
+        }
+    }
+    return q;
+}"""
+
+
 # Participant name scrape via tile DOM. Meet renders one tile per
 # participant with `data-requested-participant-id`; the display name
 # lives in a `span.notranslate` leaf inside each tile. Returns a

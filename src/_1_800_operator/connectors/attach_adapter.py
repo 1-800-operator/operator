@@ -68,6 +68,7 @@ from _1_800_operator import config
 from .base import MeetingConnector
 from .chat_dom_js import (
     DRAIN_CHAT_QUEUE_JS,
+    DRAIN_GCHAT_QUEUE_JS,
     DRAIN_SPEAKING_QUEUE_JS,
     GET_PARTICIPANT_NAMES_JS,
     GET_SELF_NAME_JS,
@@ -1292,7 +1293,7 @@ class AttachAdapter(MeetingConnector):
             # via the frame, not the page.
             if self._chat_surface == "iframe":
                 frame = self._find_gchat_frame(page)
-                messages = frame.evaluate(DRAIN_CHAT_QUEUE_JS) if frame else []
+                messages = frame.evaluate(DRAIN_GCHAT_QUEUE_JS) if frame else []
             else:
                 messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
