@@ -663,15 +663,14 @@ class AttachAdapter(MeetingConnector):
         self._slip_start_at: float | None = None
         self._meeting_entry_at: float | None = None
         # Speaking-indicator state. Browser thread drains the DOM speaking
-        # queue every _process_chat_queue cycle and updates these. Audio
-        # utterance loops read them from their own threads — protected by
-        # _speaking_lock. _last_s_speaker is the most-recent named speaker
-        # on the system-audio leg; used to attribute [S] utterances even
-        # when the DOM speaking indicator has already cleared by the time
-        # Whisper finalizes (Whisper waits for silence, DOM clears sooner).
+        # queue every _process_chat_queue cycle and updates these.
+        # _speaking_participants is the live "who is speaking right now"
+        # set, written under _speaking_lock. Audio-leg attribution itself
+        # happens inside whisper_worker, which holds its own timeline
+        # replica fed by [E] events — main no longer needs a most-recent
+        # speaker cache.
         self._speaking_lock = threading.Lock()
         self._speaking_participants: dict[str, str] = {}  # pid → name
-        self._last_s_speaker: str = ""
         # Timeline of speaking events for interval-based attribution.
         # Each entry is (t, name, kind) where kind ∈ {"start", "stop"}.
         # Mirrored to the whisper_worker subprocess via [E] events so its
@@ -690,10 +689,9 @@ class AttachAdapter(MeetingConnector):
         # Speaking-observer rescan cadence. The observer is installed once
         # at meeting entry, but new participants render new tiles after
         # that — without a rescan, late joiners never get an observer and
-        # their speech falls through to _last_s_speaker (i.e. gets stamped
-        # with whoever pipped most recently). Browser thread re-runs the
-        # JS install no more than once per _SPEAKING_RESCAN_INTERVAL_S
-        # to attach observers to any new tiles. JS is idempotent at the
+        # their speech goes unattributed. Browser thread re-runs the JS
+        # install no more than once per _SPEAKING_RESCAN_INTERVAL_S to
+        # attach observers to any new tiles. JS is idempotent at the
         # per-tile level so this is cheap on the no-op case.
         self._last_speaking_rescan_at: float = 0.0
 
@@ -1381,9 +1379,8 @@ class AttachAdapter(MeetingConnector):
         """Drain the DOM speaking-event queue and update _speaking_participants.
 
         Called from _process_chat_queue on the browser thread every ~200ms.
-        Updates _last_s_speaker with the most-recent named speaker. The
-        speaking history is also pushed to the whisper_worker subprocess
-        (S244) as [E] events for its in-worker S-leg attribution. Also
+        Each drained event is pushed to the whisper_worker subprocess
+        (S244) as an [E] event for its in-worker S-leg attribution. Also
         runs the speaking-observer rescan on its own cadence so
         late-joining participants get wired up.
         """
@@ -1450,7 +1447,6 @@ class AttachAdapter(MeetingConnector):
                         )
                 if speaking:
                     self._speaking_participants[pid] = name
-                    self._last_s_speaker = name
                     self._speaking_history.append((ev_t, name, "start"))
                     log.debug(f"AttachAdapter: speaking start — {name!r}")
                     # S244: mirror to the whisper_worker subprocess so its
