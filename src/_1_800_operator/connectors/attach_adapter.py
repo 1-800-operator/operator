@@ -1534,6 +1534,8 @@ class AttachAdapter(MeetingConnector):
             file=sys.stderr, flush=True,
         )
         last_log = time.monotonic()
+        diag_30s_written = False
+        wait_start = time.monotonic()
         while not self._leave_event.is_set():
             try:
                 chat_btn = page.get_by_role("button", name="Chat with everyone")
@@ -1550,6 +1552,7 @@ class AttachAdapter(MeetingConnector):
             try:
                 if page.is_closed() or not self._browser.is_connected():
                     log.warning("AttachAdapter: Chrome closed during meeting-entry wait")
+                    save_debug(page, label=f"lobby_exit_chrome_closed_{int(time.time())}")
                     return False
             except Exception:
                 log.warning("AttachAdapter: liveness probe failed during meeting-entry wait")
@@ -1558,12 +1561,21 @@ class AttachAdapter(MeetingConnector):
             if now - last_log > 30:
                 log.info("AttachAdapter: still waiting for meeting entry…")
                 last_log = now
+            # Diagnostic: capture page state at the 30s mark of the wait.
+            # If the user never gets admitted we'll be staring at this when
+            # we want to know what screen the dial Chrome was actually on
+            # (green room / lobby / sign-in / in-call but no chat button).
+            # Written once per join — overwrite-safe (label includes unix ts).
+            if not diag_30s_written and now - wait_start > 30:
+                save_debug(page, label=f"lobby_wait_30s_{int(time.time())}")
+                diag_30s_written = True
             time.sleep(1.0)
         # leave_event tripped while we were waiting for entry — caller
         # is shutting down before the user joined. Surface as a clean
         # not-entered signal so _browser_session takes the failure path
         # and tears Playwright down cleanly.
         log.info("AttachAdapter: leave requested before meeting entry")
+        save_debug(page, label=f"lobby_exit_leave_requested_{int(time.time())}")
         return False
 
     def _ensure_chat_open(self, page):

@@ -336,7 +336,11 @@ class WhisperWorker:
                     "first_byte_wall_clock": self.m_proc._raw_dump_first_t,
                 },
             }
+            # Ensure base dir exists — feed_audio() creates it lazily on the
+            # first PCM chunk, so an empty-meeting path (no audio ever flowed)
+            # would leave us writing meta.json into nowhere.
             try:
+                os.makedirs(self._raw_dump_base, exist_ok=True)
                 meta_path = os.path.join(self._raw_dump_base, "meta.json")
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(meta, f, indent=2)
