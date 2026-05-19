@@ -121,9 +121,18 @@ let micStats = StreamStats()
 if !CGPreflightScreenCaptureAccess() {
     fputs("operator-audio-capture: Screen Recording permission not granted — requesting\n", stderr)
     CGRequestScreenCaptureAccess()
-    Thread.sleep(forTimeInterval: 3)
+    // Poll for up to 60s. The previous 3s sleep was an interactive-flow
+    // bug: macOS surfaces the TCC dialog asynchronously and users
+    // typically take 5-15s to read + click Allow. With a 3s window the
+    // helper would exit before the user could grant, and the subsequent
+    // mic check (gated behind SR success) never ran — leaving install.sh
+    // probing with screen_recording=denied + microphone=not_determined.
+    let deadline = Date().addingTimeInterval(60)
+    while !CGPreflightScreenCaptureAccess() && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.5)
+    }
     if !CGPreflightScreenCaptureAccess() {
-        fputs("operator-audio-capture: FATAL — Screen Recording permission denied\n", stderr)
+        fputs("operator-audio-capture: FATAL — Screen Recording permission denied or 60s timeout\n", stderr)
         fputs("operator-audio-capture: System Settings > Privacy & Security > Screen Recording\n", stderr)
         exit(3)
     }
@@ -144,9 +153,11 @@ case .notDetermined:
         fputs("operator-audio-capture: Microphone access granted=\(granted)\n", stderr)
         sema.signal()
     }
-    _ = sema.wait(timeout: .now() + 10)
+    // Same interactive-flow concern as the Screen Recording poll above:
+    // users may take 5-15s to read + click Allow on the mic prompt.
+    _ = sema.wait(timeout: .now() + 60)
     if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-        fputs("operator-audio-capture: FATAL — Microphone permission denied\n", stderr)
+        fputs("operator-audio-capture: FATAL — Microphone permission denied or 60s timeout\n", stderr)
         fputs("operator-audio-capture: System Settings > Privacy & Security > Microphone\n", stderr)
         exit(5)
     }
