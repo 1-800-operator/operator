@@ -236,18 +236,32 @@ INSTALL_GCHAT_OBSERVER_JS = """() => {
 
 # Iframe-specific drain. Same contract as DRAIN_CHAT_QUEUE_JS (returns +
 # clears the queue) but re-resolves the sender from the live DOM for any
-# queued message whose sender is still a "Name loading…" placeholder.
+# queued message whose sender is empty or a "Name loading…" placeholder.
 #
-# Why: the MutationObserver fires the instant Google Chat mounts a message
-# node, which can be a beat before it resolves the author's display name —
-# so extractMessage occasionally captures "Name loading…". The message text
-# is stable immediately; only the name lags. By drain time (next poll,
-# ~500ms later) the name has resolved, so we look it up again by data-topic-id.
-# CSS.escape guards against any non-identifier characters in the id.
+# Two cases it heals, both at drain time over the full live DOM:
+#  1. Name-loading race — the MutationObserver fires the instant Google Chat
+#     mounts a message node, sometimes a beat before the author's display name
+#     resolves. The text is stable immediately; only the name lags. By drain
+#     (next poll, ~500ms later) it has resolved, so we re-read by data-topic-id.
+#  2. Grouped continuation — Google Chat omits the heading on consecutive
+#     same-author messages, so those topics carry no name of their own. Every
+#     topic does carry data-creator-id, so we resolve the name from any
+#     rendered sibling with the SAME creator-id that does have a heading. This
+#     is robust to the Python-side history cap: resolution happens in the DOM
+#     before the message enters any capped buffer, and the group's head message
+#     (which has the name) is always co-rendered in the live DOM.
+# CSS.escape guards against non-identifier chars in the id / creator-id.
 DRAIN_GCHAT_QUEUE_JS = """() => {
     const q = window.__operatorChatQueue || [];
     window.__operatorChatQueue = [];
     const PLACEHOLDER = /^(name loading|loading)/i;
+    const nameOf = (topic) => {
+        const h = topic.querySelector('[data-message-id][role="heading"]');
+        if (!h) return '';
+        const nameEl = h.querySelector('span.njhDLd');
+        const n = ((nameEl ? nameEl.innerText : h.innerText) || '').trim();
+        return PLACEHOLDER.test(n) ? '' : n;
+    };
     for (const m of q) {
         if (m.sender && !PLACEHOLDER.test(m.sender)) continue;
         let topic = null;
@@ -255,12 +269,24 @@ DRAIN_GCHAT_QUEUE_JS = """() => {
             topic = document.querySelector('[data-topic-id="' + CSS.escape(m.id) + '"]');
         } catch (e) { topic = null; }
         if (!topic) continue;
-        const h = topic.querySelector('[data-message-id][role="heading"]');
-        if (h) {
-            const nameEl = h.querySelector('span.njhDLd');
-            const fresh = ((nameEl ? nameEl.innerText : h.innerText) || '').trim();
-            if (fresh && !PLACEHOLDER.test(fresh)) m.sender = fresh;
+        // 1. The message's own heading (resolves the Name-loading race).
+        let name = nameOf(topic);
+        // 2. Grouped continuation: resolve by data-creator-id from a sibling.
+        if (!name) {
+            const cid = topic.getAttribute('data-creator-id');
+            if (cid) {
+                try {
+                    const sibs = document.querySelectorAll(
+                        '[data-topic-id][data-is-user-topic="true"][data-creator-id="'
+                        + CSS.escape(cid) + '"]');
+                    for (const s of sibs) {
+                        const n = nameOf(s);
+                        if (n) { name = n; break; }
+                    }
+                } catch (e) {}
+            }
         }
+        if (name) m.sender = name;
     }
     return q;
 }"""
