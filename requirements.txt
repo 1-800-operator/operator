@@ -6,14 +6,17 @@ mcp==1.27.0            # Model Context Protocol — used by bundled transcript M
 pyyaml==6.0.3          # YAML — used by tests; harmless at runtime
 rich==14.3.3           # terminal UI — used by google_signin's prompts and status output
 
-# ── Audio pipeline (Phase 14.20.4) ────────────────────────────────────────────
-# Local Whisper STT for slip mode. Mac-only at runtime; Linux dial doesn't import.
-mlx-whisper==0.4.3
+# ── Audio pipeline (Phase 14.20.4, S233 backend swap) ─────────────────────────
+# Local Whisper STT for dial mode. CTranslate2-based; runs CPU-only with no
+# Metal/MLX dependency. S233 swapped from mlx-whisper after two production
+# crashes from MLX's async Metal command-buffer abort path.
+faster-whisper==1.2.1
 numpy==2.4.3
 
-# ── Security floors for transitive deps (pip-audit, session 138) ──────────────
-# Left as `>=` (not `==`) so future CVE patches land on `pip install -U` without
-# a requirements edit. Bump the floor when a newer CVE ships.
-cryptography>=46.0.7     # CVE-2026-34073, CVE-2026-39892 (via mcp → pyjwt[crypto])
-pygments>=2.20.0         # CVE-2026-4539 (via rich)
-python-multipart>=0.0.26 # CVE-2026-40347 (via mcp)
+# ── Transitive-dep pins (pre-launch v0.0.1) ──────────────────────────────────
+# Locked to exact versions for reproducible installs. Post-launch the security
+# floors may relax back to `>=` so CVE patches land via `pip install -U` once
+# we have an upgrade-intent flow. Mirror pyproject.toml exactly.
+cryptography==48.0.0     # via mcp → pyjwt[crypto]
+pygments==2.20.0         # via rich
+python-multipart==0.0.29 # via mcp

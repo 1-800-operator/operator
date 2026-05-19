@@ -47,11 +47,15 @@ dependencies = [
     # docs/agent-context.md and the bench in debug/14_28_cpu_whisper_spike/.
     "faster-whisper==1.2.1",
     "numpy==2.4.3",
-    # Security floors for transitive deps (pip-audit, session 138) — left as
-    # `>=` so future CVE patches land on `pip install -U` without edits here.
-    "cryptography>=46.0.7",    # via mcp → pyjwt[crypto]
-    "pygments>=2.20.0",        # via rich
-    "python-multipart>=0.0.26", # via mcp
+    # Transitive-dep pins for security + reproducibility. Pre-launch
+    # (v0.0.1) we lock to exact versions so two installs a week apart
+    # produce identical resolved trees. Post-launch the security floors
+    # may relax back to `>=` so CVE patches can land via `pip install -U`
+    # without a release — that's a deliberate trade we'll make once we
+    # have an upgrade-intent flow.
+    "cryptography==48.0.0",     # via mcp → pyjwt[crypto] (was `>=46.0.7` floor)
+    "pygments==2.20.0",         # via rich (was `>=2.20.0` floor)
+    "python-multipart==0.0.29", # via mcp (was `>=0.0.26` floor)
 ]
 
 [project.scripts]
