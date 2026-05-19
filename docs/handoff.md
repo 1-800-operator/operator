@@ -1,5 +1,37 @@
 # Session 248 handoff (2026-05-19)
 
+## v0.1.37 — AEC3 universal binary (local build path)
+
+GitHub winds down free `macos-13` runners through 2026; five consecutive
+v0.1.31-v0.1.35 releases had their x86_64 build leg queued for 1h+ each
+without ever being picked up. Two paths considered:
+
+1. **`macos-13-large` (paid CI runner)** — switched
+   `.github/workflows/build-aec3.yml` to use it (~$0.80/release). Wired
+   in for future use, but Actions billing isn't enabled yet so the
+   queued runs fail at the billing check. To enable later: GitHub →
+   org → Billing → set payment method + bump Actions spending limit
+   above $0.
+
+2. **`scripts/build_aec3_universal.sh` (local build, current
+   approach during dev)** — builds the universal binary locally on
+   Apple Silicon without needing x86_64 Homebrew, paid CI, or Intel
+   hardware. arm64 leg: native `cargo build`. x86_64 leg: standalone
+   ninja (universal binary from github releases) + locally-built
+   pkg-config + meson-wrapper that forces meson to run under
+   `arch -x86_64 /usr/bin/python3` so its host detection reports
+   x86_64 (key for AVX2 source inclusion in
+   webrtc-audio-processing-sys). Lipos both into universal binary,
+   smoke-tests both slices, optionally uploads to a GitHub release
+   via `--upload <tag>`. Idempotent: re-runs skip prerequisite
+   setup, only re-run the cargo builds (~5 min total).
+
+For v0.1.37 the local-build path was used; the universal binary at
+https://github.com/1-800-operator/operator/releases/tag/v0.1.37
+contains both arches (sha256 `09456b5b…`). When dev velocity slows
+and releases become less frequent, enable Actions billing and the
+workflow will pick up automatically; no source changes needed.
+
 ## v0.1.36 — AVFoundation deprecation fix + VPIO investigation
 
 Two follow-ups on top of v0.1.35:
