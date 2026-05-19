@@ -41,18 +41,14 @@ resume on the new worker).
 ## Open items / blockers
 
 - **Live-validate worker respawn** (S244 carry).
-- **Live-validate audio.py drain fix in production** (S244 carry).
 - **Worker-spawn-failure path not tested** (S244 carry).
 - **Option B fallback (S245)** — if the briefing tab-close fix
   ever degrades, the next-tier fix is on-shutdown injection of a
   `[SYSTEM] Meeting <slug> ended` turn into the shared session
   before SIGTERM. Not building until briefing-only proves
   insufficient.
-- **Validate post-change Chrome eviction with an actual evict**
-  (S243 carry).
 - **TCC warmup on a fresh user account** (S237 carry).
 - **A3 promotion candidates + duplication cleanup** (S241 carry).
-- **Long-meeting CPU/heat for faster-whisper** (S233 carry).
 - **H-23 AEC** (multi-session scope).
 - **QA items the user is updating async** in `docs/qa-monday.md`.
 

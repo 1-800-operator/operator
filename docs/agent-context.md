@@ -37,13 +37,10 @@ Audit grep confirmed zero remaining "guarded mode" mentions in user-facing skill
 
 **Next:**
 - **Live-validate worker respawn** (S244 carry) — no test that killed a running worker.
-- **Live-validate the audio.py drain fix in production** (S244 carry) — unit-tested but hard to trigger at the exact tick boundary.
 - **Worker-spawn-failure path not tested** (S244 carry).
-- **Validate post-change Chrome eviction with an actual evict** (S243 carry).
 - **H-23 AEC** deferred — multi-session scope.
 - **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).
 - **TCC warmup on a fresh user account** (S237 carry).
-- **Long-meeting CPU/heat for faster-whisper** (S233 carry).
 - **Option B fallback (S245)** — if the briefing tab-close paragraph degrades in practice, the next-tier fix is on-shutdown injection of a `[SYSTEM] Meeting <slug> ended` turn into the shared session before SIGTERM. Not building until briefing-only proves insufficient.
 
 ---

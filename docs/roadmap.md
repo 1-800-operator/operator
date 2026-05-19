@@ -26,11 +26,8 @@
 
 **Carry forward (post-S245):**
 - **Live-validate worker respawn** — coded but no live test that kills a running worker mid-meeting to confirm replay actually works.
-- **Live-validate the audio.py drain fix** — unit-tested but hard to trigger live (requires interrupting at the exact tick boundary).
 - **Worker-spawn-failure path not tested** — could spike by temporarily breaking the worker entrypoint.
-- **Validate post-change Chrome eviction with an actual evict** (S243 carry).
 - **H-23 AEC** (multi-session scope).
-- **Long-meeting CPU/heat for faster-whisper** (S233 carry) — not benched on a 1-hour session yet.
 - **Option B fallback (S245)** — if the briefing tab-close paragraph ever degrades in practice (claude still confabulates duplicates across reconnects), the next-tier fix is on-shutdown injection of a "[SYSTEM] Meeting <slug> ended" turn into the shared session before SIGTERM, so resumed claude reads explicit closure rather than relying on a prompt to compensate for missing signal. Not building until briefing-only proves insufficient.
 
 *Previously (session 243 evening — startup-latency optimization + reply-latency observability + plugin v0.1.22 SKILL prose softening).*
