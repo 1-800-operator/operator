@@ -27,7 +27,14 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             arch: arm64
-          - runner: macos-13
+          # `macos-13-large` (Intel, 12-core, paid ~$0.16/min) instead of
+          # free `macos-13` — the free Intel runner pool is structurally
+          # unavailable as of May 2026 (GitHub is winding down Intel
+          # runners as Apple discontinues Intel). Five v0.1.31-v0.1.35
+          # runs queued for 1h+ each on macos-13 without ever being
+          # picked up; the paid runner clears the queue in ~5 min.
+          # Recurring cost ~$0.80 per release.
+          - runner: macos-13-large
             target: x86_64-apple-darwin
             arch: x86_64
     runs-on: ${{ matrix.runner }}
