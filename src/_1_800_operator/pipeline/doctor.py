@@ -8,7 +8,7 @@ fails (so CI / scripts can gate on it).
 
 Composition: each check is a tiny pure function returning a
 `CheckResult(name, ok, detail, fix)`. `run_doctor()` calls them in
-order and renders. macOS-only TCC checks (Screen Recording + Microphone
+order and renders. macOS-only TCC checks (System Audio Recording + Microphone
 for dial's audio helper, Phase 14.20.4) skip on other platforms.
 """
 from __future__ import annotations
@@ -409,37 +409,39 @@ def _probe_audio_helper() -> dict[str, str] | None:
         return None
 
 
-def _check_screen_recording(probe: dict[str, str] | None) -> CheckResult:
-    """TCC Screen Recording — dial system-audio capture (ScreenCaptureKit).
+def _check_system_audio(probe: dict[str, str] | None) -> CheckResult:
+    """TCC System Audio Recording — dial system-audio capture (Core Audio Tap).
 
-    Apple gates SCK audio behind the same TCC service as video, even when
-    capturing audio only. Without it the helper exits with the silent-
-    failure mode (preflight true, callbacks never fire).
+    Phase 14.32 migration replaced SCStream (gated behind kTCCServiceScreenCapture)
+    with Core Audio Process Tap (gated behind kTCCServiceAudioCapture, the
+    "System Audio Recording Only" pane). The helper-side dialog is surfaced
+    by AudioHardwareCreateProcessTap on first call when permission is not
+    yet determined; this check just reads the helper's --probe output.
     """
     if _audio_helper() is None:
         return CheckResult(
-            name="Screen Recording (dial)",
+            name="System Audio Recording (dial)",
             ok=False,
             detail="audio helper not built",
             fix=_installer_fix(),
         )
     if probe is None:
         return CheckResult(
-            name="Screen Recording (dial)",
+            name="System Audio Recording (dial)",
             ok=False,
             detail="audio helper probe failed",
             fix=_installer_fix(),
         )
-    status = probe.get("screen_recording", "unknown")
+    status = probe.get("system_audio", "unknown")
     if status == "ok":
-        return CheckResult("Screen Recording (dial)", True, "granted", "")
+        return CheckResult("System Audio Recording (dial)", True, "granted", "")
     return CheckResult(
-        name="Screen Recording (dial)",
+        name="System Audio Recording (dial)",
         ok=False,
         detail=_TCC_STATUS_DETAIL.get(status, status),
         fix=(
-            "System Settings → Privacy & Security → Screen Recording → "
-            "enable for your terminal app, then quit and relaunch it"
+            "System Settings → Privacy & Security → System Audio Recording Only → "
+            "enable 'Operator'"
         ),
     )
 
@@ -574,11 +576,11 @@ def _check_aec_binary() -> CheckResult:
 def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
     """TCC Microphone — dial mic capture (AVAudioEngine.inputNode)."""
     if _audio_helper() is None or probe is None:
-        # Same upstream cause as Screen Recording — only report once.
+        # Same upstream cause as System Audio Recording — only report once.
         return CheckResult(
             name="Microphone (dial)",
             ok=False,
-            detail="audio helper unavailable (see Screen Recording check)",
+            detail="audio helper unavailable (see System Audio Recording check)",
             fix="",
         )
     status = probe.get("microphone", "unknown")
@@ -691,7 +693,7 @@ def run_doctor() -> int:
     # Dial is macOS-only — TCC checks are meaningless elsewhere.
     if sys.platform == "darwin":
         probe = _probe_audio_helper()
-        checks.append(_check_screen_recording(probe))
+        checks.append(_check_system_audio(probe))
         checks.append(_check_microphone(probe))
         checks.append(_check_aec_binary())
         checks.append(_check_faster_whisper_warm())

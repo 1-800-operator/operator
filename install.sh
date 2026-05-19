@@ -30,12 +30,12 @@ MIN_PY_MINOR=10
 # at release time. Pinning to a tag instead of `main` HEAD closes a
 # supply-chain hole — a phished contributor or a brief account
 # compromise on `main` would otherwise ship arbitrary code (with TCC
-# Mic + Screen Recording grants three steps later) to every install in
-# the compromise window. Same reason rustup / uv / pyenv all pin a tag.
+# Mic + System Audio Recording grants three steps later) to every install
+# in the compromise window. Same reason rustup / uv / pyenv all pin a tag.
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.34}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.35}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -299,8 +299,10 @@ fi
 # -- 8. macOS audio helper (Operator.app) -----------------------------------
 
 # Dial mode's dual-stream audio capture (mic + system) is delivered by a
-# Swift helper that needs Apple-Dev signing + notarization to be allowed by
-# macOS TCC for SCStream callbacks. There are two paths:
+# Swift helper that needs Apple-Dev signing + notarization for stable TCC
+# identity — the Core Audio Tap grant binds to the helper's code-signature
+# hash, and ad-hoc signatures change on every rebuild, which would re-prompt
+# the user every install. There are two paths:
 #
 #   (a) Production: the wheel ships a pre-built, signed, notarized .app at
 #       _1_800_operator/swift/Operator.app. We copy it into ~/.operator/bin/
@@ -309,9 +311,10 @@ fi
 #   (b) From-source dev: the wheel doesn't ship the .app (e.g. you're
 #       installing from a git checkout that hasn't been release-built yet).
 #       We fall back to swiftc + ad-hoc-signed raw binary. THIS PATH CANNOT
-#       DO SYSTEM AUDIO — SCStream callbacks are silently denied for ad-hoc
-#       binaries on macOS 14+. Mic still works. To get system audio in dev,
-#       run `scripts/build_signed_helper.sh` from a checkout (requires the
+#       DO SYSTEM AUDIO RELIABLY — every rebuild gets a new ad-hoc signature,
+#       so the previous System Audio Recording grant doesn't carry over and
+#       the helper re-prompts. Mic still works. For dev system audio, run
+#       `scripts/build_signed_helper.sh` from a checkout (requires the
 #       team's Developer-ID cert).
 #
 # Linux skips silently — dial is mac-only.
@@ -393,86 +396,37 @@ PYEOF
       }
       PROBE_BEFORE="$(probe_helper)"
       [ -z "${PROBE_BEFORE}" ] && PROBE_BEFORE='{}'
-      if echo "${PROBE_BEFORE}" | grep -q '"screen_recording":"ok"' \
+      if echo "${PROBE_BEFORE}" | grep -q '"system_audio":"ok"' \
         && echo "${PROBE_BEFORE}" | grep -q '"microphone":"ok"'; then
-        info "Audio permissions already granted (Screen Recording + Microphone)"
+        info "Audio permissions already granted (System Audio Recording + Microphone)"
       else
-        bold "macOS will now request Screen Recording and Microphone permissions"
+        bold "macOS will now request System Audio Recording and Microphone permissions"
         info "  These are required for dial mode to capture meeting audio."
         info "  Click Allow on each dialog as it appears. (Take a few seconds — the"
         info "  helper will exit on its own once the prompts are dismissed.)"
-        # `-W` waits for the launched app to exit. The helper requests
-        # both perms in its init path, then waits on stdin which is
-        # /dev/null here, so it exits via the 10s watchdog. `-n` opens
-        # a fresh instance even if a stale one is around. 2>/dev/null
-        # suppresses a benign Launch Services warning some setups emit.
+        # `-W` waits for the launched app to exit. The helper requests both
+        # perms in its init path, then waits on stdin which is /dev/null
+        # here, so it exits via the 10s watchdog. `-n` opens a fresh
+        # instance even if a stale one is around. 2>/dev/null suppresses a
+        # benign Launch Services warning some setups emit.
+        #
+        # Phase 14.32: the Core Audio Tap TCC service (System Audio
+        # Recording Only) has no "Quit and Reopen" dance — a single grant
+        # click survives and applies to the running helper. The ~50-line
+        # SR-specific recovery block that lived here in v0.1.30-34 is
+        # gone with the SCStream-era system-audio path it papered over.
         open -W -n -a "${INSTALLED_APP}" 2>/dev/null || true
         PROBE_AFTER="$(probe_helper)"
         [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
 
-        # Quit-and-Reopen recovery (macOS 14+ Screen Recording flow):
-        # When the user toggles SR on inside System Settings, macOS demands
-        # the helper "Quit and Reopen." That kills the running instance —
-        # which install.sh's `open -W` had been waiting on, so `open -W`
-        # returns. macOS then spawns a fresh helper instance, but it runs
-        # detached from `open -W` and may not surface the mic dialog in
-        # the foreground before exiting. Net result: SR=ok, mic=not_determined.
-        #
-        # Recovery: kill any leftover background helpers, launch a new
-        # helper in the background (NOT `-W` — we don't want to block on
-        # its exit), then poll the TCC state every 2s. The user sees the
-        # mic dialog within ~1-2s of the relaunch; their click lands a
-        # grant which the next poll cycle picks up. This is dramatically
-        # faster than the two-stage `open -W` approach which had to wait
-        # for the full helper-shutdown sequence after the user clicks.
-        if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' && \
-           echo "${PROBE_AFTER}" | grep -q '"microphone":"not_determined"'; then
-          pkill -f "${INSTALLED_APP}/Contents/MacOS/Operator" 2>/dev/null || true
-          info "  Screen Recording granted ✓"
-          bold "  Now requesting Microphone permission. Click Allow."
-
-          # Launch v3 in the background so the open call doesn't block.
-          open -n -a "${INSTALLED_APP}" >/dev/null 2>&1 &
-          disown 2>/dev/null || true
-
-          # Force the helper to the foreground via AppleScript "activate."
-          # Why: the Screen Recording grant flow leaves System Settings as
-          # the focused app. Without explicitly activating the helper, the
-          # mic dialog from v3 renders but stays behind Settings — users
-          # may not notice it for 30-45s. `activate` brings v3's window
-          # context to the front so the modal dialog appears on top.
-          # Target by bundle ID so it works regardless of localized name.
-          sleep 1
-          osascript -e 'tell application id "com.1-800-operator.audio-capture" to activate' 2>/dev/null || true
-
-          # Poll up to 30s. The dialog should be visible immediately after
-          # the activate; user clicks Allow → next poll cycle (within 2s)
-          # catches the grant.
-          POLL_START=$(date +%s)
-          POLL_DEADLINE=$((POLL_START + 30))
-          while [ "$(date +%s)" -lt "${POLL_DEADLINE}" ]; do
-            sleep 2
-            PROBE_AFTER="$(probe_helper)"
-            [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
-            if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' && \
-               echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
-              break
-            fi
-          done
-
-          # Whether or not polling succeeded, clean up the background
-          # helper so it doesn't linger past install.sh's exit.
-          pkill -f "${INSTALLED_APP}/Contents/MacOS/Operator" 2>/dev/null || true
-        fi
-
-        if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' \
+        if echo "${PROBE_AFTER}" | grep -q '"system_audio":"ok"' \
           && echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
-          info "✓ Audio permissions granted (Screen Recording + Microphone)"
+          info "✓ Audio permissions granted (System Audio Recording + Microphone)"
         else
           warn "Audio permissions not fully granted yet (probe: ${PROBE_AFTER})."
           warn "Dial mode will run, but captions may be silent until you grant access."
-          warn "  Fix: System Settings → Privacy & Security → Screen Recording (and Microphone)"
-          warn "       → '+' → ${INSTALLED_APP} → enable"
+          warn "  Fix: System Settings → Privacy & Security → System Audio Recording Only (and Microphone)"
+          warn "       → enable 'Operator'"
           warn "       Then re-run install.sh or 'operator doctor' to re-check."
         fi
       fi

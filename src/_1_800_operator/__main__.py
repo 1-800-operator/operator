@@ -146,11 +146,15 @@ _LSREGISTER = Path(
 
 # macOS System Settings deep-link URLs (macOS 13+). When the user has
 # explicitly denied a TCC service, the only path back is manual re-enable
-# in Settings — `CGRequestScreenCaptureAccess` / `AVCaptureDevice.requestAccess`
+# in Settings — `AudioHardwareCreateProcessTap` / `AVCaptureDevice.requestAccess`
 # both no-op silently after explicit deny. Surfacing the right pane saves
 # the user from hunting through Privacy & Security.
-_SETTINGS_DEEP_LINK_SCREEN_CAPTURE = (
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+#
+# Phase 14.32: replaced Privacy_ScreenCapture with Privacy_AudioCapture (the
+# "System Audio Recording Only" pane introduced for the Core Audio Tap API
+# in macOS 14.4). The helper no longer touches Screen Recording.
+_SETTINGS_DEEP_LINK_AUDIO_CAPTURE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"
 )
 _SETTINGS_DEEP_LINK_MICROPHONE = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
@@ -161,13 +165,13 @@ def _probe_helper_tcc() -> str:
     """Return the helper's `--probe` JSON, or '' if unrunnable.
 
     Spawns the probe via `_disclaimed_spawn` so the child runs as its own
-    TCC-responsible process. Without disclaim, `CGPreflightScreenCaptureAccess()`
-    inside the probe checks against the parent IDE/terminal's grant rather
-    than the helper bundle's — and on a freshly-installed setup where the
-    IDE isn't granted but the helper is, the probe would falsely report
-    "denied" and trigger an unnecessary warmup. See
-    debug/14_31_tcc_warmup_spike/ for the empirical measurement that
-    pinned this attribution down.
+    TCC-responsible process. Without disclaim, `TCCAccessPreflight()` and
+    `AVCaptureDevice.authorizationStatus()` inside the probe check against
+    the parent IDE/terminal's grant rather than the helper bundle's — and
+    on a freshly-installed setup where the IDE isn't granted but the helper
+    is, the probe would falsely report "denied" and trigger an unnecessary
+    warmup. See debug/14_31_tcc_warmup_spike/ for the empirical measurement
+    that pinned this attribution down.
 
     Helper is short-lived (<200ms); probe is safe to call from anywhere.
     Falls back to '' so callers can treat parse failures as "unknown."
@@ -202,7 +206,11 @@ def _probe_helper_tcc() -> str:
 
 
 def _parse_probe_status(probe: str) -> tuple[str, str]:
-    """Extract (screen_recording, microphone) status strings from probe JSON.
+    """Extract (system_audio, microphone) status strings from probe JSON.
+
+    Phase 14.32: the helper now reports `system_audio` (kTCCServiceAudioCapture)
+    instead of the pre-migration `screen_recording` (kTCCServiceScreenCapture).
+    The pair stays a 2-tuple — same call sites, same arity.
 
     Returns ('unknown', 'unknown') on parse failure so callers can treat
     unknown the same as not-yet-prompted (run the warmup, see what happens).
@@ -214,7 +222,7 @@ def _parse_probe_status(probe: str) -> tuple[str, str]:
     except (json.JSONDecodeError, ValueError):
         return ("unknown", "unknown")
     return (
-        str(d.get("screen_recording", "unknown")),
+        str(d.get("system_audio", "unknown")),
         str(d.get("microphone", "unknown")),
     )
 
@@ -311,13 +319,12 @@ def _preflight_audio_helper_tcc() -> None:
          attributed to "Operator" (verified in
          debug/14_31_tcc_warmup_spike/). The `-W` blocks until the helper
          exits (~10s via its watchdog). Re-probe; report success.
-      5. **`denied` → DON'T re-run the warmup**. macOS no-ops
-         `CGRequestScreenCaptureAccess` / `AVCaptureDevice.requestAccess`
-         after explicit deny — re-running the warmup would just spin for
-         10s and exit without surfacing anything. Instead, deep-link the
-         user straight to the relevant System Settings pane and tell them
-         what to re-enable. Dial degrades to chat-only; user fixes once
-         and reruns.
+      5. **`denied` → DON'T re-run the warmup**. macOS no-ops the underlying
+         TCC request paths after explicit deny — re-running the warmup would
+         just spin for 10s and exit without surfacing anything. Instead,
+         deep-link the user straight to the relevant System Settings pane
+         and tell them what to re-enable. Dial degrades to chat-only; user
+         fixes once and reruns.
 
     **Why `open -W -n -a` for the warmup (not `_disclaimed_spawn`):** both
     mechanisms produce correct attribution (spike: 14_31_tcc_warmup_spike).
@@ -344,9 +351,9 @@ def _preflight_audio_helper_tcc() -> None:
     # (1) Probe current state FIRST (self-attributed via _disclaimed_spawn,
     # which targets _AUDIO_HELPER_BIN directly — bypasses Launch Services
     # entirely, so the probe result is unaffected by LS pollution).
-    sr, mic = _parse_probe_status(_probe_helper_tcc())
+    sys_audio, mic = _parse_probe_status(_probe_helper_tcc())
     _t_after_probe = _startup_time.monotonic()
-    if sr == "ok" and mic == "ok":
+    if sys_audio == "ok" and mic == "ok":
         # Fast path — perms already granted on canonical. LS cleanup is
         # irrelevant here: with perms granted, no warmup dialog fires, so
         # there's no risk of a click attaching to a stale wheel-cache
@@ -355,15 +362,15 @@ def _preflight_audio_helper_tcc() -> None:
         logging.getLogger("operator").info(
             f"TIMING tcc_preflight path=fast "
             f"probe_ms={int((_t_after_probe - _t_tcc_entry) * 1000)} "
-            f"sr={sr} mic={mic}"
+            f"sys_audio={sys_audio} mic={mic}"
         )
         return
 
     # (2) Explicit denies — re-warmup can't recover; surface help and
     # open the relevant Settings pane.
     denied: list[tuple[str, str]] = []
-    if sr == "denied":
-        denied.append(("Screen & System Audio Recording", _SETTINGS_DEEP_LINK_SCREEN_CAPTURE))
+    if sys_audio == "denied":
+        denied.append(("System Audio Recording Only", _SETTINGS_DEEP_LINK_AUDIO_CAPTURE))
     if mic == "denied":
         denied.append(("Microphone", _SETTINGS_DEEP_LINK_MICROPHONE))
     if denied:
@@ -396,7 +403,7 @@ def _preflight_audio_helper_tcc() -> None:
     _t_after_ls = _startup_time.monotonic()
     print(
         "macOS audio permissions needed — surfacing dialogs for the audio helper.\n"
-        "  Click Allow on each as it appears (Screen Recording + Microphone).\n"
+        "  Click Allow on each as it appears (System Audio Recording + Microphone).\n"
         "  This takes ~10 seconds. The helper exits on its own when done."
     )
     _t_before_warmup = _startup_time.monotonic()
@@ -409,7 +416,7 @@ def _preflight_audio_helper_tcc() -> None:
         pass
     _t_after_warmup = _startup_time.monotonic()
 
-    sr2, mic2 = _parse_probe_status(_probe_helper_tcc())
+    sa2, mic2 = _parse_probe_status(_probe_helper_tcc())
     _t_after_reprobe = _startup_time.monotonic()
     logging.getLogger("operator").info(
         f"TIMING tcc_preflight path=warmup "
@@ -417,9 +424,9 @@ def _preflight_audio_helper_tcc() -> None:
         f"ls_cleanup_ms={int((_t_after_ls - _t_after_probe) * 1000)} "
         f"warmup_ms={int((_t_after_warmup - _t_before_warmup) * 1000)} "
         f"reprobe_ms={int((_t_after_reprobe - _t_after_warmup) * 1000)} "
-        f"sr_before={sr} mic_before={mic} sr_after={sr2} mic_after={mic2}"
+        f"sa_before={sys_audio} mic_before={mic} sa_after={sa2} mic_after={mic2}"
     )
-    if sr2 == "ok" and mic2 == "ok":
+    if sa2 == "ok" and mic2 == "ok":
         print("✓ Audio permissions granted — proceeding.")
         return
 
@@ -428,10 +435,10 @@ def _preflight_audio_helper_tcc() -> None:
     # cooldown after recent rapid-fire grants/denies. Don't block the
     # dial — degraded dial beats refusing to join the user's meeting.
     print(
-        f"⚠ Audio permissions not fully granted (screen_recording={sr2}, microphone={mic2}).\n"
+        f"⚠ Audio permissions not fully granted (system_audio={sa2}, microphone={mic2}).\n"
         "  Dial will run in chat-only mode (no caption transcript).\n"
         "  Fix: System Settings → Privacy & Security → enable 'Operator' under\n"
-        "       Screen & System Audio Recording AND Microphone. Then re-run dial."
+        "       System Audio Recording Only AND Microphone. Then re-run dial."
     )
 
 

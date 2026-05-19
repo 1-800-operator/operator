@@ -19,12 +19,12 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>14.4</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSScreenCaptureUsageDescription</key>
+    <key>NSAudioCaptureUsageDescription</key>
     <string>Operator transcribes meeting audio so it can join chat conversations.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Operator transcribes your voice locally for slip-mode chat.</string>
+    <string>Operator transcribes your voice locally for dial-mode chat.</string>
 </dict>
 </plist>

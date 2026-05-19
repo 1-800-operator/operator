@@ -1,13 +1,13 @@
 """posix_spawn wrapper that disclaims TCC responsibility for the child.
 
-Why this exists: macOS attributes TCC checks (Screen Recording, Microphone)
-to the closest user-launched app in a process's responsibility chain — the
-"responsible process". When the Operator audio helper is launched as a normal
-subprocess from Python, its responsible process is whichever IDE/terminal
-the user started operator from (Cursor, iTerm, etc.). SCStream's audio
-gate checks against the responsible process, which on Cursor's
-ToDesktop-wrapped Electron build silently denies even when the helper
-itself has been granted Screen Recording.
+Why this exists: macOS attributes TCC checks (System Audio Recording,
+Microphone) to the closest user-launched app in a process's responsibility
+chain — the "responsible process". When the Operator audio helper is
+launched as a normal subprocess from Python, its responsible process is
+whichever IDE/terminal the user started operator from (Cursor, iTerm,
+etc.). The Core Audio Tap API's TCC gate checks against the responsible
+process, which on Cursor's ToDesktop-wrapped Electron build silently denies
+even when the helper itself has been granted System Audio Recording.
 
 Apple's fix: posix_spawn() with `responsibility_spawnattrs_setdisclaim(&attrs, 1)`
 makes the spawned child its own responsible process — TCC then keys

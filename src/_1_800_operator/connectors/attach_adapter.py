@@ -114,11 +114,12 @@ CDP_READY_TIMEOUT_SECONDS = 30
 
 # The Operator audio helper lives at one of two paths. Production is the
 # signed+notarized .app produced by scripts/build_signed_helper.sh — only
-# this path can capture system audio (SCStream callbacks are silently
-# denied for ad-hoc-signed binaries on macOS 14+). Dev fallback is the
-# raw swiftc-built artifact in-tree, used for mic-only iteration when no
-# Developer-ID cert is available. Production wins when both exist; mirrors
-# doctor.py:_AUDIO_HELPER_INSTALLED.
+# this path can capture system audio (the Core Audio Tap TCC service binds
+# to the helper's code-signature identity; ad-hoc signatures aren't stable
+# across rebuilds and the user would re-prompt every time). Dev fallback is
+# the raw swiftc-built artifact in-tree, used for mic-only iteration when
+# no Developer-ID cert is available. Production wins when both exist;
+# mirrors doctor.py:_AUDIO_HELPER_INSTALLED.
 _AUDIO_HELPER_INSTALLED = (
     Path.home() / ".operator" / "bin" / "Operator.app"
     / "Contents" / "MacOS" / "Operator"
@@ -1936,7 +1937,7 @@ class AttachAdapter(MeetingConnector):
         connector in chat-only mode. Reasons audio might not come up:
           - Linux (helper is Mac-only)
           - Helper binary not built (install.sh hasn't run)
-          - Helper exits early on TCC denial (Screen Recording / Mic) —
+          - Helper exits early on TCC denial (System Audio Recording / Mic) —
             user is told to run `operator doctor`
           - The whisper_worker subprocess failed to spawn at join() time
 
@@ -1973,8 +1974,8 @@ class AttachAdapter(MeetingConnector):
         # Spawned via posix_spawn with `responsibility_spawnattrs_setdisclaim`
         # so helper TCC identity is its own bundle id, independent of the
         # parent IDE/terminal's responsibility chain. Without this, Cursor's
-        # ToDesktop Electron build silently denies SCStream audio even when
-        # the helper itself is granted Screen Recording.
+        # ToDesktop Electron build silently denies audio capture even when
+        # the helper itself is granted System Audio Recording.
         try:
             from _1_800_operator.pipeline._disclaimed_spawn import (
                 spawn_disclaimed, minimal_helper_env,
