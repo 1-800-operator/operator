@@ -170,8 +170,16 @@ def _silero_is_speech(chunk: bytes) -> bool:
     try:
         audio = np.frombuffer(chunk, dtype=np.float32)
         pad = (-len(audio)) % SILERO_FRAME_SAMPLES
+        # np.frombuffer returns a read-only view; Silero's ONNX session
+        # writes into its input buffer in place. The pad>0 path's
+        # concatenate already yields a fresh writeable array; the pad==0
+        # path (chunk already a multiple of SILERO_FRAME_SAMPLES) would
+        # otherwise hand the read-only view straight to ONNX → "assignment
+        # destination is read-only", silently degrading the leg to RMS-only.
         if pad:
             audio = np.concatenate([audio, np.zeros(pad, dtype=np.float32)])
+        else:
+            audio = audio.copy()
         with _VAD_USE_LOCK:
             probs = vad(audio).reshape(-1)
         return bool(probs.max() >= SILERO_SPEECH_THRESHOLD)
