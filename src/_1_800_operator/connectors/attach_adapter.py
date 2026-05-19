@@ -57,11 +57,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
+
+from .cdp_ws import CDPError, CDPTarget
 
 from _1_800_operator import config
 
@@ -642,6 +645,12 @@ class AttachAdapter(MeetingConnector):
         # embed). Set when the observer attaches; gates the drain target
         # and the spaces/-id placeholder filter in _do_read_chat.
         self._chat_surface = None
+        # Direct CDP-target client for the Google Chat OOPIF (the space
+        # embed). Playwright's connect_over_cdp doesn't stitch that
+        # cross-origin iframe into page.frames, so we reach it by its own
+        # target websocket instead (see cdp_ws.CDPTarget). Lazy-connected
+        # on first iframe op, closed in _teardown_playwright.
+        self._iframe_cdp: CDPTarget | None = None
         # Browser thread + chat command queue. Playwright's sync API is
         # single-threaded by contract: only the thread that opened the
         # context may call its methods. To keep AttachAdapter safe to
@@ -754,6 +763,7 @@ class AttachAdapter(MeetingConnector):
         self._browser_closed.clear()
         self._observer_installed = False
         self._chat_surface = None
+        self._close_iframe_cdp()
         self._dial_start_at = time.monotonic()
         self._meeting_entry_at = None
         # Silent-breakage detector for the speaking observer. Meet's
@@ -1292,8 +1302,12 @@ class AttachAdapter(MeetingConnector):
             # iframe queue lives on the frame's own window, so it's drained
             # via the frame, not the page.
             if self._chat_surface == "iframe":
-                frame = self._find_gchat_frame(page)
-                messages = frame.evaluate(DRAIN_GCHAT_QUEUE_JS) if frame else []
+                # Self-heal: the OOPIF is replaced with a fresh window when the
+                # chat panel closes/reopens, dropping our observer. Re-install
+                # if it's gone before draining so messages aren't silently lost.
+                if self._iframe_evaluate(OBSERVER_ATTACHED_CHECK_JS) is not True:
+                    self._iframe_evaluate(INSTALL_GCHAT_OBSERVER_JS)
+                messages = self._iframe_evaluate(DRAIN_GCHAT_QUEUE_JS) or []
             else:
                 messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
             # Stamp drain-time so chat_runner can attribute poll-lag (t_dom →
@@ -1649,22 +1663,57 @@ class AttachAdapter(MeetingConnector):
             except Exception:
                 pass
 
-    def _find_gchat_frame(self, page):
-        """Return the live chat.google.com iframe Frame, or None.
+    def _discover_gchat_target_ws(self):
+        """Return the chat.google.com OOPIF's CDP debugger ws URL, or None.
 
-        A Meet attached to a Google Chat space renders chat inside a
-        cross-origin chat.google.com iframe; the in-page observer can't
-        reach it (same-origin policy). Re-resolved on every call rather
-        than cached — frames detach/reattach across Meet's view changes,
-        and a stale Frame handle raises on evaluate.
+        Playwright's connect_over_cdp does NOT expose this cross-origin
+        iframe in page.frames (verified S250), so we discover it from the
+        browser's /json target list and talk to it over its own target
+        websocket. Re-queried each call — the target id changes when the
+        chat panel closes/reopens or the space view changes.
         """
         try:
-            for fr in page.frames:
-                if _GCHAT_FRAME_MARKER in (fr.url or ""):
-                    return fr
+            with urllib.request.urlopen(f"{CDP_URL}/json", timeout=2) as resp:
+                targets = json.loads(resp.read().decode("utf-8"))
         except Exception:
-            pass
+            return None
+        for t in targets:
+            if t.get("type") == "iframe" and _GCHAT_FRAME_MARKER in (t.get("url") or ""):
+                return t.get("webSocketDebuggerUrl")
         return None
+
+    def _iframe_evaluate(self, arrow_fn_src):
+        """Evaluate JS in the Google Chat OOPIF via its CDP target websocket.
+
+        Lazily (re)connects self._iframe_cdp. On any transport failure the
+        connection is dropped + the target re-discovered + retried once
+        (the target id rotates on panel close/reopen). Returns the JS value,
+        or None if the iframe can't be reached.
+        """
+        for attempt in (1, 2):
+            if self._iframe_cdp is None:
+                ws_url = self._discover_gchat_target_ws()
+                if not ws_url:
+                    return None
+                try:
+                    self._iframe_cdp = CDPTarget(ws_url)
+                    self._iframe_cdp.connect()
+                    self._iframe_cdp.call("Runtime.enable")
+                except CDPError as e:
+                    log.debug(f"AttachAdapter: iframe CDP connect failed: {e}")
+                    self._close_iframe_cdp()
+                    continue
+            try:
+                return self._iframe_cdp.evaluate(arrow_fn_src)
+            except CDPError as e:
+                log.debug(f"AttachAdapter: iframe CDP evaluate failed (attempt {attempt}): {e}")
+                self._close_iframe_cdp()
+        return None
+
+    def _close_iframe_cdp(self):
+        if self._iframe_cdp is not None:
+            self._iframe_cdp.close()
+            self._iframe_cdp = None
 
     def _install_chat_observer(self, page):
         """Inject the chat MutationObserver — classic panel or Chat iframe.
@@ -1676,12 +1725,12 @@ class AttachAdapter(MeetingConnector):
         """
         if self._observer_installed:
             return
-        frame = self._find_gchat_frame(page)
+        gchat_ws = self._discover_gchat_target_ws()
         try:
-            if frame is not None:
-                frame.evaluate(INSTALL_GCHAT_OBSERVER_JS)
-                attached = frame.evaluate(OBSERVER_ATTACHED_CHECK_JS)
-                surface, target_desc = "iframe", "Google Chat iframe"
+            if gchat_ws is not None:
+                self._iframe_evaluate(INSTALL_GCHAT_OBSERVER_JS)
+                attached = self._iframe_evaluate(OBSERVER_ATTACHED_CHECK_JS) is True
+                surface, target_desc = "iframe", "Google Chat iframe observer"
             else:
                 page.evaluate(INSTALL_CHAT_OBSERVER_JS)
                 attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
@@ -1707,7 +1756,7 @@ class AttachAdapter(MeetingConnector):
                     )
                 if parts:
                     log.info(f"TIMING listening_ready {' '.join(parts)}")
-            elif frame is not None:
+            elif gchat_ws is not None:
                 log.warning("AttachAdapter: Google Chat iframe observer not attached (message list not in DOM yet) — will retry next poll")
             else:
                 log.warning("AttachAdapter: chat observer not attached (textarea or panel container not in DOM) — will retry next poll")
@@ -1779,6 +1828,7 @@ class AttachAdapter(MeetingConnector):
             return None
 
     def _teardown_playwright(self):
+        self._close_iframe_cdp()
         if self._browser is not None:
             try:
                 self._browser.close()

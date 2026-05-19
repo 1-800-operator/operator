@@ -179,7 +179,14 @@ INSTALL_GCHAT_OBSERVER_JS = """() => {
         window.__operatorSeenIds.add(id);
         let sender = '';
         const h = topic.querySelector('[data-message-id][role="heading"]');
-        if (h) sender = (h.innerText || '').trim();
+        if (h) {
+            // The heading's innerText concatenates the name with workspace
+            // badges ("…, domain_disabledExternal user not managed by admin").
+            // span.njhDLd is the clean name leaf; fall back to the full
+            // heading text if that obfuscated class rotates.
+            const nameEl = h.querySelector('span.njhDLd');
+            sender = ((nameEl ? nameEl.innerText : h.innerText) || '').trim();
+        }
         let text = '';
         const bodyEl = topic.querySelector('[jsname="bgckF"]');
         if (bodyEl) {
@@ -250,7 +257,8 @@ DRAIN_GCHAT_QUEUE_JS = """() => {
         if (!topic) continue;
         const h = topic.querySelector('[data-message-id][role="heading"]');
         if (h) {
-            const fresh = (h.innerText || '').trim();
+            const nameEl = h.querySelector('span.njhDLd');
+            const fresh = ((nameEl ? nameEl.innerText : h.innerText) || '').trim();
             if (fresh && !PLACEHOLDER.test(fresh)) m.sender = fresh;
         }
     }
