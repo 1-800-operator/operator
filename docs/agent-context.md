@@ -17,6 +17,52 @@
 
 ## Current Status
 
+**Session 245 (May 18, 2026 — same-day follow-on to S244) — UX polish across doctor + briefing + plugin v0.1.24 SKILL copy rewrite.** Short, focused session after S244's big whisper-worker drain refactor. Started by closing the S243 PM carry (operator doctor MCP-registration check), pivoted to a QA-driven bug fix (false-duplicate "another bot joined" confabulation across browser-close reconnects), and ended with a plugin copy rewrite scrubbing "guarded mode" jargon and reframing slip-yolo as the goal mode. Two commits on operator-main pushed to both remotes: `043269e S245: doctor MCP-registration check + briefing tab-close awareness` and `a43403b marketplace: bump operator-plugin to v0.1.24`. operator-plugin v0.1.24 tagged + pushed. Local marketplace cache pulled; desktop app updated 0.1.22 → 0.1.24 (user restarted to apply).
+
+**Doctor MCP-registration check (closes S243 PM carry).** New `_check_meeting_record_mcp` in `src/_1_800_operator/pipeline/doctor.py` — single CheckResult covering both halves of the silent-failure surface: (a) does `claude mcp list` show `operator-meeting-record: ... - ✓ Connected`, and (b) is `mcp__operator-meeting-record__*` present in `~/.claude/settings.json`'s `permissions.allow`. Catches the two real-world drift modes — uv-tool path rot (registration points at a now-gone python) and profile-move asymmetry (settings.json travels easily, MCP registration doesn't). 7 new test cases via injected runner + settings_path; 16/16 doctor tests green. Live-validated.
+
+**Dual-target installer fix lines.** New `_installer_fix(suffix="")` helper replaces 8 "re-run install.sh" fix strings across MCP / audio-helper / faster-whisper / aec3 checks with consistent dual-target wording: `"ask Claude to fix this, or re-run the installer: curl -LsSf https://1-800-operator.com/install | bash"`. Works for desktop-app users (Claude reads doctor output and runs the install commands directly — install.sh is in-repo, Claude has Bash + Edit) AND terminal-only users (the curl one-liner is copy-pasteable). Auth / Chrome / git / TCC / workspace-trust fix lines untouched — those aren't installer remediations. Also scrubbed inner-claude / outer-claude jargon from all user-facing doctor strings; now just says "Claude".
+
+**Briefing tab-close awareness — killed false-duplicate confabulation.** User reported Claude Code sessions stuck in "Needs input" state with claude posting alarming messages: "Another bot joined rxy-weav-hpt — you now have duplicates… run /operator:hangup", "3 bot instances running simultaneously (PIDs 31953, 32157, 32315); duplicate responses likely". Root cause: when the user closes a Meet tab (instead of running `/operator:hangup`), operator's `_shutdown` SIGTERMs the PTY claude without giving it a chance to close cleanly. The session record has no "meeting ended" marker. Next time the user `/operator:slip`s in the same Claude Code session, the new PTY claude (`--resume-session <SAME ID>`) reads the entire prior history at face value and confabulates duplicate bots / fabricated PIDs from the partial signal. Initial instinct was Option B (inject a `[SYSTEM] Meeting <slug> ended` turn before SIGTERM via the shared session); user pushed for the cheaper Option A first. Shipped 47-word briefing addition: "A meeting can end without leaving a marker in your scrollback — the user may close the browser tab instead of running /operator:hangup. Don't infer from chat history that prior meetings are still running; run `operator status` (via Bash) to see what's actually live." Live-validated: user confirmed "That solved it." See [[project-briefing-minimal-tokens]] memory for the design rationale (briefing tokens are paid per meeting + per respawn; prompt-level fixes first for LLM-reasoning bugs).
+
+**Plugin v0.1.24 — SKILL copy rewrite.** All four meeting-mode skills + their YAML descriptions rewritten.
+- **`slip`** — "guarded mode" wording removed entirely from both description and body. Added bullets: **Permissions** (renamed, clarified — "Claude pauses to ask in chat before running tools the user hasn't pre-approved"), **Hears the meeting** (real-time local audio transcription, "nothing leaves your machine"), **Context-aware** (Claude Code session + MCPs + connectors + skills all loaded).
+- **`slip-yolo`** — reframed as the goal mode: "the chat panel becomes a full Claude session." Dropped the hedging language ("noisy", "if you'd prefer the alternative"). Description leads with the experience, not the negatives. Same Hears/Context bullets.
+- **`slip-strict`** — "Same guarded permission flow" → "Same permission flow (Claude pauses to ask before unapproved tools)". Same Hears/Context bullets.
+- **`wiretap`** — explicit local-recording + privacy framing ("Your meeting data stays private — never leaves your laptop"), drives users to `/operator:recap` explicitly, mentions querying any past meeting by date / participants / topic.
+
+Audit grep confirmed zero remaining "guarded mode" mentions in user-facing skills. Internal `_BRIEFING_GUARDED_SUFFIX` variable name + log lines left intact (not user-facing).
+
+**Final session state.** Both commits pushed to `origin` (dufis1) and `public` (1-800-operator). Plugin v0.1.24 live in the desktop app. Pre-existing modifications (`docs/handoff.md`, `debug/14_22_pty_spike/bench/state/replies.jsonl`) and pre-existing untracked debug artifacts left alone.
+
+**Next:**
+- **Live-validate worker respawn** (S244 carry) — no test that killed a running worker.
+- **Live-validate the audio.py drain fix in production** (S244 carry) — unit-tested but hard to trigger at the exact tick boundary.
+- **Worker-spawn-failure path not tested** (S244 carry).
+- **`debug/model-log.md` reconstitution** — debt unchanged this session (no new log lines added), but the S244 + earlier backlog still standing.
+- **Validate post-change Chrome eviction with an actual evict** (S243 carry).
+- **H-23 AEC** deferred — multi-session scope.
+- **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).
+- **TCC warmup on a fresh user account** (S237 carry).
+- **Orphan inner-claude post-Chrome-close** (S234 carry).
+- **`_last_s_speaker` cleanup** (S235 carry).
+- **Long-meeting CPU/heat for faster-whisper** (S233 carry).
+- **Option B fallback (S245)** — if the briefing tab-close paragraph degrades in practice, the next-tier fix is on-shutdown injection of a `[SYSTEM] Meeting <slug> ended` turn into the shared session before SIGTERM. Not building until briefing-only proves insufficient.
+
+---
+
+### Hard Won Knowledge (S245)
+
+- **For LLM-reasoning bugs, try the briefing/prompt fix before architectural plumbing.** (Session 245, May 18 2026.) The "another bot joined / 3 bot instances running (PIDs 31953, 32157, 32315)" confabulation looked like it needed transcript injection on shutdown (Option B): write a clean "meeting ended" turn into the shared session before SIGTERM, so a resumed Claude reads explicit closure rather than inferring from incomplete scrollback. Talked through the mechanism (PTY claude shares the session via `--resume-session`; both surfaces write to the same JSONL; injecting via PTY stdin lands a clean user-turn + assistant-turn in the record). User pushed back: "Why not just add to the briefing that meetings can end two ways, and Claude should query status before assuming?" Shipped 47-word briefing addition (Option A) instead. Live-validated: completely killed the confabulation. The lesson: when Claude is wrong about something it could check via an existing tool (`operator status`, MCP queries), the cheapest fix is "tell it not to guess, point it at the tool" — not "give it a signal it shouldn't need." Architectural fixes for LLM-reasoning bugs are over-engineering by default. Memory link: `project_briefing_minimal_tokens`.
+
+- **Bash tool cwd persistence is silent — when a command chain ends in `cd <elsewhere>`, the next call inherits the new cwd with no notification.** (Session 245, May 18 2026.) After publishing the plugin, I ran a chain ending with `cd /Users/jojo/.claude/plugins/marketplaces/1-800-operator && git pull && claude plugin update operator`. The next call (`git reflog | head -20`) executed in the marketplace cache, not in operator main. Both directories are clones of related repos, so the output looked plausibly like operator main. I was about to declare my session edits "missing" before grep against the on-disk files (still in /Users/jojo/Desktop/operator/) showed them present. The contradiction (`git diff HEAD` empty AND `git show HEAD:doctor.py | grep _installer_fix` returning 0) was the smoking gun: I was diffing the marketplace cache's HEAD against itself. **Generalizable:** for stateful git operations, either `cd /Users/jojo/Desktop/operator &&` prefix every call to make cwd explicit, or `pwd` first to confirm. The Bash tool's "Shell cwd was reset to ..." notice is not always emitted — when it isn't, the previous cwd persists silently.
+
+- **`replace_all=true` is only safe for renames, never for "apply this edit to multiple call sites" — even when the call sites look identical.** (Session 245, May 18 2026 — recurrence of an S244 lesson.) When fixing the doctor's fix-line strings (8 sites across 4 checks), I considered using `replace_all=true` on the `re-run install.sh` → `_installer_fix()` substitution. Stopped because the surrounding context differed at each site (different `detail=...` lines, different fix substrings). Same lesson as S244's reaper-exclude near-miss. **Generalizable:** when the change pattern is "same Edit applied to multiple sites," do separate single-site Edit calls and verify each. `replace_all` is for renames where the token has identical semantics everywhere.
+
+---
+
+### Prior Status (preserved — S244)
+
 **Session 244 (May 18, 2026) — whisper STT extracted into a worker subprocess; shutdown drain decoupled from main; trailing-utterance loss bug fixed.** QA Monday session that started as a wiretap-mode validation pass turned into a focused fix for a structural bug: when the user closed a Meet tab mid-utterance, the in-process drain had a 1.5s join cap against whisper work that takes 3-7s, so the last utterance was dropped on every meeting close. Two meetings in a row exhibited the symptom (kjy-ddsj-kfi truncated mid-Kyle-farewell; tkp-vidw-nfi happened to land on the natural-sounding "Okay. Thanks, guys." right before the cutoff so the issue was invisible). Built five spikes upfront to de-risk a worker-subprocess architecture, then implemented + validated end-to-end in three more iterations of "run a live meeting and verify a specific failure mode."
 
 **Architecture (S244).** New module `src/_1_800_operator/pipeline/whisper_worker.py`. Main process keeps Chrome + Swift audio helper + AEC3 + JS observer; the worker subprocess owns AudioProcessor (S+M), speaker timeline, attribution, bleed dedupe, and caption JSONL writes. Wire protocol: 1-byte tag + 4-byte BE length + payload over worker stdin. Tags S/M = framed Float32 PCM; tag E = UTF-8 JSON control event (speaker_start, speaker_stop, mic_label, shutdown). Main exits in ~0.6-1.4s as before; the worker drains its residual audio + writes the JSONL seal independently in another ~3-7s. Worker spawned with `start_new_session=True` so it lives in its own session group.
@@ -38,22 +84,7 @@
 
 **Live validation.** Multiple wiretap + slip meetings. Mid-utterance interrupt captured ("This is Jojo speaking. I'm going to cut Jojo off in three, two, one." landed). Single `meeting_end` seal per session. Same-link reconnect appends to same JSONL with clean per-session seals (simulates dropped-connection-and-rejoin). Slip-mode @claude chat path still works (worker refactor didn't touch the provider/chat surface). 6.3s worst-case drain observed (two legs of in-flight whisper).
 
-**Final session state.** One large commit on operator-main (not yet pushed to origin or public). Plugin untouched. 20 test files green throughout.
-
-**Next:**
-- **Push the S244 commit to origin + public.**
-- **Live-validate worker respawn** — no test that killed a running worker this session.
-- **Live-validate the audio.py drain fix in production** — unit-tested but hard to trigger at the exact tick boundary.
-- **Worker-spawn-failure path not tested** — could spike by temporarily breaking the worker entrypoint.
-- **`operator doctor` MCP-registration check** (S243 PM carry).
-- **`debug/model-log.md` reconstitution** — debt grew further: new `TIMING whisper_worker_drain elapsed_s=X`; new `whisper_worker: ...` log family; new `_shutdown: seal deferred to whisper_worker`; new `Safety net: excluded from reap`; new `AttachAdapter: whisper_worker handed off`.
-- **Validate post-change Chrome eviction with an actual evict** (S243 carry).
-- **H-23 AEC** deferred — multi-session scope.
-- **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).
-- **TCC warmup on a fresh user account** (S237 carry).
-- **Orphan inner-claude post-Chrome-close** (S234 carry).
-- **`_last_s_speaker` cleanup** (S235 carry) — partially redundant now that the speaker timeline replica lives in the worker.
-- **Long-meeting CPU/heat for faster-whisper** (S233 carry).
+**Final session state (S244).** One large commit on operator-main; pushed to both remotes in S245.
 
 ---
 

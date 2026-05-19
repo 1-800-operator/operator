@@ -1,30 +1,74 @@
-# Session 243 handoff (continued — 2026-05-17 PM)
+# Session 245 handoff (2026-05-18)
 
 ## What got done
 
-Six commits this stretch on top of the morning's audio-helper rebrand:
-
-- **`0f4c579`** — five audits (A1–A5) consolidated into one 1637-line `docs/launch-audit-findings.md`. A2 H-IDs renumbered with `(formerly H-N)` parentheticals. Satellite files deleted.
-- **`d587083`** — H-7 (formerly H-22) day-scoped meeting slugs: `<code>_<YYYYMMDD>` local time. Recurring meetings separate cleanly. Legacy 204 JSONLs left as-is.
-- **`bd1eb83`** — local Meet tile predicate fix: switched from negative-space "no Pin button" (broken in 2-person calls) to positive "has Reframe / Backgrounds and effects buttons." Same fix landed in the speaking observer.
-- **`ac10d4d`** — shutdown teardown parallelized: 12s → 1–3s. SIGTERM grace 5s → 0.5s (empirically claude never exits within 5s), provider+classifier parallel in `runner.stop`, runner.stop+connector.leave parallel in `_shutdown`. JSONL integrity verified clean across 5 live shutdown tests.
-- **`c3dd5c8`** — 5 brittleness audit fixes from a subagent run: `--lang=en-US` Chrome flag (#1), drop Leave-call AND in entry detection (#2), locale-agnostic sender extraction (#5), direct chat-panel locator (#6), silent-breakage warning for the speaking observer (#7), room-code segment match in `_find_or_open_meet_page` (#8). Dropped #3 (validated), deferred #4 (not concerning).
-- **`1a995ee`** — TIMING instrumentation expanded across slip startup phases, TCC preflight, `send_chat` round-trip, time-to-first-token.
-
-Plus a runtime MCP fix (not committed code): the user's `~/.claude.json` had a stale `transcript` MCP registration pointing at the renamed `transcript_server` module — silently failed. Removed + re-added as `operator-meeting-record`.
+Three shipped changes on operator-main + a plugin v0.1.24 copy
+rewrite. Doctor got a new `_check_meeting_record_mcp` check that
+verifies both registration (`claude mcp list` parse) and allowlist
+(`mcp__operator-meeting-record__*` in settings.json) — closes the
+S243 PM carry. New `_installer_fix()` helper replaced 8 "re-run
+install.sh" fix strings across MCP / audio-helper / faster-whisper
+/ aec3 checks with consistent dual-target wording ("ask Claude to
+fix this, or re-run the installer: curl -LsSf
+https://1-800-operator.com/install | bash"). Inner-claude /
+outer-claude jargon scrubbed from all user-facing doctor strings.
+The biggest user-facing fix was a 47-word `_BRIEFING` addition
+that killed a confabulation bug: when the user closed a Meet tab
+(instead of `/operator:hangup`), Claude Code sessions were sitting
+in "Needs input" state with claude falsely claiming "another bot
+joined" / "3 bot instances running simultaneously (PIDs …)". Root
+cause: PTY claude resumes the shared session with no closure
+marker in scrollback, confabulates duplicates from partial signal.
+Initial design instinct was Option B (on-shutdown injection of a
+[SYSTEM] meeting-ended turn); user pushed for the cheaper
+prompt-level fix first. Live-validated. Plugin v0.1.24 also
+shipped: scrubbed "guarded mode" everywhere, reframed slip-yolo
+as the goal mode ("the chat panel becomes a full Claude session"),
+added Hears/Context bullets across all three slip modes,
+emphasized local privacy + drove users to `/operator:recap` in
+wiretap. Two commits on operator-main pushed to both remotes;
+plugin tagged + pushed; marketplace cache pulled; desktop app
+updated 0.1.22 → 0.1.24 + user restarted.
 
 ## Exact next step
 
-**Push `c3dd5c8` and `1a995ee`** to origin. Branch is 2 ahead at session end. Everything earlier is already pushed.
-
-After push, two short follow-ups worth considering:
-
-1. **Add an `operator doctor` MCP-registration check** — one-line `claude mcp list` parse that catches the stale-registration foot-gun the user hit this session. Same shape as the existing doctor checks.
-
-2. **`debug/model-log.md` reconstitution** — the teardown TIMING lines (`TIMING runner_stop`, `TIMING shutdown mode=…`, `phase1_total`) and the broader S243 TIMING expansion (slip startup phases, TCC preflight fast/warmup paths, `send_chat_first_ms` / `_max_ms`, first-block transcript timestamps) are new strings not yet documented. Debt has been accumulating since S240.
+No required next step. Optional pickups in priority order:
+**Live-validate worker respawn** (S244 carry — kill the worker pid
+mid-meeting via `kill <pid>` while someone is speaking; expect
+"whisper_worker (pid=X) died mid-meeting — respawning" + captions
+resume on the new worker). After that, the **`debug/model-log.md`
+reconstitution** is the highest-value debt cleanup.
 
 ## Open items / blockers
 
-- **Shared-context bridge leak** explored thoroughly this session. Spike validated that concurrent `claude --resume <id>` produces clean parent_uuid branches (no corruption). Decision: don't fix for v1 — realistic threat model is small; "talking shit about participants in IDE" is unlikely, "remind me what she said" is wiretap territory. Workaround documented: dev/test operator from a different Claude Code session than the one running `/operator:slip`.
-- **Brittleness audit #4** (`span.notranslate` dependency for names) deferred — user not concerned. Could re-surface if Meet ever drops the class for phone-dial-in participants.
-- **All pre-existing carry-forwards** still stand: H-23 AEC, A3 promotion candidates, A3 duplication cleanup, TCC fresh-account validation, orphan inner-claude post-Chrome-close, `_last_s_speaker` cleanup, long-meeting whisper CPU/heat bench.
+- **Live-validate worker respawn** (S244 carry).
+- **Live-validate audio.py drain fix in production** (S244 carry).
+- **Worker-spawn-failure path not tested** (S244 carry).
+- **`debug/model-log.md` reconstitution** — backlog unchanged
+  this session (S245 added no new log lines) but the prior backlog
+  from S244 (`TIMING whisper_worker_drain`, `whisper_worker: …`
+  family, `_shutdown: seal deferred to whisper_worker`,
+  `Safety net: excluded from reap`, `AttachAdapter: whisper_worker
+  handed off`) is still standing.
+- **Option B fallback (S245)** — if the briefing tab-close fix
+  ever degrades, the next-tier fix is on-shutdown injection of a
+  `[SYSTEM] Meeting <slug> ended` turn into the shared session
+  before SIGTERM. Not building until briefing-only proves
+  insufficient.
+- **Validate post-change Chrome eviction with an actual evict**
+  (S243 carry).
+- **TCC warmup on a fresh user account** (S237 carry).
+- **A3 promotion candidates + duplication cleanup** (S241 carry).
+- **Orphan inner-claude post-Chrome-close** (S234 carry).
+- **`_last_s_speaker` cleanup** (S235 carry).
+- **Long-meeting CPU/heat for faster-whisper** (S233 carry).
+- **H-23 AEC** (multi-session scope).
+- **QA items the user is updating async** in `docs/qa-monday.md`.
+
+## Working-tree state
+
+Pre-existing modifications left untouched (not from this session):
+`debug/14_22_pty_spike/bench/state/replies.jsonl`,
+`docs/handoff.md` (will be overwritten by this skill — that's
+expected), plus a pile of untracked debug artifacts + docs from
+prior days. None are S245's to commit.
