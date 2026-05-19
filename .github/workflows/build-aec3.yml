@@ -1,0 +1,90 @@
+name: Build aec3 universal binary
+
+# AEC3 is the speaker-bleed cleaner that strips remote-meeting audio
+# from the user's mic stream before whisper sees it. Without it,
+# built-in-speaker users' mic transcripts include the other side of
+# the call. The binary is built from Rust source at
+# src/_1_800_operator/rust/aec3/, but the upstream
+# webrtc-audio-processing-sys crate's meson build doesn't honor
+# cargo's --target flag, so we can't cross-build x86_64 from arm64
+# (or vice versa). Instead this workflow builds each arch on a
+# native macOS runner, then lipos them into a universal binary and
+# attaches it to the GitHub release. install.sh downloads it at
+# install time.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-arch:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            arch: arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Rust target installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build aec3
+        working-directory: src/_1_800_operator/rust/aec3
+        run: cargo build --release --locked --frozen --target ${{ matrix.target }}
+
+      - name: Verify architecture
+        working-directory: src/_1_800_operator/rust/aec3
+        run: |
+          file target/${{ matrix.target }}/release/aec3
+          file target/${{ matrix.target }}/release/aec3 | grep -q "${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aec3-${{ matrix.arch }}
+          path: src/_1_800_operator/rust/aec3/target/${{ matrix.target }}/release/aec3
+          retention-days: 7
+
+  lipo-and-release:
+    needs: build-arch
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aec3-arm64
+          path: ./arm64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: aec3-x86_64
+          path: ./x86_64
+
+      - name: lipo into universal binary
+        run: |
+          chmod +x ./arm64/aec3 ./x86_64/aec3
+          lipo -create ./arm64/aec3 ./x86_64/aec3 -output ./aec3-darwin-universal
+          chmod +x ./aec3-darwin-universal
+          file ./aec3-darwin-universal
+          file ./aec3-darwin-universal | grep -q "Mach-O universal"
+
+      - name: SHA256 checksum
+        run: shasum -a 256 ./aec3-darwin-universal | tee ./aec3-darwin-universal.sha256
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./aec3-darwin-universal
+            ./aec3-darwin-universal.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

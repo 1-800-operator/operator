@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.26}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.27}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -430,40 +430,57 @@ fi
 # user's mic include the remote audio playing through the user's speakers
 # (when the user is on built-in speakers; headphone users are unaffected).
 #
-# Build-from-source for now: needs `cargo` on PATH. Soft-skip if missing —
-# dial still runs, just without the bleed defense. A future release will
-# ship a prebuilt binary in the wheel (parallel to the Swift helper's
-# signed-.app path) so cargo isn't required at install time.
+# Delivery: the GitHub Actions workflow at .github/workflows/build-aec3.yml
+# builds aec3 on macos-14 (arm64) + macos-13 (x86_64), lipos them into a
+# universal Mach-O binary, and attaches it to the GitHub release matching
+# the operator version tag. install.sh downloads the universal binary from
+# that release. If the download fails (CI in progress, release tag missing
+# the asset, offline install) we fall back to building from Rust source via
+# cargo — same hygiene flags as before (--locked --frozen). If cargo is
+# also missing, we surface the existing warning and leave dial without the
+# bleed defense (headphone users unaffected; built-in-speaker users see
+# their own speaker output in transcripts).
 
 if [ "${OS}" = "macos" ]; then
-  bold "Building aec3 (speaker-bleed cleaner)..."
+  bold "Installing aec3 (speaker-bleed cleaner)..."
   TOOL_DIR="$(uv tool dir)/1-800-operator"
   PY_IN_TOOL="${TOOL_DIR}/bin/python"
   BIN_DIR="${HOME}/.operator/bin"
   mkdir -p "${BIN_DIR}"
 
-  if [ ! -x "${PY_IN_TOOL}" ]; then
-    err "Could not find tool venv python at ${PY_IN_TOOL} — skipping aec3 build."
-  elif ! command -v cargo >/dev/null 2>&1; then
-    warn "cargo not found — skipping aec3 build."
-    warn "Dial will run without the speaker-bleed cleaner (mic transcripts may include"
-    warn "remote audio playing through your speakers; headphone users are unaffected)."
-    warn "To enable AEC: install Rust (https://rustup.rs/) and re-run install.sh."
+  AEC3_RELEASE_URL="https://github.com/1-800-operator/operator/releases/download/${OPERATOR_INSTALL_REF}/aec3-darwin-universal"
+  AEC3_DEST="${BIN_DIR}/aec3"
+  AEC3_TMP="$(mktemp -t aec3-XXXXXX)"
+
+  if curl -fsSL --max-time 60 -o "${AEC3_TMP}" "${AEC3_RELEASE_URL}" 2>/dev/null && \
+     file "${AEC3_TMP}" | grep -q "Mach-O"; then
+    chmod +x "${AEC3_TMP}"
+    mv "${AEC3_TMP}" "${AEC3_DEST}"
+    info "Installed aec3 (prebuilt universal): ${AEC3_DEST}"
   else
-    PKG_RUST_DIR="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "rust" / "aec3")')"
-    if [ ! -f "${PKG_RUST_DIR}/Cargo.toml" ]; then
-      warn "Rust source not present in wheel (${PKG_RUST_DIR}) — skipping aec3 build."
+    rm -f "${AEC3_TMP}"
+    # Release asset unavailable — fall back to building from source.
+    if [ ! -x "${PY_IN_TOOL}" ]; then
+      err "Could not find tool venv python at ${PY_IN_TOOL} — skipping aec3 build."
+    elif ! command -v cargo >/dev/null 2>&1; then
+      warn "Prebuilt aec3 unavailable for ${OPERATOR_INSTALL_REF} and cargo not found — skipping aec3."
+      warn "Dial will run without the speaker-bleed cleaner (mic transcripts may include"
+      warn "remote audio playing through your speakers; headphone users are unaffected)."
+      warn "To enable AEC: install Rust (https://rustup.rs/) and re-run install.sh,"
+      warn "or wait for the prebuilt binary to be attached to the ${OPERATOR_INSTALL_REF} release."
     else
-      # --locked + --frozen refuse to touch Cargo.lock and refuse to
-      # talk to crates.io if Cargo.lock is missing or out of date. Same
-      # supply-chain hygiene as the uv-tool pin above: an upstream
-      # crate version-bump shouldn't silently land on user machines.
-      if cargo build --release --locked --frozen --manifest-path "${PKG_RUST_DIR}/Cargo.toml"; then
-        cp "${PKG_RUST_DIR}/target/release/aec3" "${BIN_DIR}/aec3"
-        chmod +x "${BIN_DIR}/aec3"
-        info "Installed aec3: ${BIN_DIR}/aec3"
+      info "Prebuilt aec3 unavailable — building from source (this takes ~30s)..."
+      PKG_RUST_DIR="$(${PY_IN_TOOL} -c 'import _1_800_operator, pathlib; print(pathlib.Path(_1_800_operator.__file__).parent / "rust" / "aec3")')"
+      if [ ! -f "${PKG_RUST_DIR}/Cargo.toml" ]; then
+        warn "Rust source not present in wheel (${PKG_RUST_DIR}) — skipping aec3."
       else
-        err "cargo build failed — dial will run without the speaker-bleed cleaner."
+        if cargo build --release --locked --frozen --manifest-path "${PKG_RUST_DIR}/Cargo.toml"; then
+          cp "${PKG_RUST_DIR}/target/release/aec3" "${AEC3_DEST}"
+          chmod +x "${AEC3_DEST}"
+          info "Built and installed aec3 from source: ${AEC3_DEST}"
+        else
+          err "cargo build failed — dial will run without the speaker-bleed cleaner."
+        fi
       fi
     fi
   fi
