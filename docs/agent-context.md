@@ -39,7 +39,6 @@ Audit grep confirmed zero remaining "guarded mode" mentions in user-facing skill
 - **Live-validate worker respawn** (S244 carry) — no test that killed a running worker.
 - **Live-validate the audio.py drain fix in production** (S244 carry) — unit-tested but hard to trigger at the exact tick boundary.
 - **Worker-spawn-failure path not tested** (S244 carry).
-- **`debug/model-log.md` reconstitution** — debt unchanged this session (no new log lines added), but the S244 + earlier backlog still standing.
 - **Validate post-change Chrome eviction with an actual evict** (S243 carry).
 - **H-23 AEC** deferred — multi-session scope.
 - **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).

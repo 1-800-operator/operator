@@ -28,7 +28,6 @@
 - **Live-validate worker respawn** — coded but no live test that kills a running worker mid-meeting to confirm replay actually works.
 - **Live-validate the audio.py drain fix** — unit-tested but hard to trigger live (requires interrupting at the exact tick boundary).
 - **Worker-spawn-failure path not tested** — could spike by temporarily breaking the worker entrypoint.
-- **`debug/model-log.md` reconstitution** — debt grew further in S244 + S245: S244 added `TIMING whisper_worker_drain elapsed_s=X`, `whisper_worker: ...` log family, `_shutdown: seal deferred to whisper_worker`, `Safety net: excluded from reap`, `AttachAdapter: whisper_worker handed off`. S245 didn't add new log lines but the backlog from prior sessions is still standing.
 - **Validate post-change Chrome eviction with an actual evict** (S243 carry).
 - **H-23 AEC** (multi-session scope).
 - **`_last_s_speaker` cleanup** (S235 carry) — partially redundant now that the speaker timeline replica lives in the worker.

@@ -162,6 +162,15 @@ _SPEAKER_OTHER = "other"
 # per-call DOM walk doesn't pile up.
 _SPEAKING_RESCAN_INTERVAL_S = 2.0
 
+# Worker-respawn circuit breaker. After _RESPAWN_BREAKER_THRESHOLD
+# respawn attempts inside _RESPAWN_BREAKER_WINDOW_S, give up for the
+# remainder of the meeting. Sized for "transient crash deserves a few
+# tries, permanent crash should stop fast" — a healthy worker that dies
+# once gets respawned cleanly; a broken-on-startup worker only burns 3
+# spawn cycles before the breaker trips.
+_RESPAWN_BREAKER_THRESHOLD = 3
+_RESPAWN_BREAKER_WINDOW_S = 10.0
+
 
 class SlipAttachError(RuntimeError):
     """Raised when the slip-mode attach lifecycle fails fatally.
@@ -605,6 +614,15 @@ class AttachAdapter(MeetingConnector):
         # which goes through _send_worker_frame and acquires the write lock.
         self._audio_worker_respawn_lock = threading.Lock()
         self._audio_worker_shutdown_sent = False
+        # Respawn circuit breaker — protects against respawn storms when the
+        # worker crashes immediately on every spawn (broken module, missing
+        # dep, etc.). Without this, ~100 audio frames/sec would each trigger
+        # a fresh spawn-and-die cycle for the whole meeting. After
+        # _RESPAWN_BREAKER_THRESHOLD attempts inside _RESPAWN_BREAKER_WINDOW_S,
+        # disable further respawn and log loudly. Captions are lost for the
+        # rest of the meeting, but the process stays sane.
+        self._respawn_attempts: deque[float] = deque(maxlen=16)
+        self._respawn_disabled = False
         self._playwright = None
         self._browser = None
         self._page = None
@@ -734,6 +752,31 @@ class AttachAdapter(MeetingConnector):
         # has remote participants. Fires once per meeting, then suppresses.
         self._speaking_events_seen = 0
         self._speaking_breakage_warned = False
+        # Optional forensic dump of per-tile DOM state at every speaker-observer
+        # fire. Gated behind OPERATOR_DEBUG_SPEAKER_SNAPSHOTS=1 — off-path costs
+        # zero. The JS observer always captures the snapshot (cheap, only walks
+        # tiles); Python writes it to disk only when this flag is set. Use to
+        # correlate misattribution incidents against a screen recording.
+        self._speaker_snapshot_debug = os.environ.get(
+            "OPERATOR_DEBUG_SPEAKER_SNAPSHOTS", ""
+        ).strip() in ("1", "true", "yes")
+        self._speaker_snapshot_path: Path | None = None
+        if self._speaker_snapshot_debug and self._jsonl_path is not None:
+            try:
+                os.makedirs(config.DEBUG_DIR, exist_ok=True, mode=0o700)
+                self._speaker_snapshot_path = (
+                    Path(config.DEBUG_DIR)
+                    / f"speaker_snapshots_{self._jsonl_path.stem}.jsonl"
+                )
+                log.info(
+                    f"AttachAdapter: speaker snapshot debug ON → "
+                    f"{self._speaker_snapshot_path}"
+                )
+            except Exception as e:
+                log.warning(
+                    f"AttachAdapter: speaker snapshot debug setup failed: {e}"
+                )
+                self._speaker_snapshot_path = None
         # S244: spawn the whisper_worker subprocess now so its model load
         # runs in parallel with Chrome launch + lobby wait. The spawn
         # itself is fire-and-forget (Popen returns in milliseconds); the
@@ -1388,6 +1431,23 @@ class AttachAdapter(MeetingConnector):
                 # correct anchor for chunk-start lookups.
                 ev_t_ms = ev.get("t")
                 ev_t = (ev_t_ms / 1000.0) if isinstance(ev_t_ms, (int, float)) else time.time()
+                if self._speaker_snapshot_path is not None:
+                    try:
+                        with self._speaker_snapshot_path.open("a") as f:
+                            f.write(json.dumps({
+                                "t": ev_t,
+                                "event": {
+                                    "participant_id": pid,
+                                    "name": name,
+                                    "speaking": speaking,
+                                },
+                                "local_pid": self._local_participant_id,
+                                "snapshot": ev.get("snapshot") or [],
+                            }) + "\n")
+                    except Exception as e:
+                        log.debug(
+                            f"AttachAdapter: speaker snapshot write failed: {e}"
+                        )
                 if speaking:
                     self._speaking_participants[pid] = name
                     self._last_s_speaker = name
@@ -1761,6 +1821,25 @@ class AttachAdapter(MeetingConnector):
         with self._audio_worker_respawn_lock:
             # Another thread may have respawned already.
             if self._audio_worker_proc is not dead_proc:
+                return
+            if self._respawn_disabled:
+                return
+            now = time.monotonic()
+            while (
+                self._respawn_attempts
+                and (now - self._respawn_attempts[0]) > _RESPAWN_BREAKER_WINDOW_S
+            ):
+                self._respawn_attempts.popleft()
+            self._respawn_attempts.append(now)
+            if len(self._respawn_attempts) > _RESPAWN_BREAKER_THRESHOLD:
+                log.error(
+                    f"AttachAdapter: whisper_worker respawn storm — "
+                    f"{len(self._respawn_attempts)} attempts in "
+                    f"{_RESPAWN_BREAKER_WINDOW_S:.0f}s. Disabling further "
+                    f"respawn; captions will be lost for the rest of this meeting."
+                )
+                self._respawn_disabled = True
+                self._audio_worker_proc = None
                 return
             old_pid = dead_proc.pid
             exit_code = dead_proc.returncode

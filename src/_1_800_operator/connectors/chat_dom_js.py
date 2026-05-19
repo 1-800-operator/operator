@@ -237,11 +237,46 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
         return false;
     }
 
+    function speakingClassCount(tile) {
+        var els = tile.querySelectorAll('*');
+        var n = 0;
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].classList.contains('BlxGDf')) n += 1;
+        }
+        return n;
+    }
+
+    function isLocalTile(tile) {
+        return !!tile.querySelector('button[aria-label="Reframe"], button[aria-label="Backgrounds and effects"]');
+    }
+
+    // Capture per-tile DOM state at the exact instant a speaker observer
+    // fires. Used for forensic attribution debugging — correlate against a
+    // screen recording to see whether Meet's BlxGDf class was on the
+    // expected tile when the observer triggered. Cheap (only walks tiles,
+    // not full DOM) and always built, so Python can gate the on-disk dump
+    // without re-evaluating JS.
+    function snapshotAllTiles() {
+        var out = [];
+        var allTiles = document.querySelectorAll('[data-requested-participant-id]');
+        for (var i = 0; i < allTiles.length; i++) {
+            var t = allTiles[i];
+            out.push({
+                pid: t.getAttribute('data-requested-participant-id') || '',
+                name: getName(t),
+                has_speaking_class: hasSpeakingClass(t),
+                speaking_class_count: speakingClassCount(t),
+                is_local: isLocalTile(t),
+            });
+        }
+        return out;
+    }
+
     var tiles = document.querySelectorAll('[data-requested-participant-id]');
 
     var localPid = '';
     for (var i = 0; i < tiles.length; i++) {
-        if (!tiles[i].querySelector('button[aria-label="Reframe"], button[aria-label="Backgrounds and effects"]')) continue;
+        if (!isLocalTile(tiles[i])) continue;
         var sp = tiles[i].querySelector('span.notranslate');
         if (sp && (sp.textContent || '').trim()) {
             localPid = tiles[i].getAttribute('data-requested-participant-id') || '';
@@ -269,7 +304,8 @@ INSTALL_SPEAKING_OBSERVER_JS = """() => {
                     participant_id: id,
                     name: getName(tile),
                     speaking: now,
-                    t: Date.now()
+                    t: Date.now(),
+                    snapshot: snapshotAllTiles()
                 });
             }
         });

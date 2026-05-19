@@ -36,20 +36,13 @@ No required next step. Optional pickups in priority order:
 **Live-validate worker respawn** (S244 carry — kill the worker pid
 mid-meeting via `kill <pid>` while someone is speaking; expect
 "whisper_worker (pid=X) died mid-meeting — respawning" + captions
-resume on the new worker). After that, the **`debug/model-log.md`
-reconstitution** is the highest-value debt cleanup.
+resume on the new worker).
 
 ## Open items / blockers
 
 - **Live-validate worker respawn** (S244 carry).
 - **Live-validate audio.py drain fix in production** (S244 carry).
 - **Worker-spawn-failure path not tested** (S244 carry).
-- **`debug/model-log.md` reconstitution** — backlog unchanged
-  this session (S245 added no new log lines) but the prior backlog
-  from S244 (`TIMING whisper_worker_drain`, `whisper_worker: …`
-  family, `_shutdown: seal deferred to whisper_worker`,
-  `Safety net: excluded from reap`, `AttachAdapter: whisper_worker
-  handed off`) is still standing.
 - **Option B fallback (S245)** — if the briefing tab-close fix
   ever degrades, the next-tier fix is on-shutdown injection of a
   `[SYSTEM] Meeting <slug> ended` turn into the shared session
