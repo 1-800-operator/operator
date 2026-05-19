@@ -26,5 +26,14 @@
     <string>Operator transcribes meeting audio so it can join chat conversations.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Operator transcribes your voice locally for dial-mode chat.</string>
+    <!-- Opts into AVCaptureDeviceTypeContinuityCamera (the new type) for
+         Continuity Camera discovery, silencing the AVFoundation deprecation
+         warning that fires during AVCaptureDevice enumeration. We don't
+         actually use Continuity Cameras (we're audio-only), but the
+         enumeration path that finds the default audio device internally
+         touches the same device-type registry, so opting in cleanly here
+         keeps stderr quiet and removes the deprecation time-bomb. -->
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
 </dict>
 </plist>

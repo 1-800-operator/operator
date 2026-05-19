@@ -1,5 +1,47 @@
 # Session 248 handoff (2026-05-19)
 
+## v0.1.36 — AVFoundation deprecation fix + VPIO investigation
+
+Two follow-ups on top of v0.1.35:
+
+1. **Info.plist:** added `NSCameraUseContinuityCameraDeviceType=YES` to
+   silence the `AVCaptureDeviceTypeExternal is deprecated` warning that
+   fired at every helper startup. AVFoundation's audio-device enumeration
+   internally touches the camera device registry, where the deprecated
+   type lived. Pure cosmetic warning today, but a deprecation time-bomb;
+   this opts into the new `AVCaptureDeviceTypeContinuityCamera` discovery
+   path and the warning is gone.
+
+2. **VPIO research, rolled back.** Spiked Apple's
+   kAudioUnitSubType_VoiceProcessingIO via AVAudioEngine + voice
+   processing as a potential aec3 replacement. The BT HFP exclusivity
+   that originally drove us away from AVAudioEngine (S209) IS gone in
+   macOS 14+ — AVAudioEngine.inputNode delivers audio cleanly alongside
+   Chrome's WebRTC on AirPods now, validated empirically in
+   debug/14_33_vpio_spike/. But the actual VPIO output is **too variable
+   for production on AirPods**:
+     - 5 separate STT runs with identical config produced RMS values
+       ranging from 0.0004 (silence) to 0.032 (talking).
+     - Even the best run only got 10/12 words right; AVCaptureSession +
+       aec3 deterministically hits 8-9/9.
+     - AGC trade-off is unresolvable: AGC on → clips low-energy phonemes
+       (articles, fillers); AGC off → AirPods HFP signal is below
+       whisper's recognition threshold (RMS ~0.008).
+     - Same source audio resampled with scipy.signal.resample_poly →
+       perfect STT. Same source through AVAudioConverter (even at .max
+       quality + Mastering algorithm) → degraded.
+   The original goals (drop aec3 binary, kill macos-13 CI bottleneck)
+   are real but solvable a different way — drop x86_64 from prebuilt
+   aec3 in the next session, keep cargo fallback for Intel users (same
+   UX, no architectural risk).
+
+Spike artifacts at `debug/14_33_vpio_spike/` (kept for reference;
+includes the channel-identification finding that VPIO with AirPods
+delivers 3 identical channels). Don't re-investigate VPIO without a
+new piece of evidence — the consistency problem isn't from a knob we
+can reach.
+
+
 ## What got done
 
 **Phase 14.32 — Core Audio Tap API migration shipped end-to-end.**
