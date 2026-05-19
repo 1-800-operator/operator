@@ -1,5 +1,15 @@
 # Operator — Roadmap
 
+## Launch-blocking
+
+Items that must clear before submitting to the Anthropic community plugin
+marketplace ([clau.de/plugin-directory-submission](https://clau.de/plugin-directory-submission)).
+Submission triggers automated safety screening + manual review; after
+acceptance, version bumps auto-publish (CI re-pins the catalog on push),
+but the *first* submission is the one gate.
+
+- **Run `claude plugin validate` against operator-plugin.** Cheap insurance against bouncing on something mechanical. The auto-screen checks: plugin.json manifest schema + required fields, SKILL.md / agent frontmatter / hooks.json schemas, hardcoded credentials (API keys, tokens), absolute paths, sensitive-data patterns, MCP endpoints must be HTTPS/WSS not HTTP/WS, basic path-traversal / injection. Fix anything it flags before submitting. Manual review criteria are opaque; the bar can only be inferred from the existing accepted catalog at `anthropics/claude-plugins-community/.claude-plugin/marketplace.json`. Plugin name (`operator`) becomes the skill namespace (`/operator:dial`, etc.) — irreversible once accepted, so worth a final sanity-check that the namespace + skill names read well.
+
 ## Post-launch
 
 Items deferred until after launch — not blocking, parked here so they
@@ -14,7 +24,17 @@ don't keep accreting in current open-items lists.
 
 ---
 
-*Last updated: May 19, 2026 (session 249 — hybrid asymmetric VAD shipped. Silero VAD + RMS safety net replaces RMS-only thresholding. Built-in mic at default input volume now captures cleanly across all amplitude ranges; ambient room noise no longer produces phantom utterances; "Thank you" hallucinations filtered only when Silero never fired. Live-validated against multi-device swap meeting: 4 device transitions, 6 utterances captured verbatim including countdowns and trailing words that previously got truncated.)*
+*Last updated: May 19, 2026 (session 250 — Google Chat space-embed support + audio-replay corpus. Workspace meets render chat in a cross-origin chat.google.com iframe that Playwright's connect_over_cdp won't expose in page.frames; built a stdlib-only sync CDP-target client (cdp_ws.CDPTarget, no new dep) to read AND send through the OOPIF directly. Fixed a live self-echo loop. Read path validated live e2e; full dial read→reply loop NOT yet confirmed in a fresh dial session — see carry-forward.)*
+
+**Session 250 highlights:**
+
+- **Google Chat space-embed (workspace meet) chat support.** A Meet attached to a Google Chat space renders chat in a cross-origin `chat.google.com` iframe instead of the in-page `[data-panel-id]` panel. Root cause of "dial reads nothing in workspace meets": Playwright's `connect_over_cdp` does NOT stitch that OOPIF into `page.frames` (it's a plain `type=iframe` target; `setAutoAttach` doesn't surface it; `CDPSession` can't route to the flattened sub-session). Fix reaches the iframe by its **own CDP target websocket**: `connectors/cdp_ws.py` `CDPTarget` is a minimal stdlib-only synchronous websocket/CDP client (no `websockets` dep — `asyncio.run()` collides with Playwright's loop on the browser thread, so a sync client is the clean fit). `attach_adapter` gains `_discover_gchat_target_ws` (+`/json` target list) + `_iframe_evaluate`/`_iframe_send` (lazy connect, reconnect+retry); `_install_chat_observer`/`_do_read_chat`/`_do_send_chat` branch by `_chat_surface` (`iframe`/`classic`). Classic path byte-for-byte unchanged.
+- **Read quality.** `INSTALL_GCHAT_OBSERVER_JS` observes `[data-topic-id][data-is-user-topic]`; sender from `span.njhDLd` (strips the `…, domain_disabledExternal user` workspace badge); `DRAIN_GCHAT_QUEUE_JS` re-resolves the `Name loading…` race AND carries grouped consecutive-author senders forward by `data-creator-id` (cap-proof — resolved in the DOM before the Python history cap). Drain self-heals if the panel close/reopens (OOPIF replaced).
+- **Send.** `GCHAT_INSERT_JS` = focus+clear, `execCommand insertText` (preserves the `[🤖 Claude]` astral emoji that CDP `Input.insertText` drops mid-string) + dispatched `InputEvent` (what enables Google's model-based Send button) → poll-click `button[aria-label="Send message"]`. Validated live: posts with the emoji intact (Google renders it as `<img data-emoji>`).
+- **Self-echo loop fix.** Because Google renders the emoji as `<img>`, the bot read its own reply back as `[ Claude] …` (emoji gone, sender "You") and re-dispatched it. `_compile_reply_prefix_re` matches the prefix emoji-tolerantly; the iframe surface DROPS own-echo outright (no message-id readback there), classic still strip-and-forwards.
+- **Audio-replay corpus.** `OPERATOR_AUDIO_RAW_DUMP=1` writes continuous float32 PCM per leg (`~/.operator/debug/raw_<slug>/{S,M}.f32` + `meta.json` wall-clock anchor); `debug/14_34_audio_replay/load_corpus.py` loads it paired with the speaker-snapshot timeline for offline VAD/attribution iteration. Built to debug the multi-speaker misattribution (single-winner attribution stamps a 14s multi-speaker whisper blob with one name).
+- **Silero read-only crash fix.** `_silero_is_speech` handed `np.frombuffer`'s read-only view to ONNX on exact-512-multiple chunks → `assignment destination is read-only`, silently degrading to RMS-only. Added `.copy()` on the pad==0 branch.
+- **Lobby-wait diagnostics + empty-meeting raw-dump fix** (screenshots at 30s/exit; mkdir the dump dir before meta write).
 
 **Session 247 highlights:**
 
