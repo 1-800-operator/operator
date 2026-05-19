@@ -39,13 +39,60 @@ jobs:
 
       - name: Build aec3
         working-directory: src/_1_800_operator/rust/aec3
-        run: cargo build --release --locked --frozen --target ${{ matrix.target }}
+        # --locked pins to Cargo.lock; --frozen would also forbid network,
+        # which breaks fresh CI runners with empty Cargo caches (S247).
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Verify architecture
         working-directory: src/_1_800_operator/rust/aec3
         run: |
           file target/${{ matrix.target }}/release/aec3
           file target/${{ matrix.target }}/release/aec3 | grep -q "${{ matrix.arch }}"
+
+      # Smoke test on each arch's native runner — proves the binary
+      # actually executes on real hardware before we ship it. macos-13 is
+      # bare-metal Intel; macos-14 is bare-metal Apple Silicon. Without
+      # this step we'd only have `file`-level verification.
+      #
+      # Test: generate 1s of silence as a 16 kHz mono WAV (matches aec3's
+      # expected sample rate from main.rs), run aec3 in batch mode with
+      # mic == ref == silence, expect a clean exit + non-empty output WAV.
+      - name: Smoke test (native ${{ matrix.arch }})
+        working-directory: src/_1_800_operator/rust/aec3
+        run: |
+          AEC3_BIN="target/${{ matrix.target }}/release/aec3"
+          chmod +x "$AEC3_BIN"
+
+          # Generate a 1-second silence WAV using python (preinstalled
+          # on GitHub macOS runners). 16 kHz, mono, 16-bit PCM — aec3's
+          # expected input shape per main.rs SAMPLE_RATE_HZ const.
+          python3 - <<'PY'
+          import wave, struct
+          n = 16000  # 1 second at 16 kHz
+          for path in ("silence_mic.wav", "silence_ref.wav"):
+              with wave.open(path, "wb") as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(16000)
+                  w.writeframes(struct.pack(f"<{n}h", *([0] * n)))
+          PY
+
+          ls -la silence_mic.wav silence_ref.wav
+
+          # Batch mode: --mic, --ref, --out (per main.rs Mode::Batch).
+          # Exit code 0 + a non-empty WAV file is the success signal.
+          "$AEC3_BIN" --mic silence_mic.wav --ref silence_ref.wav --out cleaned.wav
+
+          if [ ! -s cleaned.wav ]; then
+            echo "smoke test FAILED: cleaned.wav is empty or missing"
+            exit 1
+          fi
+
+          # Sanity-check the output is a real WAV. `file` should say "RIFF"
+          # / "WAVE audio".
+          file cleaned.wav
+          file cleaned.wav | grep -qi "WAVE\|RIFF"
+          echo "smoke test PASSED on ${{ matrix.arch }}: cleaned.wav written, $(wc -c < cleaned.wav) bytes"
 
       - uses: actions/upload-artifact@v4
         with:
