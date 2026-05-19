@@ -43,8 +43,6 @@ Audit grep confirmed zero remaining "guarded mode" mentions in user-facing skill
 - **H-23 AEC** deferred — multi-session scope.
 - **A3 promotion candidates** + **A3 duplication cleanup** (S241 carry).
 - **TCC warmup on a fresh user account** (S237 carry).
-- **Orphan inner-claude post-Chrome-close** (S234 carry).
-- **`_last_s_speaker` cleanup** (S235 carry).
 - **Long-meeting CPU/heat for faster-whisper** (S233 carry).
 - **Option B fallback (S245)** — if the briefing tab-close paragraph degrades in practice, the next-tier fix is on-shutdown injection of a `[SYSTEM] Meeting <slug> ended` turn into the shared session before SIGTERM. Not building until briefing-only proves insufficient.
 

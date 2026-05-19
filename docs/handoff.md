@@ -52,8 +52,6 @@ resume on the new worker).
   (S243 carry).
 - **TCC warmup on a fresh user account** (S237 carry).
 - **A3 promotion candidates + duplication cleanup** (S241 carry).
-- **Orphan inner-claude post-Chrome-close** (S234 carry).
-- **`_last_s_speaker` cleanup** (S235 carry).
 - **Long-meeting CPU/heat for faster-whisper** (S233 carry).
 - **H-23 AEC** (multi-session scope).
 - **QA items the user is updating async** in `docs/qa-monday.md`.

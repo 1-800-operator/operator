@@ -30,7 +30,6 @@
 - **Worker-spawn-failure path not tested** — could spike by temporarily breaking the worker entrypoint.
 - **Validate post-change Chrome eviction with an actual evict** (S243 carry).
 - **H-23 AEC** (multi-session scope).
-- **`_last_s_speaker` cleanup** (S235 carry) — partially redundant now that the speaker timeline replica lives in the worker.
 - **Long-meeting CPU/heat for faster-whisper** (S233 carry) — not benched on a 1-hour session yet.
 - **Option B fallback (S245)** — if the briefing tab-close paragraph ever degrades in practice (claude still confabulates duplicates across reconnects), the next-tier fix is on-shutdown injection of a "[SYSTEM] Meeting <slug> ended" turn into the shared session before SIGTERM, so resumed claude reads explicit closure rather than relying on a prompt to compensate for missing signal. Not building until briefing-only proves insufficient.
 
