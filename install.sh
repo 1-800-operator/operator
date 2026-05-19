@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.33}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.34}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -429,22 +429,27 @@ PYEOF
            echo "${PROBE_AFTER}" | grep -q '"microphone":"not_determined"'; then
           pkill -f "${INSTALLED_APP}/Contents/MacOS/Operator" 2>/dev/null || true
           info "  Screen Recording granted ✓"
-          bold "  Now requesting Microphone permission..."
-          info "  → Look for the Microphone dialog (may appear behind System Settings"
-          info "    if Settings is still in the foreground — switch to Operator if so)."
-          info "  Click Allow when it appears."
-          # Bring the helper to the foreground via `open -a` without -W (we
-          # want to poll, not block). The launch is sync enough that the
-          # mic dialog appears within ~1-3s on most machines.
+          bold "  Now requesting Microphone permission. Click Allow."
+
+          # Launch v3 in the background so the open call doesn't block.
           open -n -a "${INSTALLED_APP}" >/dev/null 2>&1 &
           disown 2>/dev/null || true
 
-          # Poll up to 60s. Each iteration: 2s sleep + ~500ms probe.
-          # Print a heartbeat every ~10s so the user knows install isn't
-          # hung while they look for the dialog.
+          # Force the helper to the foreground via AppleScript "activate."
+          # Why: the Screen Recording grant flow leaves System Settings as
+          # the focused app. Without explicitly activating the helper, the
+          # mic dialog from v3 renders but stays behind Settings — users
+          # may not notice it for 30-45s. `activate` brings v3's window
+          # context to the front so the modal dialog appears on top.
+          # Target by bundle ID so it works regardless of localized name.
+          sleep 1
+          osascript -e 'tell application id "com.1-800-operator.audio-capture" to activate' 2>/dev/null || true
+
+          # Poll up to 30s. The dialog should be visible immediately after
+          # the activate; user clicks Allow → next poll cycle (within 2s)
+          # catches the grant.
           POLL_START=$(date +%s)
-          POLL_DEADLINE=$((POLL_START + 60))
-          last_heartbeat=0
+          POLL_DEADLINE=$((POLL_START + 30))
           while [ "$(date +%s)" -lt "${POLL_DEADLINE}" ]; do
             sleep 2
             PROBE_AFTER="$(probe_helper)"
@@ -452,11 +457,6 @@ PYEOF
             if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' && \
                echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
               break
-            fi
-            elapsed=$(($(date +%s) - POLL_START))
-            if [ $((elapsed / 10)) -gt "${last_heartbeat}" ]; then
-              last_heartbeat=$((elapsed / 10))
-              info "  ...still waiting for Microphone Allow click (${elapsed}s elapsed, 60s max)"
             fi
           done
 
