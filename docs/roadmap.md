@@ -14,7 +14,7 @@ don't keep accreting in current open-items lists.
 
 ---
 
-*Last updated: May 19, 2026 (session 248 — Phase 14.32 Core Audio Tap migration landed end-to-end + universal AEC3 binary attached to v0.1.37 via local-build path). Four releases cut: v0.1.35 (Tap migration), v0.1.36 (AVFoundation deprecation fix), v0.1.37 (macos-13-large workflow primed + universal AEC3 binary). New developer script `scripts/build_aec3_universal.sh` codifies the local universal-binary build path so dev releases don't need paid CI. VPIO researched as an aec3 replacement and rolled back — see handoff for the data + decision.*
+*Last updated: May 19, 2026 (session 249 — hybrid asymmetric VAD shipped. Silero VAD + RMS safety net replaces RMS-only thresholding. Built-in mic at default input volume now captures cleanly across all amplitude ranges; ambient room noise no longer produces phantom utterances; "Thank you" hallucinations filtered only when Silero never fired. Live-validated against multi-device swap meeting: 4 device transitions, 6 utterances captured verbatim including countdowns and trailing words that previously got truncated.)*
 
 **Session 247 highlights:**
 
@@ -45,9 +45,22 @@ don't keep accreting in current open-items lists.
 
 **Carry forward (post-S248):**
 
-1. **Live Meet end-to-end smoke** — still owed. Everything is validated in isolation (BT mic + Chrome coexistence, STT round-trip, helper smoke, AEC binary smoke), but the full integration (`operator dial` joining a real Meet, both streams writing to the JSONL, AEC3 cancelling speaker bleed during double-talk, chat-trigger loop through Meet chat) has never run.
+1. **Live Meet end-to-end smoke** ✅ shipped in S249. Multiple full integrations completed across the session including a 4-device-swap stress test (built-in → AirPods → built-in → Bose → built-in) with 6 distinct utterances all captured verbatim, plus background-noise + identity-format-bypass + Silero validation runs.
 2. **Actions billing for macos-13-large** — when dev velocity slows and releases become less frequent, enable Actions billing on the org. The CI workflow takes over automatically; no source changes needed.
 3. **Pre-launch audit Pass 5/6/7/8** — still parked in Post-launch.
+
+**Session 249 highlights:**
+
+- **Phase 14.32 follow-up — device-swap convert-error bug fixed (Swift).** First live-meeting smoke exposed `OSStatus -1` (paramErr) from `AVAudioConverter` on every mid-meeting built-in → BT swap. Helper would die ~1s later, killing [M] capture for rest of meeting. Hypothesis-driven debugging across three notarize+test cycles narrowed it to the identity-conversion case: when Bose came up in HFP mode (16kHz/1ch → matches our 16kHz/1ch target), the converter would return paramErr on the first post-swap buffer. Boot-path identity conversion worked fine; only swap-path identity broke. Fix: bypass the converter entirely when src and target formats are identical, writing the input buffer bytes straight through. Validated against built-in → AirPods (24kHz, real resample) + built-in → Bose (16kHz HFP, identity bypass) + reverse swaps. No more convert errors across any device combination.
+- **Hybrid asymmetric VAD shipped (S249).** Replaces RMS-only VAD (`UTTERANCE_SILENCE_RMS=0.02` from voice-preserved) with Silero ML-based VAD + RMS safety net. User pushed back on accepting "speak louder / raise mic gain" as workarounds — argued the code should adapt to users, not vice versa. Investigated SCStream vs AVCaptureSession amplitude differences (turned out the input-volume slider does affect AVCaptureSession, not bypassed as initially suspected). Spiked Silero VAD on existing WAVs to validate it correctly classified speech regardless of amplitude (RMS values 0.024 below RMS threshold still got Silero speech-probability 0.99). Tested 4 variants on a recorded 10s "fox + countdown" sentence: pure RMS, pure Silero, hybrid OR, hybrid asymmetric (start on either, end on silero-only with boundary-restart). Asymmetric won — full content capture (caught "Three" via RMS where Silero underweighted the unvoiced Th- onset) + clean sentence boundaries (Silero's silence judgment more reliable than RMS for true silence). Validated against background-noise recording (0 spurious utterances at new RMS=0.04 threshold). Final tuning: silero=0.5, rms=0.04, silence_threshold=3 (1.5s).
+- **Silero-gated hallucination filter.** Existing `WHISPER_HALLUCINATIONS` list (`"thank you"`, `"thanks"`, `"bye"`, `"sorry"`, etc.) couldn't tell real participants from phantoms — both produce identical text. Plus the filter was effectively dead code because it didn't strip whisper's trailing period. Fix: track `silero_ever_fired` through the utterance loop, only apply the filter when Silero never said yes (= input was probably noise, not speech). Real participant says "Thank you" → silero fires → kept. Phantom whisper-on-noise → silero silent → dropped.
+- **`operator doctor` Silero VAD check.** Surfaces broken Silero installs at diagnostic time rather than as mysteriously-bad captions in production. Loads the model, runs a silence-probe sanity check, reports `ready (loaded + silence probe = silent)` or specific failure mode.
+- **Debug instrumentation added (kept, env-gated).** `OPERATOR_AUDIO_DEBUG=1` writes per-utterance WAVs to `~/.operator/debug/audio_<ts>/{S,M}/` for offline triage. Per-stream `[S]/[M]` tags now in every `AudioProcessor:` log line. Swift helper has post-swap delegate-callback counter + AVCaptureSession runtime-error notification observer + verbose convert-error dump (first 3 errors) — kept off by default but in-tree for the next time something device-swap weird shows up.
+
+**Carry forward (post-S249):**
+
+1. **Actions billing for macos-13-large** — when dev velocity slows.
+2. **Pre-launch audit Pass 5/6/7/8** — still parked in Post-launch.
 
 **Session 246 highlights:**
 
