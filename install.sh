@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.31}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.32}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -418,19 +418,36 @@ PYEOF
         # detached from `open -W` and may not surface the mic dialog in
         # the foreground before exiting. Net result: SR=ok, mic=not_determined.
         #
-        # Recovery: kill any leftover background helpers and run a second
-        # warmup. With SR already granted, that instance skips the SR
-        # check and surfaces the mic dialog directly. User clicks Allow,
-        # helper exits cleanly, probe sees both granted.
+        # Recovery: kill any leftover background helpers, launch a new
+        # helper in the background (NOT `-W` — we don't want to block on
+        # its exit), then poll the TCC state every 2s. The user sees the
+        # mic dialog within ~1-2s of the relaunch; their click lands a
+        # grant which the next poll cycle picks up. This is dramatically
+        # faster than the two-stage `open -W` approach which had to wait
+        # for the full helper-shutdown sequence after the user clicks.
         if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' && \
            echo "${PROBE_AFTER}" | grep -q '"microphone":"not_determined"'; then
           pkill -f "${INSTALLED_APP}/Contents/MacOS/Operator" 2>/dev/null || true
-          sleep 1
-          info "  Screen Recording granted. Now requesting Microphone permission..."
+          info "  Screen Recording granted. Requesting Microphone permission..."
           info "  Click Allow on the Microphone dialog when it appears."
-          open -W -n -a "${INSTALLED_APP}" 2>/dev/null || true
-          PROBE_AFTER="$(probe_helper)"
-          [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
+          open -n -a "${INSTALLED_APP}" >/dev/null 2>&1 &
+          disown 2>/dev/null || true
+
+          # Poll up to 60s. Each iteration: 2s sleep + ~500ms probe.
+          POLL_DEADLINE=$(($(date +%s) + 60))
+          while [ "$(date +%s)" -lt "${POLL_DEADLINE}" ]; do
+            sleep 2
+            PROBE_AFTER="$(probe_helper)"
+            [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
+            if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' && \
+               echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
+              break
+            fi
+          done
+
+          # Whether or not polling succeeded, clean up the background
+          # helper so it doesn't linger past install.sh's exit.
+          pkill -f "${INSTALLED_APP}/Contents/MacOS/Operator" 2>/dev/null || true
         fi
 
         if echo "${PROBE_AFTER}" | grep -q '"screen_recording":"ok"' \
