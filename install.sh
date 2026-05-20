@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.39}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.40}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
