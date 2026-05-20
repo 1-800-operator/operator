@@ -88,7 +88,6 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
         // regex on the rendered timestamp which broke on 24-hour locales
         // (de-DE, fr-FR, most of EU/Asia: "14:30" with no AM/PM marker).
         let sender = '';
-        let domTs = '';
         let foundSender = false;
         let node = el;
         for (let d = 0; d < 4 && !foundSender; d++) {
@@ -104,13 +103,12 @@ INSTALL_CHAT_OBSERVER_JS = """() => {
                 // digits is the sender header.
                 if (lines.length >= 2 && /\\d/.test(lines[1])) {
                     sender = lines[0];
-                    domTs = lines[1];   // v0.1.40 self-update test: capture the timestamp leaf we used to discard
                     foundSender = true;
                     break;
                 }
             }
         }
-        return {id: msgId, sender: sender, text: text, t_dom: Date.now(), dom_ts: domTs};
+        return {id: msgId, sender: sender, text: text, t_dom: Date.now()};
     }
 
     // Locate the chat panel directly by structural signal — the one

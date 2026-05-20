@@ -1361,13 +1361,6 @@ class AttachAdapter(MeetingConnector):
                     )
                     continue
                 msg["t_drained"] = t_drained_ms
-                # v0.1.40 self-update test marker: surface-independent proof of
-                # which build is live + the newly-read timestamp DOM leaf.
-                log.info(
-                    "SELFUPDATE_TEST v%s read msg sender=%r dom_ts=%r text=%r",
-                    _OPERATOR_VERSION, msg.get("sender", ""),
-                    msg.get("dom_ts", ""), (msg.get("text") or "")[:40],
-                )
                 filtered.append(msg)
             messages = filtered
             # Drop the bot's own replies. send_chat prepends self._reply_prefix;
