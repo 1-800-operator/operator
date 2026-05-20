@@ -520,8 +520,30 @@ def _launch_dial_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
     # holds Google session cookies — owner-only matters on shared hosts.
     os.makedirs(DIAL_PROFILE_DIR, exist_ok=True, mode=0o700)
     os.chmod(DIAL_PROFILE_DIR, 0o700)
+
+    # DEFAULT: launch a re-branded "Operator Browser.app" (operator icon +
+    # name) instead of plain Chrome, so the dial window is visually distinct
+    # from the user's own Chrome. Built lazily on first use + re-baked when the
+    # installed Chrome updates (see pipeline/branded_browser.py). Needs
+    # --use-mock-keychain or the re-identified copy throws keychain dialogs.
+    # Two fall-backs to system Chrome: the OPERATOR_USE_SYSTEM_CHROME=1 kill
+    # switch, and any build/re-bake failure (ensure_branded_browser → None).
+    open_target = "Google Chrome"
+    extra_flags: list[str] = []
+    if os.environ.get("OPERATOR_USE_SYSTEM_CHROME") != "1":
+        from _1_800_operator.pipeline.branded_browser import ensure_branded_browser
+        branded = ensure_branded_browser()
+        if branded is not None:
+            open_target = str(branded)
+            extra_flags = ["--use-mock-keychain"]
+            log.info(f"AttachAdapter: using branded browser at {branded}")
+        else:
+            log.warning(
+                "AttachAdapter: branded browser unavailable — using system Chrome"
+            )
+
     args = [
-        "open", "-na", "Google Chrome", "--args",
+        "open", "-na", open_target, "--args",
         f"--remote-debugging-port={CDP_PORT}",
         # Chrome 111+ requires --remote-allow-origins to permit CDP
         # WebSocket upgrades. Previously this was `*` — that lets every
@@ -543,6 +565,7 @@ def _launch_dial_chrome(meeting_url: str, cdp_origin: str) -> subprocess.Popen:
         # non-English locales. Single-line lockdown beats fixing each
         # selector for every locale.
         "--lang=en-US",
+        *extra_flags,
         meeting_url,
     ]
     log.info(f"AttachAdapter: launching dial Chrome via: {' '.join(args)}")

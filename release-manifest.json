@@ -1,19 +1,19 @@
 {
-  "ref": "v0.1.46",
+  "ref": "v0.1.47",
   "components": {
-    "wheel": "0.1.46",
+    "wheel": "0.1.47",
     "helper": "0.1.30",
     "aec3": "0.1.30"
   },
   "wheel": {
-    "url": "https://github.com/1-800-operator/operator/releases/download/v0.1.46/1_800_operator-0.1.46-py3-none-any.whl",
-    "sha256": "3c1bca07254e258e3a013463ea67d5f80e94285e6fe3b7a627b0e239d21044c9"
+    "url": "https://github.com/1-800-operator/operator/releases/download/v0.1.47/1_800_operator-0.1.47-py3-none-any.whl",
+    "sha256": "b755e7561f91f37bb87f587b274d7d1506a2581678f9c4cd6527a70b2755196e"
   },
   "_doc": {
     "what": "Launch-time self-update manifest. operator dial/wiretap fetches this over HTTPS from raw.githubusercontent.com and, if a newer WHEEL is published, swaps just the wheel and re-execs. See src/_1_800_operator/pipeline/selfupdate.py.",
     "release_process": "On each CLI release: (1) tag vX.Y.Z, (2) optionally attach a prebuilt wheel asset + its sha256 under `wheel`, (3) set ref + components.wheel here on main. The client rolls forward to it on the next launch. Rollback = revert this file on main; the next launch rolls forward to the good version.",
-    "ref_rule": "ref MUST be a vX.Y.Z tag or a 40-hex commit SHA. A commit SHA is recommended — it is immutable and defeats tag-movement.",
-    "wheel_field": "Optional. When present as {\"url\": \"https://github.com/.../releases/download/<tag>/<wheel>.whl\", \"sha256\": \"<hex>\"} the client downloads + hash-verifies the wheel (byte-pinned). Absent → installs from the pinned git ref (identical trust to install.sh).",
-    "helper_aec3_rule": "components.helper / components.aec3 are the operator version in which the Swift helper / aec3 binary LAST CHANGED. Bump them ONLY when that source actually changes — a wheel-only DOM fix must leave them untouched, or every hotfix would nag users to re-run install.sh. They must stay <= any installed wheel version so legacy installs (no ~/.operator/.components.json marker, which fall back to helper=aec3=wheel) are not falsely told to update. A helper/aec3 bump produces a log notice only; the heavy out-of-venv reinstall stays manual (install.sh / /operator:update) to avoid TCC prompts at launch."
+    "ref_rule": "ref MUST be a vX.Y.Z tag or a 40-hex commit SHA. A commit SHA is recommended \u2014 it is immutable and defeats tag-movement.",
+    "wheel_field": "Optional. When present as {\"url\": \"https://github.com/.../releases/download/<tag>/<wheel>.whl\", \"sha256\": \"<hex>\"} the client downloads + hash-verifies the wheel (byte-pinned). Absent \u2192 installs from the pinned git ref (identical trust to install.sh).",
+    "helper_aec3_rule": "components.helper / components.aec3 are the operator version in which the Swift helper / aec3 binary LAST CHANGED. Bump them ONLY when that source actually changes \u2014 a wheel-only DOM fix must leave them untouched, or every hotfix would nag users to re-run install.sh. They must stay <= any installed wheel version so legacy installs (no ~/.operator/.components.json marker, which fall back to helper=aec3=wheel) are not falsely told to update. A helper/aec3 bump produces a log notice only; the heavy out-of-venv reinstall stays manual (install.sh / /operator:update) to avoid TCC prompts at launch."
   }
 }
