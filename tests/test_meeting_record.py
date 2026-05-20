@@ -114,6 +114,34 @@ def test_existing_file_rejoin_preserves_meta():
 # Test 4: append writes to file with auto-timestamp + honored overrides
 # ---------------------------------------------------------------------------
 
+def test_discard_if_empty():
+    """discard_if_empty() removes a failed-join record (no chat/caption, no
+    attendees) but keeps any meeting with real content."""
+    # Failed join: only lifecycle markers + empty attended → discarded.
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="failed", root=Path(tmp))
+        rec.close(attended=[])  # empty attended, like a failed join
+        assert rec.path.exists()
+        assert rec.discard_if_empty() is True
+        assert not rec.path.exists()
+
+    # Has a caption → kept.
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="spoke", root=Path(tmp))
+        rec.append("Alice", "hello", kind="caption")
+        rec.close(attended=[])
+        assert rec.discard_if_empty() is False
+        assert rec.path.exists()
+
+    # Silent meeting (attendees, no speech) → kept.
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = MeetingRecord(slug="silent", root=Path(tmp))
+        rec.close(attended=["Bob"])
+        assert rec.discard_if_empty() is False
+        assert rec.path.exists()
+    print("PASS  test_discard_if_empty")
+
+
 def test_append_writes_file():
     """append() persists to JSONL; timestamp auto-populates when omitted; in-memory list stays empty in slug mode."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -429,6 +457,7 @@ if __name__ == "__main__":
         test_close_without_attended_skips_participants_final,
         test_close_in_memory_mode_is_noop,
         test_append_after_close_is_dropped_silently,
+        test_discard_if_empty,
     ]
     failures = []
     for t in tests:

@@ -208,9 +208,20 @@ def _resolve_record_path() -> Path | None:
     return None
 
 
+def _speaker_of(entry: dict) -> str | None:
+    """Resolve the speaker/sender of a record entry.
+
+    Captions key the speaker under "speaker" (S250); chat messages use
+    "sender". Pre-S250 caption files used "sender" too — falling back keeps
+    recall working on existing history. Chat entries (no "speaker" key)
+    resolve to "sender" naturally.
+    """
+    return entry.get("speaker") or entry.get("sender")
+
+
 def _format_caption(entry: dict, marker: str = "  ") -> str:
     ts = entry.get("timestamp")
-    speaker = entry.get("sender") or "?"
+    speaker = _speaker_of(entry) or "?"
     text = (entry.get("text") or "").strip()
     if isinstance(ts, (int, float)):
         clock = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
@@ -293,11 +304,11 @@ def _apply_time_window(
 
 
 def _apply_speaker_filter(entries: list[dict], speaker: str | None) -> list[dict]:
-    """Case-insensitive substring match on sender field."""
+    """Case-insensitive substring match on speaker/sender field."""
     if not speaker:
         return entries
     needle = speaker.lower().strip()
-    return [e for e in entries if needle in (e.get("sender") or "").lower()]
+    return [e for e in entries if needle in (_speaker_of(e) or "").lower()]
 
 
 def _wrap_untrusted(content: str, *, source: str) -> str:
@@ -586,7 +597,7 @@ def list_speakers() -> str:
     counts: dict[str, int] = {}
     last_seen: dict[str, float] = {}
     for e in entries:
-        name = e.get("sender") or "?"
+        name = _speaker_of(e) or "?"
         counts[name] = counts.get(name, 0) + 1
         ts = e.get("timestamp")
         if isinstance(ts, (int, float)):
@@ -775,7 +786,7 @@ def _format_event(entry: dict, marker: str = "") -> str:
         clock = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
     else:
         clock = "??:??:??"
-    speaker = entry.get("sender") or "-"
+    speaker = _speaker_of(entry) or "-"
     text = (entry.get("text") or "").strip()
     return f"{marker}[{clock} {kind}/{speaker}] {text}"
 
@@ -795,10 +806,25 @@ def _meeting_attendees(events: list[dict]) -> list[str]:
     derived: set[str] = set()
     for e in events:
         if e.get("kind") in ("chat", "caption"):
-            s = e.get("sender")
+            s = _speaker_of(e)
             if isinstance(s, str) and s.strip():
                 derived.add(s.strip())
     return sorted(derived)
+
+
+def _meeting_has_content(events: list[dict]) -> bool:
+    """True if the meeting actually happened — any chat, any caption, or any
+    attendee seen. Used to hide phantom empty meetings (failed joins:
+    mistyped URL, lobby timeout, Chrome closed before entry) from the recall
+    listings. A failed join carries only meta / session_start / meeting_end
+    plus a participants_final with an EMPTY attended list, so it's filtered;
+    a real-but-silent meeting (people present, nobody spoke) is kept."""
+    for e in events:
+        if e.get("kind") in ("chat", "caption"):
+            return True
+        if e.get("kind") == "participants_final" and e.get("attended"):
+            return True
+    return False
 
 
 def _meeting_summary_line(path: Path) -> str:
@@ -903,6 +929,8 @@ def find_meetings(
         events = _read_all_events(path)
         if not events:
             continue
+        if not _meeting_has_content(events):
+            continue  # phantom empty meeting (failed join) — hide it
 
         if date_lo is not None and date_hi is not None:
             timed = [e for e in events if isinstance(e.get("timestamp"), (int, float))]
@@ -970,8 +998,21 @@ def list_meetings(limit: int = 20) -> str:
             "No meeting records found — operator hasn't been in a meeting "
             "yet, or ~/.operator/history/ is empty."
         )
-    shown = files[: max(1, limit)]
-    header = f"Recent meetings ({len(shown)} of {len(files)} total, newest first):"
+    # Skip phantom empty meetings (failed joins) — they carry only
+    # lifecycle markers and are noise to the user.
+    shown: list[Path] = []
+    for path in files:
+        if not _meeting_has_content(_read_all_events(path)):
+            continue
+        shown.append(path)
+        if len(shown) >= max(1, limit):
+            break
+    if not shown:
+        return (
+            "No meeting records with content found yet — operator has only "
+            "empty/failed joins so far."
+        )
+    header = f"Recent meetings ({len(shown)}, newest first):"
     body = [_meeting_summary_line(p) for p in shown]
     return _wrap_untrusted(
         "\n".join([header, *body]), source="meetings-listing"

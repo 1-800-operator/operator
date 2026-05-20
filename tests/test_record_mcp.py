@@ -170,6 +170,36 @@ def test_list_basic():
     print("✓ list_captions baseline (caption-only filter)")
 
 
+def test_caption_speaker_key_new_and_legacy():
+    """S250 renamed the caption speaker field 'sender' -> 'speaker'.
+    Readers must resolve BOTH: new captions ('speaker'), pre-S250 caption
+    files ('sender'), and chat ('sender'). A single fixture mixes all three."""
+    now = time.time()
+    path = _write_fixture([
+        {"kind": "session_start", "timestamp": now - 90},
+        # new-schema caption
+        {"kind": "caption", "speaker": "Newman", "text": "new schema speaks", "timestamp": now - 60},
+        # legacy-schema caption (pre-S250 file on disk)
+        {"kind": "caption", "sender": "Legacy", "text": "old schema speaks", "timestamp": now - 50},
+        # chat keeps sender
+        {"kind": "chat", "sender": "Chatter", "text": "ZZZchatZZZ", "timestamp": now - 40},
+    ])
+    _wire(path)
+    _set_now(now)
+    out = record_server.list_captions()
+    assert "Newman" in out and "new schema speaks" in out, out
+    assert "Legacy" in out and "old schema speaks" in out, out
+    assert "ZZZchatZZZ" not in out, "chat must not show in captions"
+    # list_speakers counts both caption speakers
+    spk = record_server.list_speakers()
+    assert "Newman" in spk and "Legacy" in spk, spk
+    # speaker filter matches the new-schema field
+    filtered = record_server.search_captions("speaks", speaker="Newman")
+    assert "Newman" in filtered and "Legacy" not in filtered, filtered
+    os.unlink(path)
+    print("✓ caption speaker field resolves new 'speaker' + legacy 'sender'")
+
+
 def test_list_session_boundary():
     """Captions before the most recent session_start should be excluded."""
     now = time.time()
@@ -768,10 +798,12 @@ def test_find_meetings_url_contains():
         "aaa-bbbb-ccc": [
             {"kind": "meta", "slug": "aaa-bbbb-ccc", "meet_url": "https://meet.google.com/aaa-bbbb-ccc", "mode": "dial"},
             {"kind": "session_start", "timestamp": now},
+            {"kind": "caption", "speaker": "Alice", "text": "hello", "timestamp": now},
         ],
         "zzz-yyyy-xxx": [
             {"kind": "meta", "slug": "zzz-yyyy-xxx", "meet_url": "https://meet.google.com/zzz-yyyy-xxx", "mode": "dial"},
             {"kind": "session_start", "timestamp": now},
+            {"kind": "caption", "speaker": "Bob", "text": "hi", "timestamp": now},
         ],
     })
     record_server.HISTORY_DIR = tmp
@@ -783,13 +815,50 @@ def test_find_meetings_url_contains():
 def test_find_meetings_no_filters_returns_everything():
     now = time.time()
     tmp = _make_history_dir({
-        "m1": [{"kind": "session_start", "timestamp": now}],
-        "m2": [{"kind": "session_start", "timestamp": now - 100}],
+        "m1": [{"kind": "session_start", "timestamp": now},
+               {"kind": "caption", "speaker": "A", "text": "x", "timestamp": now}],
+        "m2": [{"kind": "session_start", "timestamp": now - 100},
+               {"kind": "caption", "speaker": "B", "text": "y", "timestamp": now - 100}],
     })
     record_server.HISTORY_DIR = tmp
     out = record_server.find_meetings()
     assert "m1" in out and "m2" in out, out
     print("✓ find_meetings: no filters → returns everything (like list_meetings)")
+
+
+def test_find_and_list_hide_empty_failed_joins():
+    """S250 cleanup: a failed join (only meta/session_start/meeting_end +
+    empty participants_final) is hidden from both recall listings, while a
+    real meeting and a real-but-silent meeting (attendees, no speech) show."""
+    now = time.time()
+    tmp = _make_history_dir({
+        "real-meeting-aaa": [
+            {"kind": "meta", "slug": "real-meeting-aaa", "meet_url": "https://meet.google.com/real-meeting-aaa", "mode": "wiretap"},
+            {"kind": "session_start", "timestamp": now - 200},
+            {"kind": "caption", "speaker": "Alice", "text": "hello team", "timestamp": now - 100},
+            {"kind": "meeting_end", "timestamp": now - 10},
+        ],
+        "silent-meeting-bbb": [  # people present, nobody spoke — keep it
+            {"kind": "meta", "slug": "silent-meeting-bbb", "meet_url": "https://meet.google.com/silent-meeting-bbb", "mode": "wiretap"},
+            {"kind": "session_start", "timestamp": now - 200},
+            {"kind": "participants_final", "timestamp": now - 20, "attended": ["Bob"], "currently_present": [], "self_name": "op"},
+            {"kind": "meeting_end", "timestamp": now - 10},
+        ],
+        "failed-join-ccc": [  # mistyped URL — nobody attended, nothing said
+            {"kind": "meta", "slug": "failed-join-ccc", "meet_url": "https://meet.google.com/failed-join-ccc", "mode": "dial"},
+            {"kind": "session_start", "timestamp": now - 200},
+            {"kind": "participants_final", "timestamp": now - 190, "attended": [], "currently_present": [], "self_name": ""},
+            {"kind": "meeting_end", "timestamp": now - 189},
+        ],
+    })
+    record_server.HISTORY_DIR = tmp
+    listed = record_server.list_meetings()
+    assert "real-meeting-aaa" in listed and "silent-meeting-bbb" in listed, listed
+    assert "failed-join-ccc" not in listed, listed
+    found = record_server.find_meetings()
+    assert "real-meeting-aaa" in found and "silent-meeting-bbb" in found, found
+    assert "failed-join-ccc" not in found, found
+    print("✓ find/list hide empty failed joins, keep real + silent meetings")
 
 
 def test_format_includes_clock_and_speaker():
@@ -814,6 +883,7 @@ if __name__ == "__main__":
     test_empty_session()
     # list_captions
     test_list_basic()
+    test_caption_speaker_key_new_and_legacy()
     test_list_session_boundary()
     test_list_time_window_around_x()
     test_list_invalid_window()
@@ -847,4 +917,5 @@ if __name__ == "__main__":
     test_find_meetings_by_date_range()
     test_find_meetings_url_contains()
     test_find_meetings_no_filters_returns_everything()
+    test_find_and_list_hide_empty_failed_joins()
     print("\nAll meeting-record MCP tests passed.")

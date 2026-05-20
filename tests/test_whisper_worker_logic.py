@@ -126,6 +126,89 @@ def test_bleed_dedupe_distinct_text_does_not_match():
     print("OK bleed_dedupe_distinct_text_does_not_match")
 
 
+# ---------------- word-level attribution (S250 cross-talk fix) ----------------
+
+def test_group_words_basic():
+    from _1_800_operator.pipeline.whisper_worker import _group_words
+    words = [
+        {"speaker": "A", "word": " a1", "w0": 0.0, "w1": 0.5},
+        {"speaker": "A", "word": " a2", "w0": 0.5, "w1": 1.0},
+        {"speaker": "B", "word": " b1", "w0": 1.0, "w1": 1.5},
+    ]
+    segs = _group_words(words, 0.0)
+    assert [s[0] for s in segs] == ["A", "B"], segs
+    assert len(segs[0][1]) == 2 and len(segs[1][1]) == 1
+    print("OK group_words_basic")
+
+
+def test_group_words_smoothing_absorbs_short_flip():
+    """A sub-threshold flip flanked by the SAME speaker is re-absorbed."""
+    from _1_800_operator.pipeline.whisper_worker import _group_words
+    words = [
+        {"speaker": "A", "word": " x", "w0": 0.0, "w1": 1.0},
+        {"speaker": "B", "word": " y", "w0": 1.0, "w1": 1.2},  # 0.2s blip
+        {"speaker": "A", "word": " z", "w0": 1.2, "w1": 2.0},
+    ]
+    assert [s[0] for s in _group_words(words, 0.0)] == ["A", "B", "A"]  # naive
+    smoothed = _group_words(words, 0.5)
+    assert [s[0] for s in smoothed] == ["A"], smoothed
+    assert len(smoothed[0][1]) == 3
+    print("OK group_words_smoothing_absorbs_short_flip")
+
+
+def test_group_words_smoothing_keeps_real_turn():
+    """A short run flanked by DIFFERENT speakers (a real backchannel) stays."""
+    from _1_800_operator.pipeline.whisper_worker import _group_words
+    words = [
+        {"speaker": "A", "word": " x", "w0": 0.0, "w1": 1.0},
+        {"speaker": "B", "word": " yeah", "w0": 1.0, "w1": 1.2},
+        {"speaker": "C", "word": " z", "w0": 1.2, "w1": 2.0},
+    ]
+    assert [s[0] for s in _group_words(words, 0.5)] == ["A", "B", "C"]
+    print("OK group_words_smoothing_keeps_real_turn")
+
+
+def test_write_word_attributed_splits_crosstalk():
+    """The S250 bug: a multi-speaker blob must produce one caption per
+    speaker run, not a single caption stamped with the dominant speaker."""
+    w = _new_worker_without_models()
+    for name, (s, e) in [("Kyle", (0, 1)), ("Michael", (1, 2)), ("Matthew", (2, 3))]:
+        w._timeline.append((float(s), name, "start"))
+        w._timeline.append((float(e), name, "stop"))
+    captured = []
+    w._write_caption = lambda spk, text, ts: captured.append((spk, text))
+    words = [
+        {"word": " hi", "w0": 0.2, "w1": 0.5},
+        {"word": " there", "w0": 0.5, "w1": 0.9},
+        {"word": " hey", "w0": 1.2, "w1": 1.6},
+        {"word": " matt", "w0": 2.2, "w1": 2.6},
+    ]
+    w._write_word_attributed(words, "hi there hey matt", "other")
+    assert [c[0] for c in captured] == ["Kyle", "Michael", "Matthew"], captured
+    assert captured[0][1] == "hi there", captured
+    print("OK write_word_attributed_splits_crosstalk")
+
+
+def test_write_word_attributed_single_speaker_parity():
+    """No cross-talk → exactly one caption carrying the original full text
+    (byte-for-byte parity with the pre-S250 single-caption path)."""
+    w = _new_worker_without_models()
+    w._timeline.append((0.0, "Kyle", "start"))
+    w._timeline.append((5.0, "Kyle", "stop"))
+    captured = []
+    w._write_caption = lambda spk, text, ts: captured.append((spk, text))
+    words = [
+        {"word": " all", "w0": 0.2, "w1": 0.5},
+        {"word": " one", "w0": 0.6, "w1": 1.0},
+        {"word": " speaker", "w0": 1.1, "w1": 1.6},
+    ]
+    full = "all one speaker, full text preserved"
+    w._write_word_attributed(words, full, "other")
+    assert len(captured) == 1, captured
+    assert captured[0] == ("Kyle", full), captured
+    print("OK write_word_attributed_single_speaker_parity")
+
+
 if __name__ == "__main__":
     test_normalize_for_dedupe()
     test_attribute_speaker_kyle_michael_flip()
@@ -135,4 +218,9 @@ if __name__ == "__main__":
     test_bleed_dedupe_recognizes_recent_caption()
     test_bleed_dedupe_window_expires()
     test_bleed_dedupe_distinct_text_does_not_match()
+    test_group_words_basic()
+    test_group_words_smoothing_absorbs_short_flip()
+    test_group_words_smoothing_keeps_real_turn()
+    test_write_word_attributed_splits_crosstalk()
+    test_write_word_attributed_single_speaker_parity()
     print("\nAll whisper_worker logic tests passed.")

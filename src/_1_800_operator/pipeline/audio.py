@@ -39,6 +39,12 @@ log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 
+# Lead silence prepended before every transcribe — without it whisper drops
+# the first word of short utterances (mlx-whisper-era heritage). Also the
+# offset subtracted from word_timestamps so per-word times are relative to
+# the real (unpadded) audio.
+_TRANSCRIBE_PAD_SECONDS = 0.5
+
 # VAD constants. Hybrid asymmetric design (S249, replacing voice-preserved
 # RMS-only): start utterances on (silero≥0.5 OR rms≥0.04); end utterances
 # on silero-only silence after SILENCE_THRESHOLD ticks (1.5s). When
@@ -279,14 +285,19 @@ class AudioProcessor:
             self._audio_buffer = b""
         return data
 
-    def capture_next_utterance(self) -> tuple[str, float | None]:
+    def capture_next_utterance(self) -> tuple[str, float | None, list[dict] | None]:
         """Block until a complete utterance is detected.
 
-        Returns (text, speech_start_time) where speech_start_time is the
+        Returns (text, speech_start_time, words). speech_start_time is the
         wall-clock time.time() captured at the first non-silent frame of
-        the utterance. text is '' (and speech_start_time None) when the
+        the utterance. text is '' (speech_start_time + words None) when the
         loop exits without detecting speech, or when transcription drops
         the result as a hallucination.
+
+        words is populated only for the S (system / remote) leg: a list of
+        {"word", "w0", "w1"} dicts with each word's wall-clock start/end,
+        used downstream to attribute cross-talk per word (S250). The M leg
+        is a single known speaker, so it returns words=None.
 
         speech_start_time is the load-bearing piece for downstream
         speaker attribution: the DOM speaking indicator clears the moment
@@ -412,12 +423,17 @@ class AudioProcessor:
                     log.info(f"AudioProcessor: {self._tagp}shutdown_drain captured {len(residual)}B (rms={rms:.4f})")
 
         if not utterance_audio:
-            return "", None
+            return "", None, None
 
         self._write_debug_wav(utterance_audio)
 
         audio = np.frombuffer(utterance_audio, dtype=np.float32)
-        text = self.transcribe(audio)
+        # S leg needs per-word timings for cross-talk attribution; M leg is a
+        # single known speaker, so skip the (slightly costlier) word path.
+        if self.tag == "S":
+            text, rel_words = self.transcribe(audio, want_words=True)
+        else:
+            text, rel_words = self.transcribe(audio), None
         # SECURITY: never log the caption text itself. The whole meeting
         # transcript already lives at ~/.operator/history/<slug>.jsonl
         # (0o700/0o600); the root logger writes /tmp/operator.log with
@@ -425,7 +441,7 @@ class AudioProcessor:
         # any sandboxed app on the box). Length counter only.
         log.info(f"AudioProcessor: {self._tagp}whisper_done ({len(text or '')} chars)")
         if not text:
-            return "", None
+            return "", None, None
         # Silero-gated hallucination filter: only drop matching short
         # outputs when Silero never said yes during the utterance. Real
         # participants saying "thank you" always trip Silero somewhere;
@@ -435,11 +451,22 @@ class AudioProcessor:
         normalized = text.lower().rstrip(".!?,;: ")
         if not silero_ever_fired and normalized in WHISPER_HALLUCINATIONS:
             log.info(f"AudioProcessor: {self._tagp}dropped (silence hallucination, silero=0)")
-            return "", None
+            return "", None, None
         if self._is_repetition_hallucination(text):
             log.info(f"AudioProcessor: {self._tagp}dropped (repetition hallucination)")
-            return "", None
-        return text, speech_start_time
+            return "", None, None
+        # Map each word's audio-relative time onto wall-clock. utterance_audio
+        # begins at speech_start_time, and rel times are already pad-subtracted
+        # in transcribe(), so wall = speech_start_time + rel (clamped ≥ start).
+        words = None
+        if rel_words and speech_start_time is not None:
+            words = [
+                {"word": wtext,
+                 "w0": speech_start_time + max(0.0, ws),
+                 "w1": speech_start_time + max(0.0, we)}
+                for (wtext, ws, we) in rel_words
+            ]
+        return text, speech_start_time, words
 
     def _write_debug_wav(self, pcm_bytes: bytes) -> str | None:
         """Write raw PCM to a WAV file under debug_dir. Returns path or None."""
@@ -480,25 +507,44 @@ class AudioProcessor:
                 return True
         return False
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, want_words: bool = False):
         """Transcribe a Float32 mono 16kHz array via faster-whisper.
 
         Prepends 0.5s of silence — without it whisper drops the first word
         of short utterances. Carried over from the mlx-whisper era verbatim.
         Serialised against the shared model under _MODEL_USE_LOCK; the
         CTranslate2 generator is not thread-safe and S/M legs both call here.
+
+        Returns the joined text (str) by default. When want_words=True, also
+        returns per-word (word, start, end) timings as the second element of
+        a tuple — times are relative to the UNPADDED audio (the 0.5s lead pad
+        is subtracted), so a caller can map word.start onto the utterance's
+        wall-clock start. Used by the S-leg to attribute cross-talk per word
+        instead of stamping the whole utterance with one speaker (S250).
         """
-        silence_pad = np.zeros(int(SAMPLE_RATE * 0.5), dtype=np.float32)
+        silence_pad = np.zeros(int(SAMPLE_RATE * _TRANSCRIBE_PAD_SECONDS), dtype=np.float32)
         audio = np.concatenate([silence_pad, audio])
+        words: list[tuple[str, float, float]] = []
         with _MODEL_USE_LOCK:
             segments, _info = _MODEL.transcribe(
                 audio,
                 language="en",
                 beam_size=WHISPER_BEAM_SIZE,
                 vad_filter=False,
+                word_timestamps=want_words,
             )
             # Materialise inside the lock — faster-whisper does no compute
             # until iteration, so releasing early would let a second thread
             # enter transcribe() concurrently with this one's compute.
-            text = " ".join(seg.text.strip() for seg in segments).strip()
+            seg_texts = []
+            for seg in segments:
+                seg_texts.append(seg.text.strip())
+                if want_words:
+                    for w in (seg.words or []):
+                        words.append((w.word,
+                                      w.start - _TRANSCRIBE_PAD_SECONDS,
+                                      w.end - _TRANSCRIBE_PAD_SECONDS))
+            text = " ".join(seg_texts).strip()
+        if want_words:
+            return text, words
         return text

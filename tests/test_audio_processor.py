@@ -50,7 +50,7 @@ def test_silence_only_returns_empty():
         proc.capturing = False  # break the loop
 
     threading.Thread(target=feeder, daemon=True).start()
-    text, t_start = proc.capture_next_utterance()
+    text, t_start, _words = proc.capture_next_utterance()
     assert text == "", f"expected empty for silence-only, got {text!r}"
     assert t_start is None, f"expected no speech_start_time for silence, got {t_start!r}"
     print("OK silence_only_returns_empty")
@@ -76,7 +76,7 @@ def test_speech_burst_finalizes_on_silence():
         proc.capturing = False
 
     threading.Thread(target=feeder, daemon=True).start()
-    text, t_start = proc.capture_next_utterance()
+    text, t_start, _words = proc.capture_next_utterance()
     captured_text.append(text)
     # Whisper on a synth tone returns either '' or some hallucination — both
     # are fine. The signal we want is that the loop FINISHED (didn't hang)

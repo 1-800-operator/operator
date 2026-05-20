@@ -68,9 +68,45 @@ _SPEAKER_OTHER = "other"
 BLEED_DEDUPE_WINDOW_SECONDS = 8.0
 BLEED_DEDUPE_SIMILARITY = 0.85
 
+# Word-level attribution (S250): when grouping words into per-speaker caption
+# runs, a lone speaker flip shorter than this AND flanked by the same speaker
+# on both sides is re-absorbed into that speaker. Removes fragmentation from a
+# single mis-timed word or a sub-half-second halo blip during cross-talk.
+# Validated at 0.5s on the S250 replay corpus (debug/14_34_audio_replay).
+WORD_GROUP_SMOOTH_SECONDS = 0.5
+
 
 def _normalize_for_dedupe(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
+
+
+def _group_words(words: list[dict], smooth_gap: float) -> list[list]:
+    """Group consecutive same-speaker words into [speaker, [words...]] runs.
+
+    smooth_gap>0: a run shorter than smooth_gap flanked by the SAME speaker on
+    both sides is absorbed back into that speaker (iteratively, until stable).
+    Each word dict carries "speaker", "word", "w0", "w1" (wall-clock)."""
+    segs: list[list] = []
+    for w in words:
+        if segs and segs[-1][0] == w["speaker"]:
+            segs[-1][1].append(w)
+        else:
+            segs.append([w["speaker"], [w]])
+    if smooth_gap <= 0:
+        return segs
+    changed = True
+    while changed and len(segs) >= 3:
+        changed = False
+        for i in range(1, len(segs) - 1):
+            run = segs[i][1]
+            dur = run[-1]["w1"] - run[0]["w0"]
+            if segs[i - 1][0] == segs[i + 1][0] and dur < smooth_gap:
+                segs[i - 1][1].extend(run)
+                segs[i - 1][1].extend(segs[i + 1][1])
+                del segs[i:i + 2]
+                changed = True
+                break
+    return segs
 
 
 class WhisperWorker:
@@ -205,7 +241,7 @@ class WhisperWorker:
         leg = tag.decode()
         while proc.capturing:
             try:
-                text, speech_start = proc.capture_next_utterance()
+                text, speech_start, words = proc.capture_next_utterance()
             except Exception as e:
                 log.warning(f"whisper_worker[{leg}]: utterance raised: {e}")
                 continue
@@ -214,6 +250,13 @@ class WhisperWorker:
             # S-leg attribution via timeline; M-leg uses the (possibly
             # updated) mic_label resolved from main's get_self_name().
             if tag == _FRAME_TAG_SYSTEM and speech_start is not None:
+                # Word-level split (S250): attribute each word to its DOM
+                # speaker and emit one caption per consecutive-speaker run, so
+                # cross-talk isn't flattened onto a single name. Falls back to
+                # single-winner attribution when word timings are unavailable.
+                if words:
+                    self._write_word_attributed(words, text, default_label)
+                    continue
                 speaker = self._attribute_speaker(
                     chunk_start=speech_start,
                     chunk_end=time.time(),
@@ -230,8 +273,8 @@ class WhisperWorker:
                 self._record_s_caption(text)
         log.info(f"whisper_worker[{leg}]: utterance loop exited")
 
-    def _attribute_speaker(self, chunk_start: float, chunk_end: float, default: str) -> str:
-        """Same overlap-max logic as AttachAdapter._attribute_s_leg."""
+    def _build_intervals(self) -> list[tuple[float, float, str]]:
+        """Snapshot the speaking timeline as [(t0, t1, name)] intervals."""
         with self._timeline_lock:
             events = list(self._timeline)
         open_starts: dict[str, float] = {}
@@ -247,20 +290,58 @@ class WhisperWorker:
                     intervals.append((t0, t, name))
         for name, t0 in open_starts.items():
             intervals.append((t0, float("inf"), name))
+        return intervals
+
+    @staticmethod
+    def _max_overlap_speaker(intervals, c0: float, c1: float, default: str) -> str:
+        """Speaker with the most overlap against [c0, c1]; fall back to the
+        most-recently-finished speaker before c0, else `default`."""
         best_name = ""
         best_overlap = 0.0
         for t0, t1, name in intervals:
-            overlap = max(0.0, min(t1, chunk_end) - max(t0, chunk_start))
+            overlap = max(0.0, min(t1, c1) - max(t0, c0))
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_name = name
         if best_name:
             return best_name
-        candidates = [(t1, name) for (t0, t1, name) in intervals if t1 <= chunk_start]
+        candidates = [(t1, name) for (t0, t1, name) in intervals if t1 <= c0]
         if candidates:
             candidates.sort(reverse=True)
             return candidates[0][1]
         return default
+
+    def _attribute_speaker(self, chunk_start: float, chunk_end: float, default: str) -> str:
+        """Single-winner attribution for a whole utterance window — the
+        fallback path when per-word timings aren't available."""
+        return self._max_overlap_speaker(
+            self._build_intervals(), chunk_start, chunk_end, default
+        )
+
+    def _write_word_attributed(self, words: list[dict], full_text: str, default: str) -> None:
+        """Attribute each word to its DOM speaker, group consecutive-speaker
+        runs, and write one caption per group.
+
+        Parity: a single group (no cross-talk — the overwhelming common case)
+        writes the original full text stamped with time.time(), identical to
+        the pre-S250 single-caption path. Only genuine multi-speaker blobs
+        split into multiple captions, each stamped with its first word's
+        wall-clock (which also drops the post-transcribe chunk_end bias)."""
+        intervals = self._build_intervals()
+        for w in words:
+            w["speaker"] = self._max_overlap_speaker(intervals, w["w0"], w["w1"], default)
+        groups = _group_words(words, WORD_GROUP_SMOOTH_SECONDS)
+        if len(groups) <= 1:
+            speaker = groups[0][0] if groups else default
+            self._write_caption(speaker, full_text, time.time())
+            self._record_s_caption(full_text)
+            return
+        for speaker, run in groups:
+            seg_text = "".join(x["word"] for x in run).strip()
+            if not seg_text:
+                continue
+            self._write_caption(speaker, seg_text, run[0]["w0"])
+            self._record_s_caption(seg_text)
 
     def _is_recent_s_caption(self, text: str) -> bool:
         needle = _normalize_for_dedupe(text)
@@ -283,7 +364,10 @@ class WhisperWorker:
     def _write_caption(self, speaker: str, text: str, ts: float) -> None:
         entry = {
             "timestamp": ts,
-            "sender": speaker,
+            # Captions key the speaker as "speaker" (S250). Chat messages use
+            # "sender". Readers resolve via record_server._speaker_of, which
+            # falls back to "sender" for pre-S250 caption files.
+            "speaker": speaker,
             "text": text,
             "kind": "caption",
         }

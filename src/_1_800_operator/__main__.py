@@ -1372,6 +1372,12 @@ def _run_dial(name, rest, *, mode="dial"):
                 attended = sorted(getattr(runner, "_attended_participants", set()))
                 self_name = getattr(runner, "_last_self_name", "") or ""
                 meeting_record.close(attended=attended, self_name=self_name)
+                # Failed join (mistyped URL, lobby timeout, Chrome closed
+                # before entry) leaves a phantom empty meeting. Discard it so
+                # it doesn't clutter recall. Safe here: main owns the seal, so
+                # no whisper_worker is draining into the file.
+                if meeting_record.discard_if_empty():
+                    log.info("_shutdown: discarded empty meeting record (no chat/captions)")
             except Exception as e:
                 log.warning(f"MeetingRecord.close() failed: {e}")
         try:
@@ -1600,6 +1606,10 @@ def _run_wiretap(url):
                 attended = sorted(getattr(runner, "_attended_participants", set()))
                 self_name = getattr(runner, "_last_self_name", "") or ""
                 meeting_record.close(attended=attended, self_name=self_name)
+                # Discard a phantom empty meeting from a failed join (see dial
+                # _shutdown). Safe here: main owns the seal (no worker drain).
+                if meeting_record.discard_if_empty():
+                    log.info("_shutdown: discarded empty meeting record (no chat/captions)")
             except Exception as e:
                 log.warning(f"MeetingRecord.close() failed: {e}")
         try:

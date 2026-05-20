@@ -163,6 +163,42 @@ class MeetingRecord:
             except OSError as e:
                 log.warning(f"MeetingRecord close write failed: {e}")
 
+    def discard_if_empty(self) -> bool:
+        """Delete the meeting file if it never recorded any chat or caption.
+
+        A join that fails before anything is said (mistyped URL, lobby
+        timeout, Chrome closed before entry) still leaves a file with just
+        meta / session_start / participants_final / meeting_end — a phantom
+        empty meeting that clutters the recall tools. This removes it.
+
+        Caller MUST ensure no whisper_worker is still draining into the file
+        (i.e. only call when main owns the seal); otherwise it races a late
+        caption write. Returns True if the file was discarded.
+        """
+        if self.path is None:
+            return False
+        try:
+            if not self.path.exists():
+                return False
+            with self.path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        d = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    # Keep the file if anything real happened: chat, caption,
+                    # or any attendee seen. A failed join writes only an empty
+                    # attended list, so it still gets discarded.
+                    if d.get("kind") in ("chat", "caption"):
+                        return False
+                    if d.get("kind") == "participants_final" and d.get("attended"):
+                        return False
+            self.path.unlink()
+            return True
+        except OSError as e:
+            log.warning(f"MeetingRecord discard_if_empty failed: {e}")
+            return False
+
     def append(self, sender: str, text: str, kind: str = "chat",
                timestamp: float | None = None) -> dict:
         entry = {
