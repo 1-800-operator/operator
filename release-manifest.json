@@ -1,13 +1,13 @@
 {
-  "ref": "v0.1.43",
+  "ref": "v0.1.44",
   "components": {
-    "wheel": "0.1.43",
+    "wheel": "0.1.44",
     "helper": "0.1.30",
     "aec3": "0.1.30"
   },
   "wheel": {
-    "url": "https://github.com/1-800-operator/operator/releases/download/v0.1.43/1_800_operator-0.1.43-py3-none-any.whl",
-    "sha256": "aeceb8736b41cfcf5d07166016dea28a03ebd033ad45077721f8d5d2ef0c16d0"
+    "url": "https://github.com/1-800-operator/operator/releases/download/v0.1.44/1_800_operator-0.1.44-py3-none-any.whl",
+    "sha256": "2ed1c65b4dbca4de3392428ff6953d6e13f30851f31aaf4fc3e2e042b63ed1bb"
   },
   "_doc": {
     "what": "Launch-time self-update manifest. operator dial/wiretap fetches this over HTTPS from raw.githubusercontent.com and, if a newer WHEEL is published, swaps just the wheel and re-execs. See src/_1_800_operator/pipeline/selfupdate.py.",

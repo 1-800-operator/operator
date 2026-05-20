@@ -295,6 +295,87 @@ def _open_settings_pane(url: str) -> None:
         pass
 
 
+def _run_audio_tcc_warmup(timeout_s: float = 60.0) -> tuple[str, str]:
+    """Surface the mic + system-audio TCC dialogs and return as soon as the
+    user has answered BOTH — not after a fixed wait. Returns the final
+    (system_audio, microphone) status pair.
+
+    Two load-bearing choices, both from debug/14_36_tcc_warmup_timing_spike/:
+
+      1. **Launch via `_disclaimed_spawn`, not `open -W -n -a`.** Under
+         `open`/LaunchServices the app fully activates NSApplication, so
+         AVCaptureDevice.requestAccess's completion is delivered on the MAIN
+         queue — which the helper's mic leg blocks (`sema.wait` on the main
+         thread) until RunLoop.main.run() at the very end. The completion
+         never arrives before the 60s timeout, and because the system-audio
+         tap (and its dialog) is created only AFTER the mic leg resolves, the
+         second dialog is delayed 60s too. Under `_disclaimed_spawn` the
+         completion lands on a background queue → fires at the user's click,
+         so both dialogs surface within ~2s.
+
+      2. **Detect grants by polling a FRESH `--probe`, not the helper's own
+         poll.** `TCCAccessPreflight` caches its result for the helper's whole
+         lifetime: once it reads `not_determined` it keeps reading
+         `not_determined` even after the grant is written, so the helper can't
+         self-detect and just runs to its 60s deadline. A fresh process reads
+         the true state instantly.
+
+    S247 (commit 05552dd) bumped the helper's internal waits 3s/10s → 60s/60s
+    behind an "early-bail when granted" poll — correct intent, but that signal
+    never fires in-process for either leg. Polling from the parent here is what
+    makes the early-bail actually work, so the user moves on the instant they
+    click instead of eating the full 60s twice.
+    """
+    from _1_800_operator.pipeline._disclaimed_spawn import (
+        minimal_helper_env,
+        spawn_disclaimed,
+    )
+
+    try:
+        helper = spawn_disclaimed(
+            [str(_AUDIO_HELPER_BIN)],
+            env=minimal_helper_env(),
+        )
+    except Exception:
+        # Couldn't launch the helper — fall back to a single read so the
+        # caller still gets a best-effort status instead of crashing.
+        return _parse_probe_status(_probe_helper_tcc())
+
+    sa, mic = ("not_determined", "not_determined")
+    try:
+        deadline = _startup_time.monotonic() + timeout_s
+        while _startup_time.monotonic() < deadline:
+            sa, mic = _parse_probe_status(_probe_helper_tcc())
+            # Done the instant BOTH legs are answered — anything other than
+            # still-awaiting ("not_determined") or a transient probe failure
+            # ("unknown", which we retry rather than trust).
+            answered = {"ok", "denied", "restricted"}
+            if sa in answered and mic in answered:
+                break
+            if helper.poll() is not None:
+                # Helper exited on its own (e.g. mic denied → exit 5). Take
+                # one last fresh read and stop.
+                sa, mic = _parse_probe_status(_probe_helper_tcc())
+                break
+            _startup_time.sleep(0.5)
+    finally:
+        # Kill the warmup helper — it would otherwise sit in capture mode
+        # (RunLoop.main.run) forever, since nothing closes its stdin here.
+        if helper.poll() is None:
+            try:
+                helper.terminate()
+                helper.wait(timeout=2)
+            except Exception:
+                pass
+            if helper.poll() is None:
+                try:
+                    helper.kill()
+                    helper.wait(timeout=2)
+                except Exception:
+                    pass
+    return sa, mic
+
+
 def _preflight_audio_helper_tcc() -> None:
     """First-run / per-dial TCC warmup for the signed audio helper.
 
@@ -314,11 +395,11 @@ def _preflight_audio_helper_tcc() -> None:
          probe answers against the helper's own identity, not the parent
          IDE's — see `_probe_helper_tcc` docstring).
       3. **Both granted → no-op fast path** (the common case).
-      4. **`not_determined` or `unknown` → run the warmup**. Invoke
-         `open -W -n -a` on the helper bundle. macOS surfaces dialogs
-         attributed to "Operator" (verified in
-         debug/14_31_tcc_warmup_spike/). The `-W` blocks until the helper
-         exits (~10s via its watchdog). Re-probe; report success.
+      4. **`not_determined` or `unknown` → run the warmup**. Call
+         `_run_audio_tcc_warmup`, which disclaim-spawns the helper (dialogs
+         attributed to "Operator" — verified in debug/14_31_tcc_warmup_spike/)
+         and polls a fresh `--probe` until the user answers both, returning
+         the instant they do. Report success.
       5. **`denied` → DON'T re-run the warmup**. macOS no-ops the underlying
          TCC request paths after explicit deny — re-running the warmup would
          just spin for 10s and exit without surfacing anything. Instead,
@@ -326,14 +407,16 @@ def _preflight_audio_helper_tcc() -> None:
          and tell them what to re-enable. Dial degrades to chat-only; user
          fixes once and reruns.
 
-    **Why `open -W -n -a` for the warmup (not `_disclaimed_spawn`):** both
-    mechanisms produce correct attribution (spike: 14_31_tcc_warmup_spike).
-    They're picked per-context for ergonomics — `open -W` is a one-shot
-    foreground launcher that blocks until the helper exits and gives us
-    Launch Services lifecycle for free, which is what the warmup needs.
-    `_disclaimed_spawn` is built for long-lived pipe-managed spawns (dial-
-    live), where you need stdin/stdout plumbing across the whole meeting.
-    See `_disclaimed_spawn.spawn_disclaimed` docstring for the contrast.
+    **Why `_disclaimed_spawn` for the warmup (not `open -W -n -a`):** 14_31
+    chose `open -W` for Launch Services lifecycle, but that predated knowing
+    two things (both pinned in debug/14_36_tcc_warmup_timing_spike/): under
+    `open`, requestAccess's completion lands on the blocked main queue so the
+    mic leg burns its full 60s timeout (which also delays the 2nd dialog),
+    and the helper's in-process `TCCAccessPreflight` is stale so it can't
+    self-detect the grant. Disclaim-spawn fires the completion on a
+    background queue (dialogs surface promptly) and we detect grants by
+    polling a fresh `--probe` from the parent — so the warmup returns the
+    instant the user answers. See `_run_audio_tcc_warmup`.
 
     Helper isn't installed → no-op (dev fallback path or skipped install).
     Non-macOS → no-op (dial is mac-only anyway, but defensive).
@@ -402,28 +485,20 @@ def _preflight_audio_helper_tcc() -> None:
         )
     _t_after_ls = _startup_time.monotonic()
     print(
-        "macOS audio permissions needed — surfacing dialogs for the audio helper.\n"
-        "  Click Allow on each as it appears (System Audio Recording + Microphone).\n"
-        "  This takes ~10 seconds. The helper exits on its own when done."
+        "macOS audio permissions needed — two dialogs will appear.\n"
+        "  Click Allow on each (System Audio Recording + Microphone).\n"
+        "  Operator continues the moment you've answered both."
     )
     _t_before_warmup = _startup_time.monotonic()
-    try:
-        subprocess.run(
-            ["open", "-W", "-n", "-a", str(_AUDIO_HELPER_APP)],
-            capture_output=True, timeout=30,
-        )
-    except (subprocess.SubprocessError, OSError):
-        pass
+    # Surface both dialogs and return the instant the user answers both
+    # (disclaimed-spawn + fresh-probe polling — see _run_audio_tcc_warmup).
+    sa2, mic2 = _run_audio_tcc_warmup()
     _t_after_warmup = _startup_time.monotonic()
-
-    sa2, mic2 = _parse_probe_status(_probe_helper_tcc())
-    _t_after_reprobe = _startup_time.monotonic()
     logging.getLogger("operator").info(
         f"TIMING tcc_preflight path=warmup "
         f"probe_ms={int((_t_after_probe - _t_tcc_entry) * 1000)} "
         f"ls_cleanup_ms={int((_t_after_ls - _t_after_probe) * 1000)} "
         f"warmup_ms={int((_t_after_warmup - _t_before_warmup) * 1000)} "
-        f"reprobe_ms={int((_t_after_reprobe - _t_after_warmup) * 1000)} "
         f"sa_before={sys_audio} mic_before={mic} sa_after={sa2} mic_after={mic2}"
     )
     if sa2 == "ok" and mic2 == "ok":

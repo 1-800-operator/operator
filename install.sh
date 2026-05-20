@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.43}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.44}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -415,6 +415,62 @@ except Exception:
     print("{}")
 PYEOF
       }
+
+      # Surface both TCC dialogs and return the instant the user answers
+      # both. Mirrors __main__._run_audio_tcc_warmup (see
+      # debug/14_36_tcc_warmup_timing_spike/). Two load-bearing choices:
+      #   - launch the helper via `spawn_disclaimed`, NOT `open -W`: under
+      #     LaunchServices the mic requestAccess completion lands on the
+      #     helper's blocked main queue, so the mic leg burns its full 60s
+      #     timeout — which also delays the system-audio dialog, since the
+      #     tap (and its prompt) is created only after the mic leg resolves.
+      #   - detect grants by polling a FRESH --probe: the helper's own
+      #     in-process TCCAccessPreflight is per-process stale and never sees
+      #     the just-granted state, so it can't self-detect — a fresh process
+      #     reads the truth instantly. Returns final {system_audio,microphone}.
+      warmup_helper() {
+        "${PY_IN_TOOL}" - <<PYEOF 2>/dev/null
+import json, time
+try:
+    from _1_800_operator.pipeline._disclaimed_spawn import spawn_disclaimed, minimal_helper_env
+    def probe():
+        p = spawn_disclaimed(["${HELPER_BIN}", "--probe"], env=minimal_helper_env())
+        out = p.stdout.read(4096).decode("utf-8", errors="replace").strip() if p.stdout else ""
+        p.wait(timeout=5)
+        try:
+            d = json.loads(out)
+        except Exception:
+            return ("unknown", "unknown")
+        return (str(d.get("system_audio", "unknown")), str(d.get("microphone", "unknown")))
+    helper = spawn_disclaimed(["${HELPER_BIN}"], env=minimal_helper_env())
+    answered = {"ok", "denied", "restricted"}
+    sa, mic = "not_determined", "not_determined"
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            sa, mic = probe()
+            if sa in answered and mic in answered:
+                break
+            if helper.poll() is not None:
+                sa, mic = probe()
+                break
+            time.sleep(0.5)
+    finally:
+        if helper.poll() is None:
+            try:
+                helper.terminate(); helper.wait(timeout=2)
+            except Exception:
+                pass
+            if helper.poll() is None:
+                try:
+                    helper.kill(); helper.wait(timeout=2)
+                except Exception:
+                    pass
+    print(json.dumps({"system_audio": sa, "microphone": mic}))
+except Exception:
+    print("{}")
+PYEOF
+      }
       PROBE_BEFORE="$(probe_helper)"
       [ -z "${PROBE_BEFORE}" ] && PROBE_BEFORE='{}'
       if echo "${PROBE_BEFORE}" | grep -q '"system_audio":"ok"' \
@@ -423,21 +479,20 @@ PYEOF
       else
         bold "macOS will now request System Audio Recording and Microphone permissions"
         info "  These are required for dial mode to capture meeting audio."
-        info "  Click Allow on each dialog as it appears. (Take a few seconds — the"
-        info "  helper will exit on its own once the prompts are dismissed.)"
-        # `-W` waits for the launched app to exit. The helper requests both
-        # perms in its init path, then waits on stdin which is /dev/null
-        # here, so it exits via the 10s watchdog. `-n` opens a fresh
-        # instance even if a stale one is around. 2>/dev/null suppresses a
-        # benign Launch Services warning some setups emit.
+        info "  Click Allow on each dialog as it appears — install continues the"
+        info "  moment you've answered both."
+        # Phase 14.32: the Core Audio Tap TCC service (System Audio Recording
+        # Only) has no "Quit and Reopen" dance — a single grant click survives
+        # and applies to the running helper. The ~50-line SR-specific recovery
+        # block that lived here in v0.1.30-34 is gone with the SCStream-era
+        # system-audio path it papered over.
         #
-        # Phase 14.32: the Core Audio Tap TCC service (System Audio
-        # Recording Only) has no "Quit and Reopen" dance — a single grant
-        # click survives and applies to the running helper. The ~50-line
-        # SR-specific recovery block that lived here in v0.1.30-34 is
-        # gone with the SCStream-era system-audio path it papered over.
-        open -W -n -a "${INSTALLED_APP}" 2>/dev/null || true
-        PROBE_AFTER="$(probe_helper)"
+        # S252: replaced `open -W -n -a` with warmup_helper (disclaimed-spawn
+        # + fresh-probe polling). `open -W` made the user wait the helper's
+        # full ~60s-per-leg internal timeouts (mic completion stalls on the
+        # blocked main queue; system preflight is stale) — ~120s total even
+        # though they clicked Allow immediately. See debug/14_36.
+        PROBE_AFTER="$(warmup_helper)"
         [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
 
         if echo "${PROBE_AFTER}" | grep -q '"system_audio":"ok"' \

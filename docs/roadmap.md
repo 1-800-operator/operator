@@ -10,6 +10,8 @@ but the *first* submission is the one gate.
 
 - **Run `claude plugin validate` against operator-plugin.** Cheap insurance against bouncing on something mechanical. The auto-screen checks: plugin.json manifest schema + required fields, SKILL.md / agent frontmatter / hooks.json schemas, hardcoded credentials (API keys, tokens), absolute paths, sensitive-data patterns, MCP endpoints must be HTTPS/WSS not HTTP/WS, basic path-traversal / injection. Fix anything it flags before submitting. Manual review criteria are opaque; the bar can only be inferred from the existing accepted catalog at `anthropics/claude-plugins-community/.claude-plugin/marketplace.json`. Plugin name (`operator`) becomes the skill namespace (`/operator:dial`, etc.) — irreversible once accepted, so worth a final sanity-check that the namespace + skill names read well.
 
+- **Enable the aec3 CI build so releases auto-attach the binary.** Today the aec3 universal binary is built+attached **manually** per release via `scripts/build_aec3_universal.sh --upload vX.Y.Z` (release-runbook step 7.5) — the GitHub Actions build (`.github/workflows/build-aec3.yml`) is dormant because `macos-13-large` Actions billing isn't enabled. This is fine during the dev cycle but a launch footgun: forgetting the manual step ships installs **without** the speaker-bleed cleaner (it already bit v0.1.39–42; re-attached in S252). Before launch: enable `macos-13-large` billing, confirm the workflow builds + lipos + attaches `aec3-darwin-universal` (+ `.sha256`) to the release tag, then drop the manual step from the runbook. Until then, runbook step 7.5 is REQUIRED on every release.
+
 ## Post-launch
 
 Items deferred until after launch — not blocking, parked here so they

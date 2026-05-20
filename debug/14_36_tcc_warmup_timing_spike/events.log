@@ -1,0 +1,14 @@
+# 14.36 spike  helper=/Users/jojo/.operator/bin/Operator.app/Contents/MacOS/Operator
+# AFTER reset: {"system_audio":"not_determined","microphone":"not_determined"}
+[t=  0.01] operator-audio-capture: starting (pid=65045)
+[t=  0.01] operator-audio-capture: parent pid=65040 (likely a shell)
+[t=  0.02] operator-audio-capture: Microphone permission not determined — requesting
+[t=  1.73] operator-audio-capture: Microphone access granted=true
+[t=  1.75] operator-audio-capture: Audio Capture TCC status (probe): not_determined
+[t=  1.84] operator-audio-capture: tap created (tapID=148)
+[t=  1.84] operator-audio-capture: waiting for Audio Capture grant (up to 60s)
+[t= 62.28] operator-audio-capture: Audio Capture grant resolved: not_determined
+[t= 62.28] operator-audio-capture: tap stream format rate=48000.0 ch=1 bits=32
+[t= 62.32] operator-audio-capture: aggregate device created (aggregateID=149)
+[t= 64.01] operator-audio-capture: [S] system-audio tap capturing
+[t= 64.02] operator-audio-capture: [M] audio device: MacBook Pro Microphone uid=BuiltInMicrophoneDevice
