@@ -109,6 +109,28 @@ Pipeline
   pipeline/doctor.py          — `operator doctor` checks (claude CLI, Chrome, git, TCC,
                                  workspace trust)
   pipeline/update_check.py    — Background check for newer operator-plugin version
+                                 (log-only hint pointing at /operator:update; the
+                                 PLUGIN/skill channel, distinct from selfupdate)
+  pipeline/selfupdate.py      — Launch-time precision self-update of the CLI wheel.
+                                 At the top of `operator dial`/`wiretap` (before
+                                 fork), fetches release-manifest.json over HTTPS
+                                 from the canonical GitHub raw host, and if a newer
+                                 *wheel* is published swaps just the 472 KB wheel
+                                 (`uv tool install --force`, ~0.2–0.6s warm) and
+                                 re-execs into it — so Meet/Chat-DOM fixes ship
+                                 automatically without an email or /operator:update.
+                                 Heavy out-of-venv artifacts (Chromium, the Swift
+                                 helper, aec3) are gated on their own component
+                                 versions and never touched by a wheel swap; a
+                                 helper/aec3 bump only logs a notice (the reinstall
+                                 stays manual to avoid TCC prompts at launch).
+                                 Security invariant: as trustworthy as a fresh
+                                 install.sh run, never weaker — HTTPS+host-pinned,
+                                 strict-redirect, roll-forward-only (downgrade-proof),
+                                 ref shape-validated, no shell, optional sha256
+                                 byte-pinning, fail-safe to installed code. Opt out
+                                 with OPERATOR_NO_SELFUPDATE=1. Spike: debug/
+                                 14_35_selfupdate_spike/.
   pipeline/_disclaimed_spawn.py — posix_spawn helper for disclaiming child TCC identity
 
 Bridge + bundled MCP
@@ -147,6 +169,8 @@ User-scoped state (never inside the repo):
 - `~/.operator/.current_meeting` — marker file written at meeting-join, deleted at leave; lets statically-registered MCPs find the active meeting JSONL.
 - `~/.operator/.current_meeting_participants.json` — participant-roster snapshot updated each tick; read by the `list_participants` MCP tool.
 - `~/.operator/dial.pid` — singleton lockfile; gates `operator dial` to one live session and powers `operator hangup` / `operator status`. Released early in `_shutdown` so retries don't have to wait the full ~10s teardown.
+- `~/.operator/.components.json` — installed component versions (`wheel`/`helper`/`aec3`) written by `install.sh` and updated by `selfupdate.py` after a wheel swap; the launch-time self-update diffs this against the remote `release-manifest.json` (root of the CLI repo) to decide what to swap. Legacy installs without this file fall back to `helper=aec3=wheel` version.
+- `~/.operator/.selfupdate.lock` — flock held during a wheel swap so two concurrent launches can't run `uv tool install` over each other; a launch that can't grab it proceeds on the installed code.
 - `~/.operator/bin/Operator.app` — the signed + notarized Swift audio helper (installed by `install.sh` from the wheel). Two independent capture paths: **Core Audio Process Tap** (`AudioHardwareCreateProcessTap` + aggregate device + IOProc, macOS 14.4+) for system audio and **AVCaptureSession** for the user's mic — two distinct TCC services (`kTCCServiceAudioCapture` = "System Audio Recording Only" + `kTCCServiceMicrophone`). Phase 14.32 replaced the pre-migration SCStream + captureMicrophone single-stream design because SCStream was gated behind Screen Recording, which on macOS 14 demanded a "Quit and Reopen" dance that took ~50 lines of install.sh recovery to soften. `install.sh` runs a TCC warmup via `open -W -a` so prompts attribute to the helper bundle itself, not to the parent terminal/IDE; the dial path re-runs the warmup if perms drift post-install. A 10s silent-buffer watchdog inside the helper surfaces any mic exclusivity case (e.g. Chrome WebRTC holding the BT HFP SCO link) loudly in `/tmp/operator.log` rather than failing silently.
 - `~/.operator/debug/` — screenshots + HTML dumps from `session.save_debug` and adapter failure paths.
 

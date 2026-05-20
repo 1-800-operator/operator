@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.38}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.39}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -101,6 +101,27 @@ UV_PY_SPEC=">=${MIN_PY_MAJOR}.${MIN_PY_MINOR}"
 
 bold "Installing operator (ref=${OPERATOR_INSTALL_REF})..."
 uv tool install --force --python "${UV_PY_SPEC}" "git+${REPO_URL}@${OPERATOR_INSTALL_REF}"
+echo
+
+# -- 4.5. Record installed component versions --------------------------------
+
+# selfupdate.py reads ~/.operator/.components.json at launch to decide what to
+# swap. Record the wheel/helper/aec3 versions now. The helper (Swift .app) and
+# aec3 (Rust binary) ship lockstep with the wheel at install time, so all three
+# == the freshly-installed operator version — i.e. "the user's helper/aec3 are
+# as-of this operator version." The launch-time check nags to re-run install.sh
+# only when the manifest later declares a helper/aec3 version NEWER than this.
+TOOL_DIR_CV="$(uv tool dir)/1-800-operator"
+PY_IN_TOOL_CV="${TOOL_DIR_CV}/bin/python"
+if [ -x "${PY_IN_TOOL_CV}" ]; then
+  CV="$("${PY_IN_TOOL_CV}" -c 'import importlib.metadata as m; print(m.version("1-800-operator"))' 2>/dev/null)"
+  if [ -n "${CV}" ]; then
+    mkdir -p "${HOME}/.operator"
+    printf '{"wheel": "%s", "helper": "%s", "aec3": "%s"}\n' "${CV}" "${CV}" "${CV}" \
+      > "${HOME}/.operator/.components.json"
+    info "Recorded component versions (${CV}) for launch-time self-update."
+  fi
+fi
 echo
 
 # -- 5. Seed ~/.operator/.env ------------------------------------------------

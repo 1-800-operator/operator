@@ -940,6 +940,13 @@ def _run_dial(name, rest, *, mode="dial"):
                   classifier sidecar. ChatRunner forwards every chat
                   message to claude (no trigger gating).
     """
+    # Launch-time precision self-update: ship Meet/Chat-DOM fixes to users
+    # automatically. Runs BEFORE any preflight/fork; may re-exec into a newer
+    # wheel and never return. Fails safe — any error proceeds on installed code.
+    # See pipeline/selfupdate.py for the security model (spike 14.35).
+    from _1_800_operator.pipeline.selfupdate import maybe_self_update
+    maybe_self_update(sys.argv[1:])
+
     # Pre-daemonize phase timing. The parent process synchronously runs
     # preflights before forking; the bash `!` block in the desktop-app
     # surface waits for the parent's _os._exit(0), so every ms here is
@@ -1423,6 +1430,12 @@ def _run_wiretap(url):
     if sys.platform != "darwin":
         print("wiretap mode is currently macOS-only.")
         return 0
+
+    # Launch-time precision self-update (before the singleton lock / fork).
+    # May re-exec into a newer wheel; fails safe to installed code. See
+    # pipeline/selfupdate.py.
+    from _1_800_operator.pipeline.selfupdate import maybe_self_update
+    maybe_self_update(sys.argv[1:])
 
     other_pid = _acquire_dial_lock()
     if other_pid is not None:
