@@ -237,21 +237,32 @@ def _verify_sha256(path: str, expected: str) -> bool:
 
 
 def _download_wheel(url: str, sha256: str) -> str | None:
-    """Download a wheel asset (HTTPS, host-pinned start) to a 0600 temp file and
-    verify its sha256. Returns the path on success, else None (caller falls back
-    to the git-ref install). The hash — not the redirect host — is the integrity
-    gate, so following GitHub's CDN redirect is safe."""
+    """Download a wheel asset (HTTPS, host-pinned start) into a temp dir UNDER
+    ITS REAL PEP 427 FILENAME and verify its sha256. Returns the path on
+    success, else None (caller falls back to the git-ref install). The hash —
+    not the redirect host — is the integrity gate, so following GitHub's CDN
+    redirect is safe. The caller removes the returned file's parent dir.
+
+    The filename must be preserved: `uv tool install <file.whl>` derives the
+    distribution name + version from the wheel FILENAME, so a random temp name
+    (mkstemp) makes uv exit non-zero. The basename is taken from the (host-
+    pinned) URL and validated to a strict wheel-name shape before use."""
+    from urllib.parse import urlparse
     dev = os.environ.get(_DEV_FLAG) == "1"
     if not dev and not _https_host_ok(url, _ASSET_HOSTS):
         _log(f"refusing non-allowlisted wheel URL: {url}")
         return None
+    fname = os.path.basename(urlparse(url).path)
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.whl$", fname):
+        _log(f"wheel URL basename is not a safe .whl filename: {fname!r}")
+        return None
     os.makedirs(_OPERATOR_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="operator-wheel-", suffix=".whl", dir=_OPERATOR_DIR)
+    tmpdir = tempfile.mkdtemp(prefix="operator-wheel-", dir=_OPERATOR_DIR)
+    dest = os.path.join(tmpdir, fname)
     ok = False
     try:
-        os.close(fd)
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp, open(tmp, "wb") as out:
+        with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp, open(dest, "wb") as out:
             total = 0
             for chunk in iter(lambda: resp.read(1 << 20), b""):
                 total += len(chunk)
@@ -259,21 +270,18 @@ def _download_wheel(url: str, sha256: str) -> str | None:
                     _log("wheel exceeds size ceiling — aborting download")
                     return None
                 out.write(chunk)
-        if not _verify_sha256(tmp, sha256):
+        if not _verify_sha256(dest, sha256):
             _log("wheel sha256 MISMATCH — refusing to install (possible tampering)")
             return None
         _log("wheel sha256 verified")
         ok = True
-        return tmp
+        return dest
     except Exception as e:
         _log(f"wheel download failed ({e}) — falling back to git ref")
         return None
     finally:
-        if not ok:  # delete the temp wheel on every non-success path
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if not ok:  # remove the temp dir on every non-success path
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _uv_install(target: list[str]) -> bool:
@@ -311,13 +319,14 @@ def swap_wheel(manifest: dict) -> bool:
         local = _download_wheel(url, sha)
         if local:
             try:
-                return _uv_install([local])
+                if _uv_install([local]):
+                    return True
+                # Local install failed (e.g. uv couldn't parse the wheel) —
+                # fall back to the pinned git ref rather than giving up.
+                _log("local-wheel install failed — falling back to pinned git ref")
             finally:
-                try:
-                    os.remove(local)
-                except OSError:
-                    pass
-        # download/verify failed → fall through to git ref
+                shutil.rmtree(os.path.dirname(local), ignore_errors=True)
+        # download/verify/install failed → fall through to git ref
     return _uv_install([f"git+{_REPO}@{ref}"])
 
 

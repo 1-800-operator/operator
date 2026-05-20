@@ -229,20 +229,23 @@ def test_swap_wheel_git_ref_path():
     print("  swap_wheel git-ref path: OK")
 
 
+def _fake_wheel_in_tmpdir():
+    """A properly-named wheel in its own temp dir (swap_wheel rmtrees the dir)."""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "1_800_operator-0.1.40-py3-none-any.whl")
+    open(p, "w").close()
+    return p
+
+
 def test_swap_wheel_hash_pinned_path():
     calls = []
+    fake = _fake_wheel_in_tmpdir()
     with patched(_uv_install=lambda t: calls.append(t) or True,
-                 _download_wheel=lambda url, sha: "/tmp/fake.whl"):
-        # os.remove on the fake path would error; patch it out via the finally
-        import os as _os
-        real_remove = _os.remove
-        _os.remove = lambda p: None
-        try:
-            ok = su.swap_wheel({"ref": "v0.1.38",
-                                "wheel": {"url": "https://github.com/x.whl", "sha256": "ab"}})
-        finally:
-            _os.remove = real_remove
-    assert ok and calls == [["/tmp/fake.whl"]], "verified wheel must be installed locally"
+                 _download_wheel=lambda url, sha: fake):
+        ok = su.swap_wheel({"ref": "v0.1.40",
+                            "wheel": {"url": "https://github.com/x.whl", "sha256": "ab"}})
+    import shutil as _sh; _sh.rmtree(os.path.dirname(fake), ignore_errors=True)
+    assert ok and calls == [[fake]], "verified wheel must be installed locally"
     print("  swap_wheel hash-pinned wheel path: OK")
 
 
@@ -250,10 +253,40 @@ def test_swap_wheel_falls_back_when_download_fails():
     calls = []
     with patched(_uv_install=lambda t: calls.append(t) or True,
                  _download_wheel=lambda url, sha: None):  # download/verify failed
-        ok = su.swap_wheel({"ref": "v0.1.38",
+        ok = su.swap_wheel({"ref": "v0.1.40",
                             "wheel": {"url": "https://github.com/x.whl", "sha256": "ab"}})
     assert ok and calls[0][0].startswith("git+"), "must fall back to pinned git ref"
     print("  swap_wheel falls back to git ref on download failure: OK")
+
+
+def test_swap_wheel_falls_back_when_local_install_fails():
+    # The bug found in the live test: the local-wheel install failed and we gave
+    # up instead of trying the git ref. It must now fall back.
+    calls = []
+    fake = _fake_wheel_in_tmpdir()
+
+    def fake_install(t):
+        calls.append(t)
+        return not str(t[0]).endswith(".whl")  # local .whl fails; git-ref succeeds
+
+    with patched(_uv_install=fake_install, _download_wheel=lambda url, sha: fake):
+        ok = su.swap_wheel({"ref": "v0.1.40",
+                            "wheel": {"url": "https://github.com/x.whl", "sha256": "ab"}})
+    import shutil as _sh; _sh.rmtree(os.path.dirname(fake), ignore_errors=True)
+    assert ok, "must succeed via git-ref fallback after local install fails"
+    assert len(calls) == 2 and calls[0] == [fake] and calls[1][0].startswith("git+")
+    print("  swap_wheel falls back to git-ref when local install fails: OK")
+
+
+def test_download_wheel_rejects_bad_filename():
+    # The other live-test bug: a non-PEP427 filename breaks uv. github host is
+    # allowed, but a basename that isn't a .whl must be refused before any
+    # network call (and before it can reach uv).
+    _clear_env()
+    r = su._download_wheel(
+        "https://github.com/1-800-operator/operator/releases/download/v0.1.40/notawheel", "ab")
+    assert r is None
+    print("  _download_wheel rejects non-.whl basename: OK")
 
 
 # ── orchestration ─────────────────────────────────────────────────────────────

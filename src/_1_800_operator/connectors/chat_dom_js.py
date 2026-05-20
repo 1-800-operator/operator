@@ -9,6 +9,21 @@ needs them too.
 """
 
 
+def stamp_observer_version(install_js: str, version: str) -> str:
+    """Bake the operator version into an observer-install JS payload.
+
+    The observer installs are version-stamped so a reused dial-Chrome page
+    (Pass-1 tab reuse) replaces a stale-version observer instead of skipping
+    the install — without this, an observer/DOM fix shipped via self-update
+    never takes effect on a page that still has the old observer attached.
+    Used for both INSTALL_CHAT_OBSERVER_JS (classic, via page.evaluate) and
+    INSTALL_GCHAT_OBSERVER_JS (iframe, via the arg-less CDP _iframe_evaluate),
+    so interpolation — not a passed arg — keeps it uniform across transports.
+    `version` is operator's own validated semver, so it's injection-safe.
+    """
+    return install_js.replace("__OPERATOR_OBS_VERSION__", version)
+
+
 # Snapshot all current chat message IDs. Used by send_chat to capture a
 # pre-send baseline so we can detect which new ID corresponds to our
 # own send (poll for set difference). Returns a list of strings.
@@ -26,7 +41,20 @@ SNAPSHOT_MESSAGE_IDS_JS = (
 # because the function silently no-ops if the chat textarea isn't in
 # the DOM yet.
 INSTALL_CHAT_OBSERVER_JS = """() => {
-    if (window.__operatorChatObserver) return;
+    // Version-stamped install (v0.1.41+). A reused dial-Chrome page (the Pass-1
+    // tab-reuse path: reconnect, or a self-update relaunch into a still-open
+    // meet tab) keeps whatever observer it already had. If that observer was
+    // installed by a DIFFERENT operator version, tear it down so the new code's
+    // observer replaces it — otherwise an observer/DOM fix shipped via
+    // self-update silently never takes effect on that page. Same version → keep
+    // it (idempotent, no reprocessing).
+    const __ver = "__OPERATOR_OBS_VERSION__";
+    if (window.__operatorChatObserver) {
+        if (window.__operatorObserverVersion === __ver) return;
+        try { window.__operatorChatObserver.disconnect(); } catch (e) {}
+        window.__operatorChatObserver = null;
+    }
+    window.__operatorObserverVersion = __ver;
     window.__operatorChatQueue = [];
     window.__operatorSeenIds = new Set();
 
@@ -216,7 +244,15 @@ DRAIN_CHAT_QUEUE_JS = """() => {
 # innerText-minus-heading if the jsname rotates so a rotation degrades to a
 # slightly noisier body rather than zero capture.
 INSTALL_GCHAT_OBSERVER_JS = """() => {
-    if (window.__operatorChatObserver) return;
+    // Version-stamped install — see INSTALL_CHAT_OBSERVER_JS. Replaces a
+    // stale-version observer on a reused iframe page instead of skipping.
+    const __ver = "__OPERATOR_OBS_VERSION__";
+    if (window.__operatorChatObserver) {
+        if (window.__operatorObserverVersion === __ver) return;
+        try { window.__operatorChatObserver.disconnect(); } catch (e) {}
+        window.__operatorChatObserver = null;
+    }
+    window.__operatorObserverVersion = __ver;
     window.__operatorChatQueue = [];
     window.__operatorSeenIds = new Set();
 

@@ -83,6 +83,7 @@ from .chat_dom_js import (
     INSTALL_SPEAKING_OBSERVER_JS,
     OBSERVER_ATTACHED_CHECK_JS,
     SNAPSHOT_MESSAGE_IDS_JS,
+    stamp_observer_version,
 )
 
 # A Meet attached to a Google Chat space renders chat inside a cross-origin
@@ -1332,7 +1333,7 @@ class AttachAdapter(MeetingConnector):
                 # chat panel closes/reopens, dropping our observer. Re-install
                 # if it's gone before draining so messages aren't silently lost.
                 if self._iframe_evaluate(OBSERVER_ATTACHED_CHECK_JS) is not True:
-                    self._iframe_evaluate(INSTALL_GCHAT_OBSERVER_JS)
+                    self._iframe_evaluate(stamp_observer_version(INSTALL_GCHAT_OBSERVER_JS, _OPERATOR_VERSION))
                 messages = self._iframe_evaluate(DRAIN_GCHAT_QUEUE_JS) or []
             else:
                 messages = page.evaluate(DRAIN_CHAT_QUEUE_JS)
@@ -1812,11 +1813,11 @@ class AttachAdapter(MeetingConnector):
         gchat_ws = self._discover_gchat_target_ws()
         try:
             if gchat_ws is not None:
-                self._iframe_evaluate(INSTALL_GCHAT_OBSERVER_JS)
+                self._iframe_evaluate(stamp_observer_version(INSTALL_GCHAT_OBSERVER_JS, _OPERATOR_VERSION))
                 attached = self._iframe_evaluate(OBSERVER_ATTACHED_CHECK_JS) is True
                 surface, target_desc = "iframe", "Google Chat iframe observer"
             else:
-                page.evaluate(INSTALL_CHAT_OBSERVER_JS)
+                page.evaluate(stamp_observer_version(INSTALL_CHAT_OBSERVER_JS, _OPERATOR_VERSION))
                 attached = page.evaluate(OBSERVER_ATTACHED_CHECK_JS)
                 surface, target_desc = "classic", "chat MutationObserver"
             if attached:
