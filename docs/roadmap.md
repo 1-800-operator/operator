@@ -26,7 +26,7 @@ don't keep accreting in current open-items lists.
 
 ---
 
-*Last updated: May 19, 2026 (session 251 — launch-time precision self-update built, hardened, and live-validated end-to-end on real releases v0.1.39→v0.1.42. Operator now auto-ships wheel/Python fixes (esp. Meet/Chat-DOM scraping) without a reinstall or `/operator:update`: a launch-time check swaps just the ~472 KB wheel and re-execs, with a security model exactly as trustworthy as a fresh install.sh run. The real-world dry run caught 3 bugs the spike's mocks missed — all fixed + shipped — including observer-staleness on reused pages, fixed by version-stamping the injected JS. Process documented in docs/release-runbook.md. Latest release: v0.1.42 (clean code).)*
+*Last updated: May 20, 2026 (session 253 — branded "Operator Browser" shipped as the DEFAULT dial browser (v0.1.47): a locally-generated, ad-hoc-signed copy of the user's Chrome (operator icon + name) so the meeting window is visually distinct from the user's own Chrome; re-bakes on Chrome update, falls back to system Chrome (`OPERATOR_USE_SYSTEM_CHROME=1` kill switch). Spike + recipe in `debug/14_37_branded_chrome_spike/`; runbook "Maintaining the branded browser". Then root-caused + fixed the multi-session install-time TCC deadlock (v0.1.48/49): the system-audio prompt fires on tap CONSUMPTION (IOProc start), NOT on AudioHardwareCreateProcessTap — the helper waited for the grant before starting the pipeline; fixed by waiting after AudioDeviceStart; verified live (both dialogs, both granted). Concurrent S252 session shipped v0.1.44–46 (TCC warmup correctness/latency + doctor disclaim) and closed the AEC [M]-bleed as a non-bug. Latest release: v0.1.49.)*
 
 **Session 251 highlights:**
 
