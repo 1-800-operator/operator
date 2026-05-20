@@ -476,8 +476,8 @@ PYEOF
       }
       PROBE_BEFORE="$(probe_helper)"
       [ -z "${PROBE_BEFORE}" ] && PROBE_BEFORE='{}'
-      if echo "${PROBE_BEFORE}" | grep -q '"system_audio":"ok"' \
-        && echo "${PROBE_BEFORE}" | grep -q '"microphone":"ok"'; then
+      if echo "${PROBE_BEFORE}" | grep -qE '"system_audio":[[:space:]]*"ok"' \
+        && echo "${PROBE_BEFORE}" | grep -qE '"microphone":[[:space:]]*"ok"'; then
         info "Audio permissions already granted (System Audio Recording + Microphone)"
       else
         bold "macOS will now request System Audio Recording and Microphone permissions"
@@ -498,8 +498,8 @@ PYEOF
         PROBE_AFTER="$(warmup_helper)"
         [ -z "${PROBE_AFTER}" ] && PROBE_AFTER='{}'
 
-        if echo "${PROBE_AFTER}" | grep -q '"system_audio":"ok"' \
-          && echo "${PROBE_AFTER}" | grep -q '"microphone":"ok"'; then
+        if echo "${PROBE_AFTER}" | grep -qE '"system_audio":[[:space:]]*"ok"' \
+          && echo "${PROBE_AFTER}" | grep -qE '"microphone":[[:space:]]*"ok"'; then
           info "✓ Audio permissions granted (System Audio Recording + Microphone)"
         else
           warn "Audio permissions not fully granted yet (probe: ${PROBE_AFTER})."
