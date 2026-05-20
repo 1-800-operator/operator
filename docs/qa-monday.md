@@ -52,35 +52,38 @@ shows the trailing utterance.
 - **Tab close** mid-sentence → same expectation.
 - **`/operator:hangup`** mid-sentence → same expectation.
 
-## 8. Multi-speaker single-winner attribution (S250 — known open defect)
+## 8. Multi-speaker cross-talk attribution — VALIDATE THE FIX (v0.1.43)
 
-*Needs a real meeting with ≥2 other people who talk over each other
-to reproduce; can't be validated solo. Carried here from the S250
-handoff. The defect: a single whisper utterance that spans rapid
-back-and-forth between speakers gets stamped with ONE speaker name
-(the one with the most total overlap), not split per-turn. Observed
-S250: a ~14s blob spanning 4 Matthew↔Michael turns attributed
-entirely to Michael.*
+*Was a known defect (a cross-talk blob got stamped with one speaker).
+**Fixed + shipped in v0.1.43**: word-level attribution maps each word to
+its DOM speaker and emits one caption per speaker run. This QA is now a
+**validate-the-fix** task, not observe-and-capture. Needs a real meeting
+with ≥2 others talking over each other; can't be validated solo.*
 
-**This is an observe-and-capture task, not a fix-and-verify task** —
-the fix has to be iterated offline against a real recording.
+**First confirm you're on the fix:** the bot self-updates at launch — check
+`grep SELFUPDATE /tmp/operator.log` shows `wheel 0.1.42→0.1.43` (or
+installed version ≥ 0.1.43). If it didn't swap, you're testing old code.
 
 - During the meeting, get ≥2 participants doing fast turn-taking
-(gaps <1.5s, e.g. interrupting / agreeing over each other).
-- Run with **`OPERATOR_AUDIO_RAW_DUMP=1`** set so the raw float32 PCM
-corpus lands at `~/.operator/debug/raw_<slug>/{S,M}.f32` + `meta.json`.
-- Afterward, check the captions in
-`~/.operator/history/<slug>_<date>.jsonl`: does a single caption
-line carry words from two different people under one `speaker`?
-Note the timestamps of any misattributed blob.
-- The replay corpus + `debug/14_34_audio_replay/load_corpus.py` are
-the offline iteration harness for the actual fix. Two known
-structural causes to address there: (1) the S249 hybrid VAD ends
-utterances on Silero-silence only, which stays hot across rapid
-turn-taking, so the blob never splits; (2) `_attribute_speaker`
-picks one winner for the whole window. Minor related bias:
-`chunk_end=time.time()` is stamped ~3.5s after audio end (post-
-transcribe), stretching the attribution window past the audio.
+(gaps <1.5s, interrupting / agreeing over each other).
+- Run with **`OPERATOR_AUDIO_RAW_DUMP=1`** so the raw corpus still lands at
+`~/.operator/debug/raw_<slug>/{S,M}.f32` + `meta.json` (ground truth for
+grading any remaining misattribution).
+- Afterward, check the captions (note the field is now **`speaker`**):
+```bash
+jq -c 'select(.kind=="caption")|{speaker,text}' ~/.operator/history/<slug>_<date>.jsonl
+```
+  **PASS:** a cross-talk stretch shows multiple caption lines with
+  *different* speakers (not one blob under one name). Grade against your
+  screen recording / the halo you saw live.
+  **Note residual issues:** boundary words landing on the wrong speaker,
+  over-fragmentation (many tiny captions), or a blob still collapsed to one
+  name → capture the slug + timestamps; iterate offline with
+  `debug/14_34_audio_replay/word_level_attribution.py <slug>`.
+- Scope reminder: the fix is **`[S]`-leg only** (remote participants). The
+  `[M]` mic leg is your own single voice — always stamped with your name,
+  by design. Co-located people sharing your mic can't be split (no per-tile
+  DOM signal); that's out of scope.
 
 ## 9. AEC pre-shift — validate it's even an issue post-migration (H-23)
 
