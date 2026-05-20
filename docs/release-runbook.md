@@ -58,6 +58,20 @@ Canonical repo for releases: **`1-800-operator/operator`** (the `public` remote)
      --title "vX.Y.Z — …" --notes "…" /tmp/rel/1_800_operator-X.Y.Z-py3-none-any.whl
    ```
    (The asset must be attached or the sha256-pinned path 404s and falls back to git-ref.)
+7.5. **Attach the aec3 universal binary to the release** — REQUIRED until the
+   CI build is enabled (see below). The GitHub Actions aec3 build
+   (`.github/workflows/build-aec3.yml`) is **dormant** because `macos-13-large`
+   billing isn't enabled, so **no release auto-gets the binary**. If you skip
+   this, `install.sh` 404s on `aec3-darwin-universal`, falls back to building
+   from Rust source, and any user without `cargo` silently installs **without
+   the speaker-bleed cleaner** (this is exactly what bit v0.1.39–42; fixed by
+   re-attaching in S252). Build + attach locally:
+   ```bash
+   scripts/build_aec3_universal.sh --upload vX.Y.Z   # builds both arches, smoke-tests, uploads (--clobber)
+   ```
+   Then confirm three assets on the release: the wheel, `aec3-darwin-universal`,
+   `aec3-darwin-universal.sha256`. (Pre-launch item: enable `macos-13-large`
+   Actions billing so this becomes automatic — see `docs/roadmap.md`.)
 8. **Sync the mirror:** `git push origin main --tags`.
 9. **Verify** (next section).
 
@@ -127,6 +141,20 @@ yet — see Follow-ups.)
    from a neutral dir with `PYTHONPATH` unset and confirm `operator` loads from
    the uv-tool venv, not the working tree (`PYTHONPATH=src` or an editable install
    would silently run dev code and invalidate the test).
+6. **`uv build` packages the WORKING TREE, not HEAD — unrelated uncommitted work
+   leaks into the wheel.** This machine often has in-progress work from a parallel
+   session sitting uncommitted in `src/` (e.g. a TCC-warmup change in `__main__.py`
+   during the v0.1.43 release). `uv build .` snapshots the tree, so that work ships
+   silently and the tag no longer reproduces the wheel. **When other uncommitted
+   changes are present, build from a clean HEAD checkout instead of the tree:**
+   ```bash
+   git status --porcelain        # if anything beyond your release is dirty…
+   mkdir -p /tmp/relbuild && git archive HEAD | tar -x -C /tmp/relbuild
+   (cd /tmp/relbuild && uv build --wheel --out-dir /tmp/rel)   # builds HEAD, not the tree
+   ```
+   Then the manifest sha256 matches what the tag actually contains. (Verify either
+   way: a clean build's sha should equal a from-tree build's sha — if they differ,
+   the tree has uncommitted changes you're about to ship.)
 
 ---
 
