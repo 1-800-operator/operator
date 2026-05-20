@@ -197,5 +197,6 @@ When the bot has seen at least one other participant and is then alone for `ALON
 - `docs/roadmap.md` has the phase checklist and strategic direction.
 - `docs/pre-launch-audit.md` tracks the four-lens audit pass currently underway across Tier 1 (live-meeting hot path), Tier 2 (supporting infrastructure), and Tier 3 (setup / cold path).
 - `docs/handoff.md` is the rolling session handoff (last session's "what got done / exact next step / open items").
+- `docs/release-runbook.md` is the step-by-step process for shipping a code change to users via self-update (version bump → wheel + sha256 → `release-manifest.json` → tag + release on `public` → verify), plus the rollback procedure and the hard-won gotchas (CDN lag, observer version-stamping on reused pages, helper/aec3 staying manual). Follow it for every release.
 - The voice pipeline was decoupled in session 93 (April 2026) and preserved on the `voice-preserved` branch. `main` is chat-only.
 - The dial/deploy/login modes (Playwright + persistent profile + Google sign-in flow) shipped through Phase 14.22.3 and were deleted in Phase 14.22.4 (May 2026). Preserved in git history; the `voice-preserved` branch carries the last voice-era snapshot.
