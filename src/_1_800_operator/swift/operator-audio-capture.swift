@@ -220,9 +220,22 @@ case .notDetermined:
         fputs("operator-audio-capture: Microphone access granted=\(granted)\n", stderr)
         sema.signal()
     }
-    // Users typically take 5-15s to read + click Allow on the mic prompt.
-    // Same poll window as the pre-14.32 SCStream path.
-    _ = sema.wait(timeout: .now() + 60)
+    // requestAccess delivers its completion via the run loop — but this IS the
+    // main thread and the main run loop isn't started until RunLoop.main.run()
+    // far below. A bare `sema.wait(timeout:)` here BLOCKS the main thread and
+    // starves that callback, so the wait burns its FULL 60s even when the user
+    // clicks Allow instantly (the grant lands in TCC, but the in-process signal
+    // never fires). That also pushes the system-audio tap below past the
+    // install warmup's budget, so its dialog never gets a turn. Fix: pump the
+    // run loop in short slices so the callback CAN run, and break the moment the
+    // grant lands (the status-flip check is a backstop in case the completion
+    // is delivered on some other queue). Advances within ~0.2s of the click.
+    let micDeadline = Date().addingTimeInterval(60)
+    while Date() < micDeadline {
+        if sema.wait(timeout: .now()) == .success { break }
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .notDetermined { break }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
     if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
         fputs("operator-audio-capture: FATAL — Microphone permission denied or 60s timeout\n", stderr)
         fputs("operator-audio-capture: System Settings > Privacy & Security > Microphone\n", stderr)
