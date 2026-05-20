@@ -295,128 +295,59 @@ def _open_settings_pane(url: str) -> None:
         pass
 
 
-def _run_audio_tcc_warmup(timeout_s: float = 60.0) -> tuple[str, str]:
-    """Surface the mic + system-audio TCC dialogs and return as soon as the
-    user has answered BOTH — not after a fixed wait. Returns the final
-    (system_audio, microphone) status pair.
-
-    Two load-bearing choices, both from debug/14_36_tcc_warmup_timing_spike/:
-
-      1. **Launch via `_disclaimed_spawn`, not `open -W -n -a`.** Under
-         `open`/LaunchServices the app fully activates NSApplication, so
-         AVCaptureDevice.requestAccess's completion is delivered on the MAIN
-         queue — which the helper's mic leg blocks (`sema.wait` on the main
-         thread) until RunLoop.main.run() at the very end. The completion
-         never arrives before the 60s timeout, and because the system-audio
-         tap (and its dialog) is created only AFTER the mic leg resolves, the
-         second dialog is delayed 60s too. Under `_disclaimed_spawn` the
-         completion lands on a background queue → fires at the user's click,
-         so both dialogs surface within ~2s.
-
-      2. **Detect grants by polling a FRESH `--probe`, not the helper's own
-         poll.** `TCCAccessPreflight` caches its result for the helper's whole
-         lifetime: once it reads `not_determined` it keeps reading
-         `not_determined` even after the grant is written, so the helper can't
-         self-detect and just runs to its 60s deadline. A fresh process reads
-         the true state instantly.
-
-    S247 (commit 05552dd) bumped the helper's internal waits 3s/10s → 60s/60s
-    behind an "early-bail when granted" poll — correct intent, but that signal
-    never fires in-process for either leg. Polling from the parent here is what
-    makes the early-bail actually work, so the user moves on the instant they
-    click instead of eating the full 60s twice.
+def _kick_bg_ls_cleanup(log) -> None:
+    """Sweep stale Launch Services duplicate registrations of the helper
+    bundle, in a daemon thread. The TCC preflight no longer does this
+    synchronously (it never blocks the meeting join — see
+    `_preflight_audio_helper_tcc`), so this is the SOLE cleanup. It runs
+    during the ~45s browser-join window, finishing before the live audio
+    helper creates its tap — so a grant click still lands on the canonical
+    bundle rather than a stale wheel-cache copy (the S240 hazard). Best-
+    effort; the cost is the ~3-4s `lsregister -dump`, fully off the
+    user-visible path. Called by both dial and wiretap post-daemonize.
     """
-    from _1_800_operator.pipeline._disclaimed_spawn import (
-        minimal_helper_env,
-        spawn_disclaimed,
-    )
+    import threading
 
-    try:
-        helper = spawn_disclaimed(
-            [str(_AUDIO_HELPER_BIN)],
-            env=minimal_helper_env(),
-        )
-    except Exception:
-        # Couldn't launch the helper — fall back to a single read so the
-        # caller still gets a best-effort status instead of crashing.
-        return _parse_probe_status(_probe_helper_tcc())
+    def _run():
+        try:
+            n = _ls_cleanup_stale_helpers()
+            if n:
+                log.info(f"bg: unregistered {n} stale Launch Services entries")
+        except Exception as exc:
+            log.warning(f"bg LS cleanup failed: {exc}")
 
-    sa, mic = ("not_determined", "not_determined")
-    try:
-        deadline = _startup_time.monotonic() + timeout_s
-        while _startup_time.monotonic() < deadline:
-            sa, mic = _parse_probe_status(_probe_helper_tcc())
-            # Done the instant BOTH legs are answered — anything other than
-            # still-awaiting ("not_determined") or a transient probe failure
-            # ("unknown", which we retry rather than trust).
-            answered = {"ok", "denied", "restricted"}
-            if sa in answered and mic in answered:
-                break
-            if helper.poll() is not None:
-                # Helper exited on its own (e.g. mic denied → exit 5). Take
-                # one last fresh read and stop.
-                sa, mic = _parse_probe_status(_probe_helper_tcc())
-                break
-            _startup_time.sleep(0.5)
-    finally:
-        # Kill the warmup helper — it would otherwise sit in capture mode
-        # (RunLoop.main.run) forever, since nothing closes its stdin here.
-        if helper.poll() is None:
-            try:
-                helper.terminate()
-                helper.wait(timeout=2)
-            except Exception:
-                pass
-            if helper.poll() is None:
-                try:
-                    helper.kill()
-                    helper.wait(timeout=2)
-                except Exception:
-                    pass
-    return sa, mic
+    threading.Thread(target=_run, daemon=True, name="ls-cleanup").start()
 
 
 def _preflight_audio_helper_tcc() -> None:
-    """First-run / per-dial TCC warmup for the signed audio helper.
+    """Per-dial TCC state check — fast, NON-blocking. Never stalls the join.
 
-    install.sh runs the equivalent warmup at install time, but TCC state
-    can desync afterwards (OS upgrade, manual `tccutil reset`, the user
-    toggling perms off in Settings, the bundle being re-copied, etc.).
-    This preflight catches that case so users don't hit a silent broken-
-    audio dial when they're a minute away from a real meeting.
+    install.sh grants perms interactively at install time; this checks for
+    drift (OS upgrade, manual `tccutil reset`, perms toggled off in
+    Settings, the bundle re-copied) and steers the user — but it must NOT
+    block the meeting join waiting for a grant. It used to run a synchronous
+    warmup that waited up to 60s for the dialogs, which stalled Chrome that
+    long whenever a grant was slow or macOS rate-limited the prompt
+    (debug/14_36_tcc_warmup_timing_spike/). That was redundant: the live
+    audio helper spawned after meeting-entry surfaces the same dialogs
+    anyway. So:
 
     Flow:
-      1. **LS cleanup** — `lsregister -u` any cached duplicate
-         registrations of our bundle ID. Without this, a TCC grant click
-         can attach to a stale wheel-cache copy and the runtime helper
-         silently runs with the wrong code requirement (S240 hit 36
-         duplicates). Idempotent, ~100ms.
-      2. **Probe** the helper's TCC state via `_disclaimed_spawn` (so the
+      1. **Probe** the helper's TCC state via `_disclaimed_spawn` (so the
          probe answers against the helper's own identity, not the parent
-         IDE's — see `_probe_helper_tcc` docstring).
-      3. **Both granted → no-op fast path** (the common case).
-      4. **`not_determined` or `unknown` → run the warmup**. Call
-         `_run_audio_tcc_warmup`, which disclaim-spawns the helper (dialogs
-         attributed to "Operator" — verified in debug/14_31_tcc_warmup_spike/)
-         and polls a fresh `--probe` until the user answers both, returning
-         the instant they do. Report success.
-      5. **`denied` → DON'T re-run the warmup**. macOS no-ops the underlying
-         TCC request paths after explicit deny — re-running the warmup would
-         just spin for 10s and exit without surfacing anything. Instead,
-         deep-link the user straight to the relevant System Settings pane
-         and tell them what to re-enable. Dial degrades to chat-only; user
-         fixes once and reruns.
-
-    **Why `_disclaimed_spawn` for the warmup (not `open -W -n -a`):** 14_31
-    chose `open -W` for Launch Services lifecycle, but that predated knowing
-    two things (both pinned in debug/14_36_tcc_warmup_timing_spike/): under
-    `open`, requestAccess's completion lands on the blocked main queue so the
-    mic leg burns its full 60s timeout (which also delays the 2nd dialog),
-    and the helper's in-process `TCCAccessPreflight` is stale so it can't
-    self-detect the grant. Disclaim-spawn fires the completion on a
-    background queue (dialogs surface promptly) and we detect grants by
-    polling a fresh `--probe` from the parent — so the warmup returns the
-    instant the user answers. See `_run_audio_tcc_warmup`.
+         IDE's — see `_probe_helper_tcc` docstring). ~90ms.
+      2. **Both granted → no-op fast path** (the common case).
+      3. **`denied` → point to Settings.** macOS no-ops the TCC request
+         after an explicit deny (no dialog will ever surface), so a re-prompt
+         can't help — deep-link the relevant pane and tell the user what to
+         re-enable. Fast; no blocking.
+      4. **`not_determined` / `unknown` / partial → return immediately,
+         deferring the dialogs to the live helper.** Print a one-liner so
+         the user expects a prompt mid-join; capture begins the moment they
+         click Allow. Stale-LS cleanup runs in the post-fork daemon thread
+         (see `_run_dial`), finishing inside the ~45s join window before the
+         live helper creates its tap, so the grant still lands on the
+         canonical bundle (the S240 concern).
 
     Helper isn't installed → no-op (dev fallback path or skipped install).
     Non-macOS → no-op (dial is mac-only anyway, but defensive).
@@ -473,47 +404,34 @@ def _preflight_audio_helper_tcc() -> None:
         print()
         return
 
-    # (3) Not-determined / unknown / partial-ok — warmup is about to
-    # fire. Clean stale LS entries FIRST so the warmup dialog click
-    # attaches to the canonical bundle, not a stale wheel-cache copy
-    # (S240 hit this with 36 duplicates from repeat reinstalls).
-    n_stale = _ls_cleanup_stale_helpers()
-    if n_stale:
-        logging.getLogger("operator").info(
-            f"Unregistered {n_stale} stale Launch Services entries for "
-            f"{_AUDIO_HELPER_APP.name}"
-        )
-    _t_after_ls = _startup_time.monotonic()
-    print(
-        "macOS audio permissions needed — two dialogs will appear.\n"
-        "  Click Allow on each (System Audio Recording + Microphone).\n"
-        "  Operator continues the moment you've answered both."
-    )
-    _t_before_warmup = _startup_time.monotonic()
-    # Surface both dialogs and return the instant the user answers both
-    # (disclaimed-spawn + fresh-probe polling — see _run_audio_tcc_warmup).
-    sa2, mic2 = _run_audio_tcc_warmup()
-    _t_after_warmup = _startup_time.monotonic()
+    # (3) Not-determined / unknown / partial-ok → DON'T block the meeting
+    # join on the grant. The live audio helper spawned after meeting-entry
+    # (attach_adapter._start_audio_pipeline) creates the same Core-Audio tap
+    # and fires the same mic + system-audio dialogs, so a pre-fork warmup is
+    # pure redundancy — and it stalled Chrome up to 60s waiting on a grant
+    # that macOS sometimes rate-limits (debug/14_36_tcc_warmup_timing_spike/).
+    # Return immediately; the dialog surfaces a few seconds into the meeting
+    # and capture begins the moment the user clicks Allow. Stale-LS cleanup
+    # still runs in the post-fork daemon thread (see _run_dial), which
+    # finishes well inside the ~45s browser-join window — before the live
+    # helper creates its tap, so the grant click still lands on the canonical
+    # bundle. install.sh's warmup remains the place to grant at install time.
+    pending = [
+        name
+        for name, st in (("System Audio Recording", sys_audio), ("Microphone", mic))
+        if st != "ok"
+    ]
     logging.getLogger("operator").info(
-        f"TIMING tcc_preflight path=warmup "
+        f"TIMING tcc_preflight path=deferred "
         f"probe_ms={int((_t_after_probe - _t_tcc_entry) * 1000)} "
-        f"ls_cleanup_ms={int((_t_after_ls - _t_after_probe) * 1000)} "
-        f"warmup_ms={int((_t_after_warmup - _t_before_warmup) * 1000)} "
-        f"sa_before={sys_audio} mic_before={mic} sa_after={sa2} mic_after={mic2}"
+        f"sa={sys_audio} mic={mic} pending={'+'.join(pending)} "
+        f"(deferred to live helper — not blocking startup)"
     )
-    if sa2 == "ok" and mic2 == "ok":
-        print("✓ Audio permissions granted — proceeding.")
-        return
-
-    # Still missing after warmup. Most likely cause: user clicked Don't
-    # Allow (which flips status to denied for next run) or Apple's prompt
-    # cooldown after recent rapid-fire grants/denies. Don't block the
-    # dial — degraded dial beats refusing to join the user's meeting.
     print(
-        f"⚠ Audio permissions not fully granted (system_audio={sa2}, microphone={mic2}).\n"
-        "  Dial will run in chat-only mode (no caption transcript).\n"
-        "  Fix: System Settings → Privacy & Security → enable 'Operator' under\n"
-        "       System Audio Recording Only AND Microphone. Then re-run dial."
+        "macOS audio permission" + ("s" if len(pending) > 1 else "")
+        + " not granted yet (" + " + ".join(pending) + ").\n"
+        "  A dialog will appear as the meeting's audio starts — click Allow\n"
+        "  and captions begin. Operator is joining now without waiting."
     )
 
 
@@ -1211,21 +1129,8 @@ def _run_dial(name, rest, *, mode="dial"):
 
     t_start = _time.monotonic()
 
-    # Background LS-cleanup. The pre-fork preflight reversed (probe first;
-    # cleanup only if a warmup dialog is about to fire) so the fast path
-    # doesn't pay the ~3-4s `lsregister -dump` cost. Keep cosmetic
-    # tidiness by sweeping stale entries in a daemon thread now — no
-    # user-visible latency, and the LS DB stays clean for the next
-    # warmup that does happen.
-    import threading as _threading_bg
-    def _bg_ls_cleanup():
-        try:
-            n = _ls_cleanup_stale_helpers()
-            if n:
-                log.info(f"bg: unregistered {n} stale Launch Services entries")
-        except Exception as exc:
-            log.warning(f"bg LS cleanup failed: {exc}")
-    _threading_bg.Thread(target=_bg_ls_cleanup, daemon=True, name="ls-cleanup").start()
+    # Background LS-cleanup (sole cleanup now — preflight never blocks on it).
+    _kick_bg_ls_cleanup(log)
 
     # Build meeting record up-front — URL is known, no meet.new resolution
     # gymnastics needed. The transcript MCP server (spawned by claude via
@@ -1555,6 +1460,10 @@ def _run_wiretap(url):
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     log = logging.getLogger("operator")
+
+    # Sole LS cleanup (preflight no longer does it synchronously) — sweeps
+    # during the join, before the live audio helper creates its tap.
+    _kick_bg_ls_cleanup(log)
 
     from _1_800_operator.bridges import claude as claude_bridge
     from _1_800_operator.connectors.attach_adapter import AttachAdapter, DialAttachError

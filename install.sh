@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.44}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.45}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -417,8 +417,11 @@ PYEOF
       }
 
       # Surface both TCC dialogs and return the instant the user answers
-      # both. Mirrors __main__._run_audio_tcc_warmup (see
-      # debug/14_36_tcc_warmup_timing_spike/). Two load-bearing choices:
+      # both. This blocking warmup is correct HERE — install is the explicit
+      # step where the user expects to grant perms. (The dial/wiretap runtime
+      # path does NOT block on this; it defers the dialogs to the live audio
+      # helper post-join — see __main__._preflight_audio_helper_tcc.)
+      # See debug/14_36_tcc_warmup_timing_spike/. Two load-bearing choices:
       #   - launch the helper via `spawn_disclaimed`, NOT `open -W`: under
       #     LaunchServices the mic requestAccess completion lands on the
       #     helper's blocked main queue, so the mic leg burns its full 60s
