@@ -5,10 +5,6 @@
     "helper": "0.1.30",
     "aec3": "0.1.30"
   },
-  "wheel": {
-    "url": "https://github.com/1-800-operator/operator/releases/download/v0.1.40/1_800_operator-0.1.40-py3-none-any.whl",
-    "sha256": "8af2532ab9de2af44ef5eb946f5612e4b421c62a3546316ee14a0a4217e7fbae"
-  },
   "_doc": {
     "what": "Launch-time self-update manifest. operator dial/wiretap fetches this over HTTPS from raw.githubusercontent.com and, if a newer WHEEL is published, swaps just the wheel and re-execs. See src/_1_800_operator/pipeline/selfupdate.py.",
     "release_process": "On each CLI release: (1) tag vX.Y.Z, (2) optionally attach a prebuilt wheel asset + its sha256 under `wheel`, (3) set ref + components.wheel here on main. The client rolls forward to it on the next launch. Rollback = revert this file on main; the next launch rolls forward to the good version.",
