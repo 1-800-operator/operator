@@ -369,43 +369,21 @@ func buildSystemTap() -> Bool {
     desc.name = "OperatorAudioCapture"
     desc.isPrivate = true
 
-    // 2. Create the tap. This is where the kTCCServiceAudioCapture dialog
-    //    surfaces on first call when permission is not yet determined.
-    //    The call returns ~immediately regardless — the dialog is async.
+    // 2. Create the tap. NOTE (S253): contrary to a long-standing assumption,
+    //    this does NOT surface the kTCCServiceAudioCapture dialog — creating
+    //    the tap returns a valid tapID even when permission is not_determined
+    //    (reproduced: "tap created" then a 60s wait that never resolves). The
+    //    prompt fires only when the tap is actually CONSUMED — i.e. once the
+    //    aggregate device + IOProc are STARTED (AudioDeviceStart below). So we
+    //    must NOT wait for the grant here: that deadlocked (the grant can't
+    //    arrive until the prompt fires, and the prompt can't fire until we
+    //    start consuming). The grant-wait now lives after AudioDeviceStart.
     let createStatus = AudioHardwareCreateProcessTap(desc, &sysTapID)
     if createStatus != noErr {
         fputs("operator-audio-capture: FATAL — AudioHardwareCreateProcessTap failed: \(createStatus). Audio Capture permission may be denied.\n", stderr)
         return false
     }
     fputs("operator-audio-capture: tap created (tapID=\(sysTapID))\n", stderr)
-
-    // 2.25. If we entered with not_determined, the dialog just fired async.
-    //       Poll TCCAccessPreflight up to 60 s to wait for the user's click
-    //       BEFORE we proceed — otherwise the install.sh / __main__ warmup
-    //       flow (which invokes the helper via `open -W -n -a` and waits
-    //       for it to exit) would return before the user has had a
-    //       realistic chance to click Allow, and the post-warmup PROBE
-    //       would falsely report not_determined.
-    //
-    //       Same 60 s window as the mic-permission semaphore wait above.
-    //       Skipped on the fast path (already ok) and on explicit deny.
-    if initialAudioStatus == "not_determined" {
-        fputs("operator-audio-capture: waiting for Audio Capture grant (up to 60s)\n", stderr)
-        let deadline = Date().addingTimeInterval(60)
-        while tccAudioCaptureStatus() == "not_determined" && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.5)
-        }
-        let resolved = tccAudioCaptureStatus()
-        fputs("operator-audio-capture: Audio Capture grant resolved: \(resolved)\n", stderr)
-        if resolved == "denied" {
-            // Tap will fail to deliver any audio. Tear down and let the
-            // mic-only path proceed.
-            AudioHardwareDestroyProcessTap(sysTapID)
-            sysTapID = kAudioObjectUnknown
-            fputs("operator-audio-capture: System Audio Recording denied — system stream disabled\n", stderr)
-            return false
-        }
-    }
 
     // 2.5. Query the tap's stream format so the IOProc converter can be
     //      built without guesswork. Currently 48kHz Float32 mono on M-series;
@@ -578,6 +556,28 @@ func buildSystemTap() -> Bool {
         return false
     }
     fputs("operator-audio-capture: [S] system-audio tap capturing\n", stderr)
+
+    // The kTCCServiceAudioCapture prompt fires HERE — on first consumption of
+    // the tap (the AudioDeviceStart above), not on tap creation. So this is
+    // where we wait for the user's grant (up to 60s), with the pipeline live so
+    // the prompt is actually shown and audio flows the instant they click.
+    // Skipped on the fast path (already granted). install.sh's warmup detects
+    // the grant via a fresh --probe; this in-process wait additionally handles
+    // the deny case by tearing the tap back down.
+    if initialAudioStatus == "not_determined" {
+        fputs("operator-audio-capture: waiting for Audio Capture grant (up to 60s)\n", stderr)
+        let deadline = Date().addingTimeInterval(60)
+        while tccAudioCaptureStatus() == "not_determined" && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        let resolved = tccAudioCaptureStatus()
+        fputs("operator-audio-capture: Audio Capture grant resolved: \(resolved)\n", stderr)
+        if resolved == "denied" {
+            teardownSystemTap()
+            fputs("operator-audio-capture: System Audio Recording denied — system stream disabled\n", stderr)
+            return false
+        }
+    }
     return true
 }
 
