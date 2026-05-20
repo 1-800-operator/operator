@@ -114,6 +114,70 @@ yet — see Follow-ups.)
 
 ---
 
+## Maintaining the branded browser (`Operator Browser.app`)
+
+Since v0.1.47, dial launches a re-branded, ad-hoc-signed copy of the user's
+Chrome (operator icon + name) generated locally by
+`pipeline/branded_browser.py` (`_build()`). It **re-bakes itself when Chrome
+updates** (version-drift check in `ensure_branded_browser`), so routine Chrome
+updates need **no action**. The one thing that needs you: when Chrome
+*restructures its bundle*, the bake recipe breaks. This is reactive — the spike
+write-up `debug/14_37_branded_chrome_spike/FINDINGS.md` has the full rationale
+for every step.
+
+**How you'll know it broke.** Failure is **silent and safe**: `_build()` (or
+the resulting app) fails → `ensure_branded_browser()` returns None → operator
+falls back to **system Chrome**. So the symptom is "the dial window went back to
+the plain Chrome icon." Confirm in the log:
+```bash
+grep "branded_browser\|branded browser unavailable" /tmp/operator.log
+```
+(`build/re-bake failed …` or `branded browser unavailable — using system
+Chrome`). Users keep working (degraded to the two-Chromes papercut), so there's
+no fire — patch on your normal cadence.
+
+**How to reproduce + locate the break.** Build directly and read the error:
+```bash
+rm -rf ~/.operator/bin/"Operator Browser.app"
+PYTHONPATH=src python -c "import logging;logging.basicConfig(level=logging.INFO); \
+  from _1_800_operator.pipeline.branded_browser import _build; print(_build())"
+```
+The likely culprits, each hardcoded in `_build()` and each a known Chrome
+moving part:
+- **Helper apps renamed / added** → update the `Helpers/…` names (Renderer, GPU,
+  Helper, Alerts) + the standalone-exec list (`chrome_crashpad_handler`, …).
+- **New entitlement required to launch** → add it to `_ENT_MAIN` / `_ENT_JIT` /
+  `_ENT_HELPER`. (`disable-library-validation` on every exec is the load-bearing
+  one for ad-hoc; `allow-jit` on Renderer/GPU is what V8 needs.)
+- **Framework version-dir layout changed** → fix the `Versions/Current`
+  resolution + stale-version pruning.
+- **Icon back to Chrome's** → Chrome changed its icon plumbing; re-check the
+  `CFBundleIconName` removal vs `app.icns` (asset catalog `Assets.car`
+  overrides the legacy icon).
+- **Keychain dialogs return** → the launch flag `--use-mock-keychain` (in
+  `attach_adapter._launch_dial_chrome`) regressed or Chrome changed keychain
+  usage.
+
+**How to verify a fix** (mirrors the spike — don't trust the file on disk):
+```bash
+APP=~/.operator/bin/"Operator Browser.app"
+codesign --verify --deep --strict "$APP"          # signature consistent
+open -na "$APP" --args --remote-debugging-port=9333 "--remote-allow-origins=*" \
+  --user-data-dir=/tmp/bb --no-first-run --use-mock-keychain about:blank
+curl -s localhost:9333/json/version                # launches + DevTools up (V8 ok)
+# WebGL renderer must be hardware ("ANGLE Metal …"), not "SwiftShader"
+# OS-resolved icon must be operator's (NSWorkspace.iconForFile_, not the .icns file)
+```
+Run `tests/test_branded_browser.py` for the drift/fallback logic.
+
+**How it ships.** Wheel-only change (the recipe lives in the Python package) —
+ship via the normal wheel-release flow above. **Do NOT bump
+`components.helper`/`components.aec3`** (the Swift helper + aec3 are untouched).
+No fresh notarization: the branded copy is ad-hoc signed on the *user's*
+machine at build time, so there's nothing to notarize on our side.
+
+---
+
 ## Gotchas (learned the hard way — S251)
 
 1. **CDN propagation lag.** `raw.githubusercontent.com` caches the manifest for
