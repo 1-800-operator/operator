@@ -85,7 +85,7 @@ jq -c 'select(.kind=="caption")|{speaker,text}' ~/.operator/history/<slug>_<date
   by design. Co-located people sharing your mic can't be split (no per-tile
   DOM signal); that's out of scope.
 
-## 9. AEC pre-shift — PASS (validated S250 morning meeting) ✓
+## 9. AEC pre-shift — CLOSED (controlled test, S252) ✓✓
 
 *The audit (H-8/H-23) flagged that AEC3's 150ms pre-shift (baked into
 the Rust `aec3` binary) could mangle clean mic input on built-in
@@ -113,4 +113,14 @@ Either way, no open risk. If you ever want a belt-and-suspenders close:
 confirmed built-in *output* + someone talking while you talk → confirm
 `[M]` captions stay clean (`OPERATOR_AUDIO_DEBUG=1` dumps the `[M]` WAVs
 to listen for artifacts).
+
+**Belt-and-suspenders close (S252):** ran exactly that controlled test —
+`wos-ioww-qeg`, debug mode, a remote speaker (phone) **in another room** so
+their voice could reach the Mac *only* via the built-in speakers, then a
+local speaker at the dial Mac. Raw corpus
+(`debug/14_37_aec_tune/FINDINGS.md`): while the remote's audio played out the
+speakers at **S rms 0.10–0.25**, the mic captured **0.001 — flat silence**.
+There is **no speaker→mic echo** on this hardware at all (the Mac's built-in
+mic/speaker hardware AEC already handles it), so the 150ms pre-shift is moot —
+nothing reaches the mic to mis-align. H-23/H-8 is closed; no fix needed.
 

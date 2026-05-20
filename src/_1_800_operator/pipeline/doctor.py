@@ -384,27 +384,46 @@ _TCC_STATUS_DETAIL = {
 
 
 def _probe_audio_helper() -> dict[str, str] | None:
-    """Run the helper with --probe; return parsed status dict or None on failure."""
+    """Run the helper with --probe (DISCLAIMED) and return its parsed status.
+
+    Uses `spawn_disclaimed` — NOT a plain subprocess — so the probe answers
+    against the helper bundle's own TCC identity (com.1-800-operator.audio-
+    capture), not the responsible-process chain of whatever shell/IDE ran
+    `operator doctor`. A plain subprocess makes TCCAccessPreflight +
+    AVCaptureDevice.authorizationStatus resolve against that parent, so doctor
+    reports "denied" for a helper that is actually granted whenever it's run
+    from an ungranted terminal/IDE — even though dial works fine (the live
+    path already disclaims). Doctor must match the runtime path or it lies.
+    See memory project_tcc_responsibility_chain_attribution and
+    __main__._probe_helper_tcc (the same disclaimed probe).
+    """
     helper = _audio_helper()
     if helper is None:
         return None
     try:
         # Minimal env — the helper has no auth needs and shouldn't see
         # the user's shell secrets. See _disclaimed_spawn.minimal_helper_env.
-        from _1_800_operator.pipeline._disclaimed_spawn import minimal_helper_env
-        r = subprocess.run(
-            [str(helper), "--probe"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=minimal_helper_env(),
+        from _1_800_operator.pipeline._disclaimed_spawn import (
+            minimal_helper_env,
+            spawn_disclaimed,
         )
-    except (subprocess.TimeoutExpired, OSError):
+        p = spawn_disclaimed([str(helper), "--probe"], env=minimal_helper_env())
+        try:
+            out = p.stdout.read(4096).decode("utf-8", errors="replace").strip()
+            p.wait(timeout=5)
+        finally:
+            if p.poll() is None:
+                try:
+                    p.kill()
+                    p.wait(timeout=2)
+                except Exception:
+                    pass
+    except OSError:
         return None
-    if r.returncode != 0:
+    if not out:
         return None
     try:
-        return json.loads(r.stdout.strip())
+        return json.loads(out)
     except json.JSONDecodeError:
         return None
 
@@ -663,7 +682,7 @@ def _check_microphone(probe: dict[str, str] | None) -> CheckResult:
         detail=_TCC_STATUS_DETAIL.get(status, status),
         fix=(
             "System Settings → Privacy & Security → Microphone → "
-            "enable for your terminal app, then quit and relaunch it"
+            "enable 'Operator'"
         ),
     )
 
