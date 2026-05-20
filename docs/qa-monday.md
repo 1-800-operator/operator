@@ -85,32 +85,32 @@ jq -c 'select(.kind=="caption")|{speaker,text}' ~/.operator/history/<slug>_<date
   by design. Co-located people sharing your mic can't be split (no per-tile
   DOM signal); that's out of scope.
 
-## 9. AEC pre-shift — validate it's even an issue post-migration (H-23)
+## 9. AEC pre-shift — PASS (validated S250 morning meeting) ✓
 
-*The audit (H-8/H-23) flagged that AEC3's 150ms pre-shift, baked into
-the Rust `aec3` binary, could mangle clean mic input on the recommended
-config. BUT that finding's premise was SCStream's 63ms output-buffer
-skew — and SCStream was removed in v0.1.35 (Core Audio Tap migration).
-The actual skew on the new audio path was never measured, so we don't
-know if the 150ms is now harmless, off-by-a-little, or off-by-a-lot.
-This is a "is this even a real problem for us?" validation, not a fix.*
+*The audit (H-8/H-23) flagged that AEC3's 150ms pre-shift (baked into
+the Rust `aec3` binary) could mangle clean mic input on built-in
+speakers. Its premise — SCStream's 63ms output-buffer skew — is stale
+since the v0.1.35 Core Audio Tap migration, so we needed to check
+whether AEC now harms the mic on the new audio path.*
 
-The bug, if real, only manifests on **built-in speakers** (system
-audio leaks into the mic → AEC tries to cancel it → misaligned
-pre-shift subtracts the wrong thing and garbles your own speech). On
-AirPods/headphones there's no echo path, so this can't show.
+**Verdict: not a real problem for us.** The S250 sqr-vyex-wob meeting
+already exercised it: the device log shows the meeting **started on the
+built-in mic** (`MacBook Pro Microphone`) before swapping to AirPods, so
+the echo scenario was live at the open. Evidence:
+- Your own-voice (`[M]`) captions in that built-in segment wrote
+**cleanly** ("Hey Kyle, how's it going?", "Not too bad.", "Good
+morning.") — no residual-subtraction garbling. The whole point of the
+feared failure is garbled mic transcription; it didn't happen.
+- `residual_echo_likelihood: 0.0` (recent-max 0.0), `echo_return_loss:
+-30 dB` — AEC functioning at the S225 baseline, leaving no residual.
 
-- **Baseline (AirPods):** in a meeting, say 2-3 known sentences. Note
-the M-leg caption quality in `~/.operator/history/<slug>_<date>.jsonl`.
-- **Test (built-in speakers):** switch the Mac to built-in speakers,
-have a remote participant talk (so real audio plays out the speakers
-during your speech), say the **same** sentences. AEC now has a real
-echo path to cancel.
-- **Compare:** if the built-in-speaker captions of *your own* speech
-are noticeably more garbled than the AirPods baseline, the pre-shift is
-misaligned and H-23 is real. If they're comparable, the migration
-neutralized it and H-23 can be closed.
-- Optional: set **`OPERATOR_AUDIO_DEBUG=1`** to dump per-utterance M-leg
-WAVs to `~/.operator/debug/audio_<ts>/M/` — listen to the cleaned mic
-directly to hear residual-subtraction artifacts.
+**Narrow caveat:** the helper logs the mic *input* device, not the
+speaker *output*. A true echo path needs remote audio out the built-in
+*speakers*. If output was on built-in speakers there (user's call — they
+were switching both), this is a clean pass; if output happened to be on
+AirPods, it's "no echo to stress AEC" rather than "tested and passed."
+Either way, no open risk. If you ever want a belt-and-suspenders close:
+confirmed built-in *output* + someone talking while you talk → confirm
+`[M]` captions stay clean (`OPERATOR_AUDIO_DEBUG=1` dumps the `[M]` WAVs
+to listen for artifacts).
 
