@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from _1_800_operator import config
-from _1_800_operator.pipeline.audio import WHISPER_BEAM_SIZE
+from _1_800_operator.pipeline.audio import WHISPER_BEAM_SIZE, _FW_MODEL_REPO, _FW_COMPUTE_TYPE
 from _1_800_operator.pipeline.claude_code_import import _probe_claude_code
 
 CHROME_PATH = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -512,8 +512,8 @@ def _check_faster_whisper_warm() -> CheckResult:
     # faster-whisper writes a download progress bar to fd 2 on first run,
     # so redirect the real file descriptor for the duration of the call.
     print(
-        "    warming faster-whisper-large-v3-turbo "
-        "(1-2s warm cache, up to 100s on first run — downloads ~1.5GB)…",
+        f"    warming {_FW_MODEL_REPO.split('/')[-1]} "
+        "(1-2s warm cache, up to ~40s on first run — downloads ~464MB)…",
         flush=True,
     )
     t0 = time.monotonic()
@@ -524,9 +524,9 @@ def _check_faster_whisper_warm() -> CheckResult:
         os.close(devnull_fd)
         try:
             model = WhisperModel(
-                "deepdml/faster-whisper-large-v3-turbo-ct2",
+                _FW_MODEL_REPO,
                 device="cpu",
-                compute_type="int8",
+                compute_type=_FW_COMPUTE_TYPE,
                 cpu_threads=0,
             )
             segments, _info = model.transcribe(

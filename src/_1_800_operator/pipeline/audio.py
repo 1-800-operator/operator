@@ -16,8 +16,8 @@ real-time — they're queried via the transcript MCP, not consumed live.
 The CTranslate2 generator returned by `model.transcribe()` is not
 thread-safe. Operator runs two AudioProcessors (S leg = system audio,
 M leg = mic) on separate threads. We share a single module-level
-WhisperModel and serialise transcribe calls under a lock. 1.5GB model
-shared across both legs (vs ~3GB if each leg held its own).
+WhisperModel and serialise transcribe calls under a lock. The model is
+shared across both legs (vs double the memory if each leg held its own).
 
 Other dial-only simplifications carried from voice-preserved:pipeline/audio.py:
   - mlx-whisper-only branch removed (this module is the new sole backend)
@@ -83,13 +83,20 @@ WHISPER_HALLUCINATIONS = {
     "the end", "i'm sorry", "sorry",
 }
 
-# faster-whisper-large-v3-turbo via CTranslate2 — same underlying model as
-# the prior mlx-whisper-large-v3-turbo (S231), different inference engine.
-# Bench: 13.7% WER (float32) / 14.4% WER (int8) vs mlx's 13.0% on the same
-# 12-utterance set (within noise). Production pick is int8 — slightly
-# faster wall-clock, +0.7 WER vs float32 (sub-noise), ~4 cores during
-# transcribe on M-series. See debug/14_28_cpu_whisper_spike/.
-_FW_MODEL_REPO = "deepdml/faster-whisper-large-v3-turbo-ct2"
+# faster-whisper-small.en via CTranslate2. English-only because we hardcode
+# language="en" at every transcribe — the .en variant is smaller AND more
+# accurate for English at this param count than the multilingual build.
+# Picked to cut install time: the model is fetched from HuggingFace on first
+# run and was the slow part of setup. small.en is ~464MB vs the prior
+# large-v3-turbo's ~1.5GB (3.2x smaller download). S254 bench on the
+# sqr-vyex-wob_20260520 corpus: 13.9% WER vs turbo over the whole meeting
+# (turbo isn't ground truth — much of that is word-choice on disfluent /
+# overlapping speech; the transcripts read near-identically), and 91% per-word
+# speaker-attribution accuracy vs turbo's 94% (the -3pt cost shows up on hard
+# audio). distil-small.en was smaller still but collapses on long-form audio
+# (transcribed 180/2208 words on the full meeting) — rejected. int8 kept for
+# the wall-clock / memory win. See debug/14_34_audio_replay/model_bench.py.
+_FW_MODEL_REPO = "Systran/faster-whisper-small.en"
 _FW_COMPUTE_TYPE = "int8"
 
 # Module-level singleton + locks. _MODEL_LOAD_LOCK guards lazy instantiation
@@ -114,8 +121,8 @@ _VAD_USE_LOCK = threading.Lock()
 def _get_model():
     """Return the shared WhisperModel, instantiating on first call.
 
-    Cold-cache first call downloads ~1.5GB to ~/.cache/huggingface/ — can
-    take 100s+ on a slow network. Warm-cache load is ~1-2s. Caller pays
+    Cold-cache first call downloads ~464MB to ~/.cache/huggingface/ — can
+    take ~40s on a slow network. Warm-cache load is ~1-2s. Caller pays
     this cost; AudioProcessor.__init__ triggers it so it happens on the
     warming thread, not mid-meeting on the audio thread.
     """
@@ -208,7 +215,7 @@ class AudioProcessor:
         self.tag = tag
         self._tagp = f"[{tag}] " if tag else ""
         # Trigger lazy model loads on the construction thread. First-ever
-        # call downloads whisper (~1.5GB); subsequent constructions are
+        # call downloads whisper (~464MB); subsequent constructions are
         # cheap. Silero is bundled with faster-whisper (~2MB) and loads in
         # ~50ms.
         _get_model()
@@ -227,7 +234,7 @@ class AudioProcessor:
             # until you iterate.
             for _ in segments:
                 pass
-        log.info(f"AudioProcessor: {self._tagp}faster-whisper-large-v3-turbo ready")
+        log.info(f"AudioProcessor: {self._tagp}{_FW_MODEL_REPO.split('/')[-1]} ready")
         self._audio_buffer = b""
         self._audio_lock = threading.Lock()
         self.capturing = False

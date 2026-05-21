@@ -22,7 +22,7 @@ from _1_800_operator.pipeline.whisper_worker import (
 
 def _new_worker_without_models() -> WhisperWorker:
     """Construct a WhisperWorker without triggering AudioProcessor (and
-    therefore without loading the 1.5GB whisper model)."""
+    therefore without loading the whisper model)."""
     w = WhisperWorker.__new__(WhisperWorker)
     w.jsonl_path = Path("/tmp/_test_whisper_worker_logic_unused.jsonl")
     w.mic_label = "user"

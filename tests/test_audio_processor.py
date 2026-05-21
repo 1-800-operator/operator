@@ -235,7 +235,7 @@ def test_shutdown_drains_pending_buffer():
 
 
 if __name__ == "__main__":
-    print("Loading faster-whisper-large-v3-turbo (first run downloads ~1.5GB)…")
+    print("Loading faster-whisper-small.en (first run downloads ~464MB)…")
     test_silence_only_returns_empty()
     test_speech_burst_finalizes_on_silence()
     test_repetition_hallucination_filter()

@@ -842,8 +842,8 @@ class AttachAdapter(MeetingConnector):
         # S244: spawn the whisper_worker subprocess now so its model load
         # runs in parallel with Chrome launch + lobby wait. The spawn
         # itself is fire-and-forget (Popen returns in milliseconds); the
-        # worker process loads faster-whisper-large-v3-turbo (~2s warm
-        # cache, up to ~100s on first run with the 1.5GB download) on its
+        # worker process loads faster-whisper-small.en (~2s warm
+        # cache, up to ~40s on first run with the ~464MB download) on its
         # own. Frames pushed before warmup completes buffer in the worker
         # stdin pipe — no readiness wait needed in main.
         if sys.platform == "darwin" and _resolve_audio_helper() is not None:
