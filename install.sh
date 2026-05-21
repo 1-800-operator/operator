@@ -35,7 +35,7 @@ MIN_PY_MINOR=10
 #
 # Override during pre-release / dev installs:
 #   OPERATOR_INSTALL_REF=main  curl … | bash
-OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.50}"
+OPERATOR_INSTALL_REF="${OPERATOR_INSTALL_REF:-v0.1.51}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
@@ -93,6 +93,41 @@ if [ "${PY_OK}" != "1" ]; then
 fi
 echo
 
+# -- 3.5. Kick off the operator-plugin install in the background -------------
+
+# The plugin (slash commands) install is a pair of `claude plugin` calls that
+# git-clone the marketplace + plugin repos. It needs `claude` on PATH but has
+# ZERO dependency on the operator wheel, so we start it here to overlap the
+# ~11s `uv tool install` below. It is REAPED in step 7 — before any other
+# `claude` CLI call — because two concurrent `claude` invocations would race
+# read-modify-write on ~/.claude config files. Status comes back via a temp
+# file (a backgrounded subshell can't export vars to the parent); output is
+# silenced during the run so it doesn't interleave with the wheel-install
+# progress, and the header + result print at reap time.
+PLUGIN_PID=""
+PLUGIN_STATUS_FILE=""
+if command -v claude >/dev/null 2>&1; then
+  PLUGIN_STATUS_FILE="$(mktemp -t opplugin-XXXXXX)"
+  (
+    # Idempotent: clear any prior state before re-adding. Errors swallowed
+    # because remove/uninstall raise when the target doesn't exist.
+    claude plugin uninstall operator </dev/null >/dev/null 2>&1 || true
+    claude plugin marketplace remove 1-800-operator </dev/null >/dev/null 2>&1 || true
+    # Explicit HTTPS URL (not the owner/repo shorthand) so the marketplace
+    # clone doesn't fall back to SSH on machines without GitHub SSH keys.
+    if claude plugin marketplace add https://github.com/1-800-operator/operator.git </dev/null >/dev/null 2>&1; then
+      if claude plugin install operator@1-800-operator </dev/null >/dev/null 2>&1; then
+        printf 'ok' > "${PLUGIN_STATUS_FILE}"
+      else
+        printf 'install-failed' > "${PLUGIN_STATUS_FILE}"
+      fi
+    else
+      printf 'marketplace-failed' > "${PLUGIN_STATUS_FILE}"
+    fi
+  ) &
+  PLUGIN_PID=$!
+fi
+
 # -- 4. Operator install via uv tool -----------------------------------------
 
 # Pin uv to a >= 3.10 interpreter. If the system Python is too old, this picks
@@ -123,6 +158,59 @@ if [ -x "${PY_IN_TOOL_CV}" ]; then
   fi
 fi
 echo
+
+# -- 4.6. Kick off the aec3 download in the background (macOS) ----------------
+
+# The prebuilt aec3 binary is a ~60s-bounded curl from the GitHub release and
+# has ZERO dependency on the freshly-installed wheel. So we start it here and
+# let it run concurrently with MCP/plugin registration and — the big win —
+# the user-gated audio-helper TCC warmup below (otherwise pure dead time while
+# the user clicks Allow). Step 8.5 reaps this PID and installs what landed (or
+# falls back to a source build). Linux skips — dial/aec3 are mac-only.
+AEC3_DL_PID=""
+if [ "${OS}" = "macos" ]; then
+  BIN_DIR="${HOME}/.operator/bin"
+  mkdir -p "${BIN_DIR}"
+  AEC3_RELEASE_URL="https://github.com/1-800-operator/operator/releases/download/${OPERATOR_INSTALL_REF}/aec3-darwin-universal"
+  AEC3_DEST="${BIN_DIR}/aec3"
+  AEC3_TMP="$(mktemp -t aec3-XXXXXX)"
+  curl -fsSL --max-time 60 -o "${AEC3_TMP}" "${AEC3_RELEASE_URL}" >/dev/null 2>&1 &
+  AEC3_DL_PID=$!
+fi
+
+# -- 4.7. Kick off the speech-to-text model download in the background --------
+
+# faster-whisper's small.en model (~464MB) is fetched from HuggingFace
+# into ~/.cache/huggingface/ on first use. Today it's only pre-fetched by
+# `operator doctor`; otherwise the user eats the ~40s cold download mid-meeting
+# on their first dial. We pull it here instead, in the background, so it
+# overlaps the plugin/aec3 installs and the user-gated TCC warmup below. It
+# needs the wheel (imports faster_whisper from the tool venv) but nothing from
+# `claude`. Step 8.7 reaps it behind a coarse progress bar. Non-fatal: a
+# failure leaves dial running chat-only, exactly as the doctor check documents.
+# mac-only (dial audio is mac-only). The subshell always records the python
+# exit code to a DONE file (even under set -e via `|| rc=$?`) so the reaper can
+# poll for completion without the kill-0-on-a-zombie footgun.
+WHISPER_DL_PID=""
+WHISPER_DL_LOG=""
+WHISPER_DONE_FILE=""
+if [ "${OS}" = "macos" ]; then
+  PY_IN_TOOL_W="$(uv tool dir)/1-800-operator/bin/python"
+  if [ -x "${PY_IN_TOOL_W}" ]; then
+    WHISPER_DL_LOG="$(mktemp -t opwhisper-XXXXXX)"
+    WHISPER_DONE_FILE="$(mktemp -t opwhisperdone-XXXXXX)"  # created empty; stays size-0 until done
+    (
+      rc=0
+      # _get_model() is the SAME canonical loader production + doctor use, so
+      # the repo name / compute type can never drift from a hardcoded copy.
+      "${PY_IN_TOOL_W}" -c \
+        'from _1_800_operator.pipeline.audio import _get_model; _get_model()' \
+        >"${WHISPER_DL_LOG}" 2>&1 || rc=$?
+      printf '%s' "${rc}" > "${WHISPER_DONE_FILE}"
+    ) &
+    WHISPER_DL_PID=$!
+  fi
+fi
 
 # -- 5. Seed ~/.operator/.env ------------------------------------------------
 
@@ -167,6 +255,23 @@ fi
 # after `claude login` lands the registration.
 
 if command -v claude >/dev/null 2>&1; then
+  # Reap the operator-plugin install kicked off in step 3.5 (it ran
+  # concurrently with the wheel install). Reaped HERE — before any other
+  # `claude` CLI call — so two `claude` invocations never race on ~/.claude.
+  if [ -n "${PLUGIN_PID}" ]; then
+    bold "Installing operator plugin (slash commands)..."
+    wait "${PLUGIN_PID}" 2>/dev/null || true
+    PLUGIN_STATUS="$(cat "${PLUGIN_STATUS_FILE}" 2>/dev/null || echo unknown)"
+    rm -f "${PLUGIN_STATUS_FILE}"
+    case "${PLUGIN_STATUS}" in
+      ok)                 info "Installed operator plugin (user-scope). Slash commands /operator:* are now available in Claude Code." ;;
+      marketplace-failed) err "Failed to add operator marketplace — re-run install.sh after the issue is resolved." ;;
+      install-failed)     err "Failed to install operator plugin — re-run install.sh after the issue is resolved." ;;
+      *)                  err "operator plugin install did not complete — re-run install.sh after the issue is resolved." ;;
+    esac
+    echo
+  fi
+
   bold "Registering transcript MCP user-scope..."
   MCP_TOOL_DIR="$(uv tool dir)/1-800-operator"
   MCP_PY_IN_TOOL="${MCP_TOOL_DIR}/bin/python"
@@ -192,8 +297,8 @@ else
   echo
 fi
 
-# -- 7.5. Install operator plugin (user-scope slash commands) ---------------
-
+# -- 7.5. Operator plugin (slash commands) ----------------------------------
+#
 # The plugin ships /operator:dial, /operator:status, /operator:hangup,
 # /operator:doctor — the user-facing surface that lets you type slash
 # commands into a Claude Code session. Without it, the operator CLI works
@@ -204,32 +309,9 @@ fi
 #
 # The plugin is sourced from a self-hosted marketplace.json at the root of
 # this CLI's GitHub repo, which references github.com/1-800-operator/operator-plugin.
-# Both subcommands run non-interactively (stdin redirected from /dev/null)
-# and write to user-scope settings, so the plugin is enabled in every
-# subsequent Claude Code session until the user uninstalls it. Soft-skip
-# if `claude` is missing (step 7's warning already covered that case).
-
-if command -v claude >/dev/null 2>&1; then
-  bold "Installing operator plugin (slash commands)..."
-  # Idempotent: clear any prior state before re-adding. Errors swallowed
-  # because remove/uninstall raise when the target doesn't exist.
-  claude plugin uninstall operator </dev/null >/dev/null 2>&1 || true
-  claude plugin marketplace remove 1-800-operator </dev/null >/dev/null 2>&1 || true
-  # Use explicit HTTPS URL (not the `owner/repo` shorthand) so the
-  # marketplace clone doesn't fall back to SSH on machines without
-  # GitHub SSH keys. New users without a configured ssh identity were
-  # hitting `git@github.com: Permission denied (publickey)` here.
-  if claude plugin marketplace add https://github.com/1-800-operator/operator.git </dev/null >/dev/null; then
-    if claude plugin install operator@1-800-operator </dev/null >/dev/null; then
-      info "Installed operator plugin (user-scope). Slash commands /operator:* are now available in Claude Code."
-    else
-      err "Failed to install operator plugin — re-run install.sh after the issue is resolved."
-    fi
-  else
-    err "Failed to add operator marketplace — re-run install.sh after the issue is resolved."
-  fi
-  echo
-fi
+# Its install is kicked off in step 3.5 (background, overlapping the wheel
+# install) and reaped at the top of step 7 — see those blocks. Nothing to do
+# here; this header is left as a signpost in the install ordering.
 
 # -- 7.6. Allowlist operator commands for desktop-app skill dispatch --------
 
@@ -556,14 +638,15 @@ if [ "${OS}" = "macos" ]; then
   bold "Installing aec3 (speaker-bleed cleaner)..."
   TOOL_DIR="$(uv tool dir)/1-800-operator"
   PY_IN_TOOL="${TOOL_DIR}/bin/python"
-  BIN_DIR="${HOME}/.operator/bin"
-  mkdir -p "${BIN_DIR}"
+  # BIN_DIR + AEC3_RELEASE_URL/AEC3_DEST/AEC3_TMP were set in step 4.6, and the
+  # download has been running in the background since then. Reap it now (returns
+  # immediately if it already finished) and validate what landed.
+  AEC3_DL_OK=0
+  if [ -n "${AEC3_DL_PID}" ]; then
+    wait "${AEC3_DL_PID}" 2>/dev/null && AEC3_DL_OK=1 || AEC3_DL_OK=0
+  fi
 
-  AEC3_RELEASE_URL="https://github.com/1-800-operator/operator/releases/download/${OPERATOR_INSTALL_REF}/aec3-darwin-universal"
-  AEC3_DEST="${BIN_DIR}/aec3"
-  AEC3_TMP="$(mktemp -t aec3-XXXXXX)"
-
-  if curl -fsSL --max-time 60 -o "${AEC3_TMP}" "${AEC3_RELEASE_URL}" 2>/dev/null && \
+  if [ "${AEC3_DL_OK}" = "1" ] && [ -s "${AEC3_TMP}" ] && \
      file "${AEC3_TMP}" | grep -q "Mach-O"; then
     chmod +x "${AEC3_TMP}"
     mv "${AEC3_TMP}" "${AEC3_DEST}"
@@ -598,6 +681,60 @@ if [ "${OS}" = "macos" ]; then
   echo
 fi
 
+# -- 8.7. Finish the speech-to-text model download (coarse progress bar) ------
+
+# Reap the background download kicked off in step 4.7. It has been running
+# during the plugin/aec3 installs + the user-gated TCC warmup, so it's often
+# already done by now (warm cache or fast network) — in which case this returns
+# immediately. Otherwise we render an APPROXIMATE bar by polling bytes-on-disk
+# in the HF cache against the model's ~464MB total. We don't know the exact
+# byte count a priori, so the bar caps at 99% until the process actually exits
+# (then jumps to ✓). Animated only on a real terminal; piped output (CI logs)
+# just polls silently. Non-fatal — a failure leaves dial chat-only.
+if [ -n "${WHISPER_DL_PID}" ]; then
+  bold "Speech-to-text model (small.en, ~464MB)..."
+  if [ -n "${HUGGINGFACE_HUB_CACHE:-}" ]; then
+    WHISPER_MODEL_DIR="${HUGGINGFACE_HUB_CACHE}/models--Systran--faster-whisper-small.en"
+  else
+    WHISPER_MODEL_DIR="${HF_HOME:-${HOME}/.cache/huggingface}/hub/models--Systran--faster-whisper-small.en"
+  fi
+  WHISPER_TOTAL_KB=474720   # ~464MB; coarse denominator (bar caps at 99% until exit)
+  WHISPER_BAR_WIDTH=24
+  whisper_bar_drawn=0
+  # Poll the DONE file (size-0 until the subshell records the exit code).
+  while [ ! -s "${WHISPER_DONE_FILE}" ]; do
+    if [ -t 1 ]; then
+      have_kb=0
+      if [ -d "${WHISPER_MODEL_DIR}" ]; then
+        have_kb="$(du -sk "${WHISPER_MODEL_DIR}" 2>/dev/null | cut -f1)" || have_kb=0
+        [ -z "${have_kb}" ] && have_kb=0
+      fi
+      pct=$(( have_kb * 100 / WHISPER_TOTAL_KB ))
+      if [ "${pct}" -gt 99 ]; then pct=99; fi
+      filled=$(( pct * WHISPER_BAR_WIDTH / 100 ))
+      empty=$(( WHISPER_BAR_WIDTH - filled ))
+      bar_filled="$(printf '%*s' "${filled}" '' | tr ' ' '#')"
+      bar_empty="$(printf '%*s' "${empty}" '' | tr ' ' '-')"
+      printf '\r  [%s%s] %3d%%  (%d/%d MB)' "${bar_filled}" "${bar_empty}" "${pct}" "$(( have_kb / 1024 ))" "$(( WHISPER_TOTAL_KB / 1024 ))"
+      whisper_bar_drawn=1
+    fi
+    sleep 0.5
+  done
+  if [ "${whisper_bar_drawn}" = 1 ]; then printf '\r\033[K'; fi
+  WHISPER_RC="$(cat "${WHISPER_DONE_FILE}" 2>/dev/null || echo 1)"
+  wait "${WHISPER_DL_PID}" 2>/dev/null || true   # reap the zombie cleanly
+  rm -f "${WHISPER_DONE_FILE}"
+  if [ "${WHISPER_RC}" = "0" ]; then
+    info "✓ model ready (captions enabled)"
+    rm -f "${WHISPER_DL_LOG}"
+  else
+    warn "Model download did not finish — dial will run chat-only (no captions)."
+    warn "  It retries on your first meeting, or run 'operator doctor' to fetch it now."
+    warn "  Log: ${WHISPER_DL_LOG}"
+  fi
+  echo
+fi
+
 # -- 9. Sendoff --------------------------------------------------------------
 
 # Detect whether the user's shells already have ~/.local/bin on PATH (so
@@ -619,4 +756,3 @@ printf '    %s\033[1;95moperator doctor\033[0m\n' "${PATH_PREFIX}"
 echo
 printf '  Open Claude Code and send it into a meeting:\n'
 printf '    \033[1;95m/operator:dial\033[0m \033[2m<meet-url>\033[0m\n'
-printf '    \033[2m(the operator plugin is already enabled — your meeting brain inherits this Claude Code session)\033[0m\n'
