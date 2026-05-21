@@ -1,0 +1,14 @@
+# LABEL SHEET — sqr-vyex-wob_20260520  winA_128-153  (window 128-153s)
+# Listen to winA_128-153.wav. Speakers in this meeting (remote/system leg):
+#   Kyle Butler, Matthew Gorski, Michael Powell
+# Drop a [Name] marker at the START of the transcript and again
+# EVERY time the speaker changes. Exact name spelling matters.
+# If a word/chunk is unintelligible, just leave it under whoever's
+# speaking. Don't worry about whisper's transcription errors — we
+# only need the speaker boundaries, not perfect text.
+# Example:  [Matthew Gorski] file add folder right [Kyle Butler] exactly yeah ...
+#
+[Kyle Butler] That's all I know.
+[Matthew Gorski] I think I had a full sentence in there at some point. I took a couple classes I think by the school.
+[Michael Powell] Oh cool.
+[Matthew Gorski] Yeah.

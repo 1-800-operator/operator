@@ -72,8 +72,21 @@ BLEED_DEDUPE_SIMILARITY = 0.85
 # runs, a lone speaker flip shorter than this AND flanked by the same speaker
 # on both sides is re-absorbed into that speaker. Removes fragmentation from a
 # single mis-timed word or a sub-half-second halo blip during cross-talk.
-# Validated at 0.5s on the S250 replay corpus (debug/14_34_audio_replay).
+# Validated at 0.5s on the S250 replay corpus (debug/14_34_audio_replay), and
+# re-confirmed S253 against 235 hand-labeled words: 0.3-0.8s all tie at the
+# optimum (+0.5pt over no smoothing); 1.2s over-smooths (absorbs real turns).
 WORD_GROUP_SMOOTH_SECONDS = 0.5
+
+# Meet's speaking-ring (BlxGDf) lights up ~100ms AFTER speech actually starts
+# (UI render + observer drain latency), so whisper word timestamps LEAD the halo
+# timeline. At a speaker handoff the trailing word of one turn lands in the
+# moment the ring has already flipped, and gets sliced onto the wrong speaker —
+# the source of both fragmentation and cross-talk mis-attribution. Nudge word
+# times forward by this much before overlap attribution to realign them.
+# S253: validated against 235 hand-labeled words across 6 cross-talk windows —
+# lifts per-word accuracy 91.9% -> 94.0% pooled; plateau +50..+150ms; nothing in
+# +50..+300ms is ever worse than 0. (debug/14_34_audio_replay/offset_sweep.py)
+HALO_LAG_OFFSET_SECONDS = 0.10
 
 
 def _normalize_for_dedupe(text: str) -> str:
@@ -328,8 +341,9 @@ class WhisperWorker:
         split into multiple captions, each stamped with its first word's
         wall-clock (which also drops the post-transcribe chunk_end bias)."""
         intervals = self._build_intervals()
+        off = HALO_LAG_OFFSET_SECONDS
         for w in words:
-            w["speaker"] = self._max_overlap_speaker(intervals, w["w0"], w["w1"], default)
+            w["speaker"] = self._max_overlap_speaker(intervals, w["w0"] + off, w["w1"] + off, default)
         groups = _group_words(words, WORD_GROUP_SMOOTH_SECONDS)
         if len(groups) <= 1:
             speaker = groups[0][0] if groups else default

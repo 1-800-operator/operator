@@ -1,0 +1,16 @@
+# LABEL SHEET — sqr-vyex-wob_20260520  winE_525-550  (window 525-550s)
+# Listen to winE_525-550.wav. Speakers in this meeting (remote/system leg):
+#   Kyle Butler, Matthew Gorski, Michael Powell
+# Drop a [Name] marker at the START of the transcript and again
+# EVERY time the speaker changes. Exact name spelling matters.
+# If a word/chunk is unintelligible, just leave it under whoever's
+# speaking. Don't worry about whisper's transcription errors — we
+# only need the speaker boundaries, not perfect text.
+# Example:  [Matthew Gorski] file add folder right [Kyle Butler] exactly yeah ...
+#
+[ michael] so
+kyle yeah 
+michael yeah 
+kyle totally 
+michael cool. oh nice 
+kyle yeah it might even be a note i guess just on that thought for the front-end team as they like dig into more back-end stuff um that that's a way that they can help bridge the gap for themselves i guess as opposed to just opening the folder for the back-end repo that they're i'm

@@ -1,0 +1,18 @@
+# LABEL SHEET — sqr-vyex-wob_20260520  winB_585-612  (window 585-612s)
+# Listen to winB_585-612.wav. Speakers in this meeting (remote/system leg):
+#   Kyle Butler, Matthew Gorski, Michael Powell
+# Drop a [Name] marker at the START of the transcript and again
+# EVERY time the speaker changes. Exact name spelling matters.
+# If a word/chunk is unintelligible, just leave it under whoever's
+# speaking. Don't worry about whisper's transcription errors — we
+# only need the speaker boundaries, not perfect text.
+# Example:  [Matthew Gorski] file add folder right [Kyle Butler] exactly yeah ...
+#
+[Matthew Gorski] file add folder. 
+[Kyle Butler] Right, exactly. 
+[Matthew Gorski] Yeah okay. 
+[Kyle Butler] Yeah.
+[Matthew Gorski] Cool.
+[Kyle Butler] Few options that seem related. 
+[Matthew Gorski] Yeah okay cool so for example if i'm just in a front-end repo i can add a folder to this workspace of the back-end repo and then all of a sudden have the back-end context for the agent 
+[Kyle Butler] Yeah exactly you can even give it the context if you need to like um
